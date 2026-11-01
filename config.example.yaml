@@ -1,0 +1,21 @@
+# LitePay 启动配置
+#
+# 这里只放启动必需项。支付平台、收款 UID、订单和回调
+# 都保存在 SQLite 中，首次启动后请在 /admin/settings 配置。
+
+server:
+  addr: "0.0.0.0:8080"
+  base_url: "http://localhost:8080"
+  # 生产环境只填写实际反向代理的固定 IP/CIDR；默认忽略转发 IP 头。
+  # Caddy 容器重建后如 IP 改变，必须同步更新此值。
+  trusted_proxies: []
+
+database:
+  path: "./data/litepay.db"
+
+admin:
+  username: "admin"
+  password: ""
+  session_hours: 12
+
+log_level: "info"

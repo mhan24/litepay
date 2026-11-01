@@ -1,0 +1,96 @@
+{{define "theme_head"}}
+<script>
+(function () {
+  try {
+    var saved = localStorage.getItem('litepay-theme');
+    var dark = saved === 'dark' || (!saved && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  } catch (e) {
+    document.documentElement.dataset.theme = 'light';
+  }
+})();
+</script>
+{{end}}
+
+{{define "theme_css"}}
+<style>
+  :root{
+    color-scheme:light;
+    --font-sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Segoe UI,Roboto,"Microsoft YaHei",sans-serif;
+    --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --bg:#f4f3f0;--bg-soft:#eeece7;--surface:#fff;--surface-2:#f8f7f4;--surface-3:#efede8;
+    --text:#181816;--muted:#6f6d66;--faint:#98958d;--line:#e4e1da;--line-strong:#d1cdc3;
+    --accent:#24231f;--accent-ink:#fff;--accent-soft:#f0eee9;--accent-line:#d9d4ca;
+    --ok:#14764a;--ok-soft:#eaf7f0;--ok-line:#b9dfcc;
+    --warn:#9a6200;--warn-soft:#fff8e8;--warn-line:#f1dfb2;
+    --danger:#b42318;--danger-soft:#fff3f1;--danger-line:#f2cac4;
+    --focus:#3f6fd8;--overlay:rgba(24,24,22,.46);
+    --radius-sm:8px;--radius-md:12px;--radius-lg:18px;--radius-xl:24px;
+    --shadow:0 1px 2px rgba(28,26,21,.035),0 22px 64px -38px rgba(28,26,21,.35);
+    --motion-fast:140ms;--motion:220ms;
+  }
+  :root[data-theme=dark]{
+    color-scheme:dark;
+    --bg:#11110f;--bg-soft:#171714;--surface:#1b1b18;--surface-2:#20201c;--surface-3:#292822;
+    --text:#f2f0e9;--muted:#aaa79e;--faint:#7d7a72;--line:#2d2c27;--line-strong:#403e36;
+    --accent:#f2f0e9;--accent-ink:#171714;--accent-soft:#272620;--accent-line:#48453a;
+    --ok:#61d69a;--ok-soft:#152a20;--ok-line:#28503b;
+    --warn:#efbd59;--warn-soft:#2a2314;--warn-line:#544321;
+    --danger:#ff8b80;--danger-soft:#2c1917;--danger-line:#60302b;
+    --focus:#8aadff;--overlay:rgba(0,0,0,.7);
+    --shadow:0 1px 1px rgba(0,0,0,.18),0 24px 70px -36px rgba(0,0,0,.8);
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  html{min-height:100%;background:var(--bg)}
+  body{margin:0;min-height:100dvh;background:var(--bg);color:var(--text);font-family:var(--font-sans);
+    font-size:14px;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+  button,input,select,textarea{font:inherit}
+  a{color:inherit}
+  button,a{-webkit-tap-highlight-color:transparent}
+  :focus-visible{outline:2px solid var(--focus);outline-offset:3px}
+  ::selection{background:var(--accent);color:var(--accent-ink)}
+  .mono{font-family:var(--font-mono)}
+  .muted{color:var(--muted)}
+  .theme-toggle{width:36px;height:36px;flex:0 0 36px;display:inline-flex;align-items:center;justify-content:center;
+    border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--muted);cursor:pointer;
+    transition:background var(--motion-fast),color var(--motion-fast),border-color var(--motion-fast)}
+  .theme-toggle:hover{background:var(--surface-2);color:var(--text);border-color:var(--line-strong)}
+  .theme-toggle svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  :root[data-theme=light] .icon-moon,:root[data-theme=dark] .icon-sun{display:none}
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+      transition-duration:.01ms!important;scroll-behavior:auto!important}
+  }
+</style>
+{{end}}
+
+{{define "theme_toggle"}}
+<button class="theme-toggle" type="button" data-theme-toggle aria-label="切换深色模式" title="切换深色模式">
+  <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.2A8.5 8.5 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2Z"/></svg>
+  <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+</button>
+{{end}}
+
+{{define "theme_script"}}
+<script>
+(function () {
+  var root = document.documentElement;
+  function apply(theme) {
+    root.dataset.theme = theme;
+    document.querySelectorAll('[data-theme-toggle]').forEach(function (btn) {
+      var next = theme === 'dark' ? '浅色' : '深色';
+      btn.setAttribute('aria-label', '切换到' + next + '模式');
+      btn.setAttribute('title', '切换到' + next + '模式');
+    });
+  }
+  apply(root.dataset.theme === 'dark' ? 'dark' : 'light');
+  document.querySelectorAll('[data-theme-toggle]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+      apply(next);
+      try { localStorage.setItem('litepay-theme', next); } catch (e) {}
+    });
+  });
+})();
+</script>
+{{end}}

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>订单 · LitePay 管理后台</title>
+{{template "theme_head" .}}
+{{template "admin_css" .}}
+</head>
+<body>
+{{template "admin_nav" .}}
+<main class="shell">
+  {{template "admin_flash" .}}
+  <header class="pagehead">
+    <div><h1>订单</h1><p class="sub">共 {{.Total}} 笔，第 {{.Page}} / {{.TotalPages}} 页</p></div>
+  </header>
+
+  <section class="card">
+    <form class="filters" method="get" action="/admin/orders">
+      <select name="status" aria-label="订单状态">
+        <option value="" {{if eq .Status ""}}selected{{end}}>全部状态</option>
+        <option value="PENDING" {{if eq .Status "PENDING"}}selected{{end}}>待选择平台</option>
+        <option value="READY" {{if eq .Status "READY"}}selected{{end}}>待支付</option>
+        <option value="PAID" {{if eq .Status "PAID"}}selected{{end}}>已支付</option>
+        <option value="EXPIRED" {{if eq .Status "EXPIRED"}}selected{{end}}>已过期</option>
+        <option value="CANCELED" {{if eq .Status "CANCELED"}}selected{{end}}>已取消</option>
+        <option value="SUPERSEDED" {{if eq .Status "SUPERSEDED"}}selected{{end}}>已替代</option>
+      </select>
+      <input class="grow" type="search" name="q" value="{{.Keyword}}" placeholder="订单编号、商户订单号或平台交易号">
+      <button class="btn btn-primary btn-sm" type="submit">筛选</button>
+      {{if or .Keyword .Status}}<a class="btn btn-ghost btn-sm" href="/admin/orders">清除条件</a>{{end}}
+    </form>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>下单时间</th><th>商户订单号</th><th>应付金额</th><th>状态</th><th>结果通知</th><th>平台交易号</th><th>操作</th></tr></thead>
+        <tbody>
+        {{range .Orders}}
+          <tr>
+            <td class="muted mono">{{.CreatedAt.Format "01-02 15:04:05"}}</td>
+            <td>
+              <a href="/admin/orders/{{.TradeNo}}" class="mono">{{.OutTradeNo}}</a>
+              {{if .Name}}<div class="muted" style="font-size:10.5px;margin-top:2px">{{.Name}}</div>{{end}}
+            </td>
+            <td class="num">{{fmtOrderAmount .PayAmount .AmountPrecision}} <span class="muted" style="font-weight:400">{{if .Currency}}{{.Currency}}{{else}}待选择{{end}}</span></td>
+            <td>
+              {{if eq .Status "PAID"}}<span class="badge b-ok">已支付</span>
+              {{else if eq .Status "READY"}}<span class="badge b-wait">待支付</span>
+              {{else if eq .Status "PENDING"}}<span class="badge b-blue">待选择</span>
+              {{else if eq .Status "CANCELED"}}<span class="badge b-gray">已取消</span>
+              {{else if eq .Status "SUPERSEDED"}}<span class="badge b-gray">已替代</span>
+              {{else}}<span class="badge b-gray">已过期</span>{{end}}
+            </td>
+            <td>
+              {{if eq .NotifyStatus "SUCCESS"}}<span class="badge b-ok">已送达</span>
+              {{else if eq .NotifyStatus "FAILED"}}<span class="badge b-err">失败</span>
+              {{else if eq .NotifyStatus "PENDING"}}<span class="badge b-wait">等待中</span>
+              {{else}}<span class="muted">—</span>{{end}}
+            </td>
+            <td class="mono muted">{{if .TxID}}{{.TxID}}{{else}}—{{end}}</td>
+            <td><a class="btn btn-ghost btn-sm" href="/admin/orders/{{.TradeNo}}">查看</a></td>
+          </tr>
+        {{else}}
+          <tr><td colspan="7" class="empty">没有符合条件的订单。</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <span>共 {{.Total}} 条</span>
+      {{if .HasPrev}}<a href="/admin/orders?page={{.PrevPage}}&status={{.Status}}&q={{.Keyword}}">上一页</a>{{else}}<span class="dis">上一页</span>{{end}}
+      <span class="dis">{{.Page}} / {{.TotalPages}}</span>
+      {{if .HasNext}}<a href="/admin/orders?page={{.NextPage}}&status={{.Status}}&q={{.Keyword}}">下一页</a>{{else}}<span class="dis">下一页</span>{{end}}
+    </div>
+  </section>
+</main>
+{{template "theme_script" .}}
+</body>
+</html>

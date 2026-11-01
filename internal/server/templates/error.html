@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>{{.Title}} · LitePay</title>
+{{template "theme_head" .}}
+{{template "theme_css" .}}
+<style>
+  body{display:flex;align-items:center;justify-content:center;padding:24px}
+  .card{width:100%;max-width:400px;padding:30px 26px;border:1px solid var(--line);border-radius:var(--radius-xl);
+    background:var(--surface);box-shadow:var(--shadow);text-align:center}
+  .icon{width:60px;height:60px;margin:0 auto 16px;border-radius:50%;display:grid;place-items:center;
+    background:var(--danger-soft);color:var(--danger)}
+  .icon svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round}
+  h1{margin:0 0 10px;font-size:18px}
+  p{margin:0;color:var(--muted);font-size:13px;line-height:1.75;word-break:break-word}
+  .hint{margin-top:18px;color:var(--faint);font-size:11.5px}
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 8v5M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg></div>
+    <h1>{{.Title}}</h1>
+    <p>{{.Detail}}</p>
+    <div class="hint">LitePay · Binance / OKX 站内转账</div>
+  </main>
+{{template "theme_script" .}}
+</body>
+</html>

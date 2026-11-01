@@ -1,0 +1,24 @@
+# 数据与密钥
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+
+# 编译产物
+litepay
+/litepay-linux
+/litepay-darwin
+dist/
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
+
+# 本机启动配置与工作记录
+/config.yaml
+.env.*
+!.env.example
+.workbuddy-ai/
+*.db-journal

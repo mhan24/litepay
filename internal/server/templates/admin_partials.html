@@ -1,0 +1,154 @@
+{{define "admin_css"}}
+{{template "theme_css" .}}
+<style>
+  .topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--surface) 92%,transparent);
+    backdrop-filter:blur(14px) saturate(1.2);border-bottom:1px solid var(--line)}
+  .topbar-in{max-width:1180px;height:62px;margin:auto;padding:0 20px;display:flex;align-items:center;gap:18px}
+  .brand{display:flex;align-items:center;gap:9px;text-decoration:none}
+  .mark{width:31px;height:31px;display:grid;place-items:center;border-radius:9px;
+    background:var(--text);color:var(--bg);font-size:10px;font-weight:800;letter-spacing:-.2px}
+  .brand-name{font-size:15px;font-weight:720;letter-spacing:-.25px}
+  .brand-sub{padding:3px 7px;border:1px solid var(--line);border-radius:6px;color:var(--muted);font-size:10.5px}
+  .nav{display:flex;gap:3px;margin-left:8px}
+  .nav a{padding:7px 12px;border-radius:8px;color:var(--muted);font-size:13px;font-weight:570;text-decoration:none}
+  .nav a:hover{background:var(--surface-2);color:var(--text)}
+  .nav a.on{background:var(--text);color:var(--bg)}
+  .userbox{margin-left:auto;display:flex;align-items:center;gap:9px;color:var(--muted);font-size:12.5px}
+  .userbox .who{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .linkbtn{border:0;background:none;padding:5px 7px;border-radius:6px;color:var(--muted);cursor:pointer}
+  .linkbtn:hover{background:var(--surface-2);color:var(--text)}
+  .shell{max-width:1180px;margin:auto;padding:24px 20px 64px}
+  .pagehead{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+  .pagehead h1{margin:0;font-size:23px;letter-spacing:-.5px}
+  .pagehead .sub{margin:5px 0 0;color:var(--muted);font-size:12.5px;line-height:1.6}
+  .grid-4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+  .grid-2{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:12px;margin-bottom:16px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-md);
+    box-shadow:0 1px 2px rgba(20,20,18,.02);overflow:hidden}
+  .card-h{min-height:48px;padding:12px 18px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .card-h h2{margin:0;font-size:13px;font-weight:680;letter-spacing:-.1px}
+  .card-h .hint{color:var(--faint);font-size:11.5px}
+  .card-b{padding:18px}
+  .stat{padding:17px 18px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-md)}
+  .stat .k{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11.5px}
+  .stat .v{margin-top:7px;font-size:27px;font-weight:760;letter-spacing:-.8px}
+  .stat .v small{margin-left:4px;color:var(--muted);font-size:12px;font-weight:550}
+  .stat .s{margin-top:4px;color:var(--faint);font-size:11px;line-height:1.5}
+  .stat.accent{background:var(--accent-soft);border-color:var(--accent-line)}
+  .stat.accent .k,.stat.accent .s{color:var(--muted)}
+  .table-wrap{overflow-x:auto}
+  table{width:100%;min-width:660px;border-collapse:collapse}
+  th{padding:10px 14px;background:var(--surface-2);border-bottom:1px solid var(--line);
+    color:var(--faint);font-size:10.5px;font-weight:650;letter-spacing:.45px;text-align:left;white-space:nowrap}
+  td{padding:11px 14px;border-bottom:1px solid var(--line);font-size:12.5px;vertical-align:middle}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:var(--surface-2)}
+  .num{font-weight:650}
+  .badge{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border:1px solid transparent;
+    border-radius:6px;font-size:10.5px;font-weight:650;white-space:nowrap}
+  .b-ok{background:var(--ok-soft);border-color:var(--ok-line);color:var(--ok)}
+  .b-wait{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn)}
+  .b-blue{background:var(--accent-soft);border-color:var(--accent-line);color:var(--text)}
+  .b-gray{background:var(--surface-3);border-color:var(--line);color:var(--muted)}
+  .b-err{background:var(--danger-soft);border-color:var(--danger-line);color:var(--danger)}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;
+    padding:7px 13px;border:1px solid transparent;border-radius:9px;font-size:12.5px;font-weight:620;
+    line-height:1.2;text-decoration:none;cursor:pointer;transition:transform var(--motion-fast),background var(--motion-fast),border-color var(--motion-fast)}
+  .btn:active{transform:scale(.98)}
+  .btn-primary{background:var(--text);color:var(--bg)}
+  .btn-primary:hover{opacity:.88}
+  .btn-ghost{background:var(--surface);border-color:var(--line);color:var(--text)}
+  .btn-ghost:hover{background:var(--surface-2);border-color:var(--line-strong)}
+  .btn-danger{background:var(--danger-soft);border-color:var(--danger-line);color:var(--danger)}
+  .btn-danger:hover{background:color-mix(in srgb,var(--danger-soft) 75%,var(--danger) 8%)}
+  .btn-sm{min-height:30px;padding:6px 10px;border-radius:8px;font-size:11.5px}
+  .filters{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:14px 18px;border-bottom:1px solid var(--line)}
+  select,input[type=text],input[type=search],input[type=password],input[type=number]{
+    min-height:36px;padding:8px 11px;border:1px solid var(--line);border-radius:9px;background:var(--surface);
+    color:var(--text);outline:none;transition:border-color var(--motion-fast),box-shadow var(--motion-fast)}
+  select:focus,input:focus{border-color:var(--line-strong);box-shadow:0 0 0 3px color-mix(in srgb,var(--focus) 14%,transparent)}
+  .grow{flex:1;min-width:190px}
+  .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 18px}
+  .form-grid .full{grid-column:1/-1}
+  .field{display:flex;flex-direction:column;gap:6px;min-width:0}
+  .field>label{color:var(--muted);font-size:12px;font-weight:580}
+  .field .input{width:100%;min-height:38px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;
+    background:var(--surface-2);color:var(--text);outline:none}
+  .field .input:focus{background:var(--surface);border-color:var(--line-strong);
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--focus) 14%,transparent)}
+  .field .hint{color:var(--faint);font-size:10.5px;line-height:1.55}
+  .switch{display:flex;align-items:center;gap:9px;padding-top:5px;font-size:12.5px}
+  .switch input{width:16px;height:16px;accent-color:var(--text)}
+  .section-desc{margin:0 0 15px;color:var(--muted);font-size:12px;line-height:1.75}
+  .sticky-bar{position:sticky;bottom:0;z-index:5;display:flex;align-items:center;justify-content:flex-end;gap:10px;
+    padding:12px 18px;background:color-mix(in srgb,var(--surface) 94%,transparent);backdrop-filter:blur(10px)}
+  .sticky-bar .tip{margin-right:auto;color:var(--faint);font-size:11px}
+  .kv{display:grid;grid-template-columns:126px minmax(0,1fr);gap:11px 14px;font-size:12.5px}
+  .kv .k{color:var(--muted)}
+  .kv .v{font-weight:550;overflow-wrap:anywhere}
+  .flash,.banner{display:flex;gap:9px;align-items:flex-start;margin-bottom:14px;padding:11px 14px;
+    border:1px solid;border-radius:10px;font-size:12.5px;line-height:1.65}
+  .flash.ok{background:var(--ok-soft);border-color:var(--ok-line);color:var(--ok)}
+  .flash.err{background:var(--danger-soft);border-color:var(--danger-line);color:var(--danger)}
+  .banner{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn)}
+  .banner.info{background:var(--accent-soft);border-color:var(--accent-line);color:var(--muted)}
+  .empty{padding:48px 18px;color:var(--faint);font-size:12.5px;text-align:center}
+  .pager{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:13px 18px;
+    border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+  .pager a,.pager span.dis{padding:6px 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);text-decoration:none}
+  .pager span.dis{color:var(--faint)}
+  .detail-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .detail-head h1{margin:0;font-size:18px}
+  .actions{display:flex;gap:7px;flex-wrap:wrap;margin-left:auto}
+  .timeline{display:flex;flex-direction:column}
+  .tl{display:flex;gap:12px;padding:9px 0;font-size:12.5px}
+  .tl .dot2{width:8px;height:8px;flex:0 0 8px;margin-top:5px;border-radius:50%;background:var(--line-strong)}
+  .tl.on .dot2{background:var(--ok)}
+  .tl.warn .dot2{background:var(--warn)}
+  .tl .t{min-width:150px;color:var(--muted);font-size:11.5px}
+  @media (max-width:900px){
+    .grid-4{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .grid-2{grid-template-columns:1fr}
+    .brand-sub{display:none}
+  }
+  @media (max-width:640px){
+    .topbar-in{height:56px;padding:0 12px;gap:9px;overflow-x:auto}
+    .brand-name{display:none}
+    .nav{margin-left:2px}.nav a{padding:6px 8px;font-size:12px}
+    .userbox .who{display:none}
+    .shell{padding:17px 12px 44px}
+    .pagehead h1{font-size:20px}
+    .form-grid{grid-template-columns:1fr}
+    .kv{grid-template-columns:102px minmax(0,1fr)}
+    .card-b{padding:15px}
+    .stat .v{font-size:23px}
+  }
+</style>
+{{end}}
+
+{{define "admin_nav"}}
+<header class="topbar">
+  <div class="topbar-in">
+    <a class="brand" href="/admin"><span class="mark">LP</span><span class="brand-name">LitePay</span><span class="brand-sub">管理后台</span></a>
+    <nav class="nav" aria-label="管理后台导航">
+      <a href="/admin" class="{{if eq .Base.Active "dashboard"}}on{{end}}">概览</a>
+      <a href="/admin/orders" class="{{if eq .Base.Active "orders"}}on{{end}}">订单</a>
+      <a href="/admin/integration" class="{{if eq .Base.Active "integration"}}on{{end}}">接入</a>
+      <a href="/admin/settings" class="{{if eq .Base.Active "settings"}}on{{end}}">设置</a>
+    </nav>
+    <div class="userbox">
+      {{template "theme_toggle" .}}
+      <span class="who">{{.Base.User}}</span>
+      <form method="post" action="/admin/logout" style="margin:0">
+        <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+        <button type="submit" class="linkbtn">退出</button>
+      </form>
+    </div>
+  </div>
+</header>
+{{end}}
+
+{{define "admin_flash"}}
+{{if .Base.Flash}}<div class="flash {{if .Base.FlashOK}}ok{{else}}err{{end}}">{{.Base.Flash}}</div>{{end}}
+{{end}}

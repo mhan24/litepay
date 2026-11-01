@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.git
+data
+dist
+*.db
+*.db-wal
+*.db-shm
+config.yaml
+.workbuddy-ai

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>{{.Title}} · LitePay</title>
+{{template "theme_head" .}}
+{{template "theme_css" .}}
+<style>
+  body{display:flex;align-items:center;justify-content:center;padding:24px}
+  .card{width:100%;max-width:420px;padding:32px 26px;border:1px solid var(--line);border-radius:var(--radius-xl);
+    background:var(--surface);box-shadow:var(--shadow);text-align:center}
+  .icon{width:66px;height:66px;margin:0 auto 18px;border-radius:50%;display:grid;place-items:center}
+  .icon.ok{background:var(--ok-soft);color:var(--ok)}
+  .icon.exp{background:var(--warn-soft);color:var(--warn)}
+  .icon.canceled{background:var(--surface-3);color:var(--muted)}
+  .icon svg{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round}
+  h1{margin:0 0 8px;font-size:20px;letter-spacing:-.3px}
+  p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.7}
+  .amount{margin:20px 0 6px;font-size:34px;font-weight:800;letter-spacing:-.8px;font-variant-numeric:tabular-nums}
+  .amount span{margin-left:4px;color:var(--muted);font-size:14px;font-weight:600}
+  .meta{margin-top:18px;padding:13px 14px;border:1px solid var(--line);border-radius:var(--radius-md);
+    background:var(--surface-2);font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:7px;text-align:left}
+  .meta div{display:flex;justify-content:space-between;gap:12px}
+  .meta b{color:var(--text);font-weight:560;word-break:break-all;text-align:right}
+  .btn{display:inline-flex;align-items:center;justify-content:center;min-height:43px;margin-top:22px;
+    padding:10px 24px;border-radius:10px;background:var(--text);color:var(--bg);text-decoration:none;font-size:13.5px;font-weight:650}
+  .btn:hover{opacity:.88}
+</style>
+</head>
+<body>
+  <main class="card">
+    {{if eq .Status "PAID"}}
+    <div class="icon ok"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></div>
+    <h1>支付成功</h1>
+    <p>款项已确认到账，请返回商户页面查看订单进度。</p>
+    {{else if eq .Status "CANCELED"}}
+    <div class="icon canceled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
+    <h1>订单已取消</h1>
+    <p>商户已取消该订单，系统不再确认新的付款。<br>如已付款，请联系商户客服处理。</p>
+    {{else if eq .Status "SUPERSEDED"}}
+    <div class="icon canceled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
+    <h1>订单已失效</h1>
+    <p>该订单已被同一商户订单号的新订单替代。<br>请返回商户页面查看最新订单状态。</p>
+    {{else}}
+    <div class="icon exp"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+    <h1>订单已超时</h1>
+    <p>该订单已超过支付时间，请返回商户重新下单。<br>如已付款，请联系商户客服处理。</p>
+    {{end}}
+
+    <div class="amount">{{.Amount}}<span>{{.Currency}}</span></div>
+    <div class="meta">
+      <div><span>商品名称</span><b>{{if .Name}}{{.Name}}{{else}}未填写{{end}}</b></div>
+      <div><span>商户订单号</span><b class="mono">{{.OutTradeNo}}</b></div>
+      <div><span>订单编号</span><b class="mono">{{.TradeNo}}</b></div>
+      <div><span>下单时间</span><b>{{.CreatedAt}}</b></div>
+    </div>
+    {{with externalURL .ReturnURL}}<a class="btn" href="{{.}}">返回商户查看订单</a>{{end}}
+  </main>
+{{template "theme_script" .}}
+</body>
+</html>

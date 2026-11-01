@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>设置 · LitePay 管理后台</title>
+{{template "theme_head" .}}
+{{template "admin_css" .}}
+</head>
+<body>
+{{template "admin_nav" .}}
+<main class="shell">
+  {{template "admin_flash" .}}
+  <header class="pagehead">
+    <div>
+      <h1>支付设置</h1>
+      <p class="sub">所有运行配置保存在 SQLite 中，保存后立即生效。{{if .HasSaved}}最近更新于 {{.UpdatedAt}}。{{end}}</p>
+    </div>
+  </header>
+
+  {{if not .CollectionOn}}
+  <div class="banner" role="status">
+    <span>至少完整配置一个收款平台后才会创建新订单；未完成时网关会拒绝下单。</span>
+  </div>
+  {{end}}
+
+  <form method="post" action="/admin/settings/account">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>管理员账号</h2><span class="hint">修改后请重新登录</span></div>
+      <div class="card-b">
+        <div class="form-grid">
+          <div class="field"><label>用户名</label><input class="input" name="admin_username" value="{{.Cfg.Admin.Username}}" maxlength="64" autocomplete="username" required></div>
+          <div class="field"><label>当前密码</label><input class="input" type="password" name="current_password" autocomplete="current-password" required></div>
+          <div class="field"><label>新密码</label><input class="input" type="password" name="new_password" autocomplete="new-password" placeholder="至少 6 个字符，留空保持当前密码"></div>
+          <div class="field"><label>确认新密码</label><input class="input" type="password" name="confirm_password" autocomplete="new-password"></div>
+        </div>
+        <button class="btn" type="submit">保存管理员账号</button>
+      </div>
+    </section>
+  </form>
+  <form method="post" action="/admin/settings">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>收银台</h2><span class="hint">先选平台，再选币种</span></div>
+      <div class="card-b">
+        <p class="section-desc">仅支持 USDT 与 USDC。付款人先选择 Binance 或 OKX，再选择币种；订单只确认所选平台和币种的站内转账。</p>
+        <div class="form-grid">
+          <div class="field">
+            <label>开放币种</label>
+            {{range .KnownCurrencies}}
+            <label class="switch"><input type="checkbox" name="checkout_currencies" value="{{.}}" {{if hasStr $.Currencies .}}checked{{end}}><span>{{.}}</span></label>
+            {{end}}
+          </div>
+          <div class="field full">
+            <label>收银台提示</label>
+            <input class="input" name="checkout_note" value="{{.Cfg.Checkout.Note}}" placeholder="例如：请转账精确金额，付款后通常数秒内自动确认">
+            <label class="switch"><input type="checkbox" name="clear_checkout_note"><span>清除收银台提示</span></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>收款 UID</h2><span class="hint">站内转账唯一收款标识</span></div>
+      <div class="card-b">
+        <p class="section-desc">更换 API 凭据或 UID 时，保存前会联网核对所属账户；不一致或核验失败将拒绝保存。收款 UID 必须与对应只读 API 所属账户一致。收银台只展示和复制 UID，所有付款信息都以当前订单页为准。</p>
+        <div class="form-grid">
+          <div class="field">
+            <label>Binance 收款 UID</label>
+            <input class="input" name="binance_uid" value="{{.Cfg.Checkout.Binance.UID}}" placeholder="Binance 账户 UID">
+            <span class="hint">用于展示、转账与收款账户校验。</span>
+            <label class="switch"><input type="checkbox" name="clear_binance_uid"><span>清除 Binance UID</span></label>
+          </div>
+          <div class="field">
+            <label>OKX 收款 UID</label>
+            <input class="input" name="okx_uid" value="{{.Cfg.Checkout.OKX.UID}}" placeholder="OKX 账户 UID">
+            <span class="hint">系统会通过 OKX 账户接口核对 UID。</span>
+            <label class="switch"><input type="checkbox" name="clear_okx_uid"><span>清除 OKX UID</span></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>Binance</h2><span class="hint">只读 API · 站内转账</span></div>
+      <div class="card-b">
+        <p class="section-desc">系统只接受 PAY 与 C2C 正向转账，并校验收款 UID、币种和精确金额。请仅授予读取权限并配置 IP 白名单。</p>
+        <div class="form-grid">
+          <div class="field">
+            <label>API Key</label>
+            <input class="input" name="binance_api_key" value="" placeholder="{{.BinanceKey}}" autocomplete="off">
+            <span class="hint">留空保持当前值；勾选下方选项可清除。</span>
+            <label class="switch"><input type="checkbox" name="clear_binance_api_key"><span>清除 Binance API Key</span></label>
+          </div>
+          <div class="field">
+            <label>API Secret</label>
+            <input class="input" type="password" name="binance_api_secret" value="" placeholder="留空保持当前值" autocomplete="new-password">
+            <label class="switch"><input type="checkbox" name="clear_binance_api_secret"><span>清除 Binance API Secret</span></label>
+          </div>
+          <div class="field">
+            <label>查询间隔（秒）</label>
+            <input class="input" type="number" name="binance_poll_interval" value="{{.Cfg.Binance.PollInterval}}" min="2" max="60">
+          </div>
+          <div class="field">
+            <label>回看窗口（分钟）</label>
+            <input class="input" type="number" name="binance_lookback" value="{{.Cfg.Binance.LookbackBuffer}}" min="1" max="60">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>OKX</h2><span class="hint">只读 API · 站内转账</span></div>
+      <div class="card-b">
+        <p class="section-desc">只接受已完成的 OKX 站内转账。链上充值、等待确认的记录和 UID 不一致的转账都不会入账。</p>
+        <div class="form-grid">
+          <div class="field">
+            <label>API Key</label>
+            <input class="input" name="okx_api_key" value="" placeholder="{{.OKXKey}}" autocomplete="off">
+            <span class="hint">留空保持当前值；勾选下方选项可清除。</span>
+            <label class="switch"><input type="checkbox" name="clear_okx_api_key"><span>清除 OKX API Key</span></label>
+          </div>
+          <div class="field">
+            <label>API Secret</label>
+            <input class="input" type="password" name="okx_api_secret" value="" placeholder="留空保持当前值" autocomplete="new-password">
+            <label class="switch"><input type="checkbox" name="clear_okx_api_secret"><span>清除 OKX API Secret</span></label>
+          </div>
+          <div class="field">
+            <label>Passphrase</label>
+            <input class="input" type="password" name="okx_passphrase" value="" placeholder="留空保持当前值" autocomplete="new-password">
+            <label class="switch"><input type="checkbox" name="clear_okx_passphrase"><span>清除 OKX Passphrase</span></label>
+          </div>
+          <div class="field">
+            <label>查询间隔（秒）</label>
+            <input class="input" type="number" name="okx_poll_interval" value="{{.Cfg.OKX.PollInterval}}" min="2" max="60">
+          </div>
+          <div class="field">
+            <label>回看窗口（分钟）</label>
+            <input class="input" type="number" name="okx_lookback" value="{{.Cfg.OKX.LookbackBuffer}}" min="1" max="60">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>订单</h2><span class="hint">USD 结算 · 稳定币 1:1</span></div>
+      <div class="card-b">
+        <div class="form-grid">
+          <div class="field">
+            <label>订单有效期（分钟）</label>
+            <input class="input" type="number" name="order_expire_minutes" value="{{.Cfg.Order.ExpireMinutes}}" min="1" max="1440">
+          </div>
+          <div class="field">
+            <label>金额步长</label>
+            <input class="input" type="number" step="0.000001" name="order_amount_step" value="{{.Cfg.Order.AmountStep}}">
+            <span class="hint">用尾差区分同时到账的订单。</span>
+          </div>
+          <div class="field">
+            <label>最大尾差档位</label>
+            <input class="input" type="number" name="order_max_offset" value="{{.Cfg.Order.MaxOffset}}" min="1" max="900">
+          </div>
+          <div class="field">
+            <label>最低金额</label>
+            <input class="input" type="number" step="0.0001" name="order_min_amount" value="{{.Cfg.Order.MinAmount}}">
+          </div>
+          <div class="field">
+            <label>应付金额小数位</label>
+            <input class="input" type="number" name="order_amount_precision" value="{{.Cfg.Order.AmountPrecision}}" min="2" max="6">
+          </div>
+          <div class="field">
+            <label>支付截止后继续确认到账的宽限时间（秒）</label>
+            <input class="input" type="number" name="order_slot_grace" value="{{.Cfg.Order.SlotGraceSeconds}}" min="0" max="3600">
+            <span class="hint">用于确认截止前已经发出的转账。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>独角数卡</h2><span class="hint">BEpusdt 收银台模式</span></div>
+      <div class="card-b">
+        <div class="form-grid">
+          <div class="field full">
+            <label>API Token</label>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <span class="mono" style="padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)">{{.BEpusdtKeyMask}}</span>
+              <button class="btn btn-ghost btn-sm" type="submit" form="rotate-token" formaction="/admin/settings/token">轮换并生成新 Token</button>
+              <a class="btn btn-ghost btn-sm" href="/admin/integration">查看接入信息</a>
+            </div>
+            <span class="hint">Token 只能由系统安全随机生成。轮换后旧 Token 立即失效，新 Token 会展示在接入页，请立即更新独角数卡。</span>
+          </div>
+          <div class="field"><label>结算法币</label><div class="input" style="display:flex;align-items:center">USD · 固定 1:1</div></div>
+          <div class="field">
+            <label class="switch"><input type="checkbox" name="bepusdt_reselect" {{if .Cfg.BEpusdt.Reselect}}checked{{end}}><span>允许付款人重新选择平台与币种</span></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>支付结果通知</h2><span class="hint">发送给独角数卡</span></div>
+      <div class="card-b">
+        <div class="form-grid">
+          <div class="field">
+            <label>结果通知重试间隔（秒）</label>
+            <input class="input" name="notify_retry_delays" value="{{.DelaysJoined}}" placeholder="5,15,30,60,180">
+          </div>
+          <div class="field">
+            <label>最大尝试次数</label>
+            <input class="input" type="number" name="notify_max_attempts" value="{{.Cfg.Notify.MaxAttempts}}" min="1" max="10">
+          </div>
+          <div class="field">
+            <label>单次请求超时（秒）</label>
+            <input class="input" type="number" name="notify_timeout" value="{{.Cfg.Notify.TimeoutSeconds}}" min="3" max="60">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="card">
+      <div class="sticky-bar">
+        <span class="tip">SQLite {{.DBSize}} · {{.DBPath}}</span>
+        <button class="btn" type="submit" name="verify_accounts" value="on">核验 Key / UID 并保存</button>
+        <button class="btn btn-primary" type="submit">保存并立即生效</button>
+      </div>
+    </div>
+  </form>
+  <form id="rotate-token" method="post" action="/admin/settings/token" hidden>
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+  </form>
+</main>
+{{template "theme_script" .}}
+</body>
+</html>

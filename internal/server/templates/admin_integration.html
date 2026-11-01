@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>接入信息 · LitePay 管理后台</title>
+{{template "theme_head" .}}
+{{template "admin_css" .}}
+<style>
+  .copy-row{display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px dashed var(--line)}
+  .copy-row:last-child{border-bottom:none}
+  .copy-row .label{flex:0 0 132px;font-size:12.5px;color:var(--muted)}
+  .copy-row .value{flex:1;min-width:0;font-size:13.5px;font-weight:600;word-break:break-all;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .copy-row .value.blur{filter:blur(4px);user-select:none}
+  .steps{counter-reset:s;list-style:none;padding:0;margin:0}
+  .steps li{counter-increment:s;position:relative;padding:0 0 14px 34px;font-size:13px;line-height:1.7;color:var(--text)}
+  .steps li::before{content:counter(s);position:absolute;left:0;top:0;width:22px;height:22px;border-radius:50%;
+    background:var(--text);color:var(--bg);font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:600}
+  .steps li:last-child{padding-bottom:0}
+  pre{margin:0;background:var(--text);color:var(--bg);border-radius:11px;padding:14px 16px;overflow:auto;
+    font-size:12px;line-height:1.7;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .tag{display:inline-block;font-size:11.5px;font-weight:600;padding:2px 7px;border-radius:5px;background:var(--surface-3);color:var(--muted)}
+</style>
+</head>
+<body>
+{{template "admin_nav" .}}
+
+<div class="shell">
+  <div class="pagehead">
+    <div>
+      <h1>接入信息</h1>
+      <p class="sub">在独角数卡中新增 BEpusdt 支付渠道，并启用收银台模式。</p>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-h"><h2>接入参数</h2><span class="hint">复制后填入独角数卡</span></div>
+    <div class="card-b">
+      <div class="copy-row">
+        <span class="label">网关地址</span>
+        <span class="value">{{.BaseURL}}</span>
+        <button class="btn btn-ghost btn-sm" data-copy="{{.BaseURL}}">复制</button>
+      </div>
+      <div class="copy-row">
+        <span class="label">创建订单接口</span>
+        <span class="value">{{.SubmitURL}}</span>
+        <button class="btn btn-ghost btn-sm" data-copy="{{.SubmitURL}}">复制</button>
+      </div>
+      <div class="copy-row">
+        <span class="label">API Token</span>
+        <span class="value blur" id="keyValue" data-real="{{.Key}}" data-mask="{{.KeyMask}}">{{.KeyMask}}</span>
+        <button class="btn btn-ghost btn-sm" id="keyToggle">显示</button>
+        <button class="btn btn-ghost btn-sm" data-copy="{{.Key}}">复制</button>
+      </div>
+      <div class="copy-row">
+        <span class="label">收银台币种</span>
+        <span class="value">{{range $i, $c := .Currencies}}{{if $i}} / {{end}}{{$c}}{{end}}</span>
+      </div>
+    </div>
+    <div class="card-b" style="border-top:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px">
+        <div style="font-size:12.5px;font-weight:620">轮换 API Token</div>
+        <div style="margin-top:3px;color:var(--muted);font-size:11.5px;line-height:1.6">旧 Token 会立即失效。轮换后请把新值更新到独角数卡的支付渠道。</div>
+      </div>
+      <form method="post" action="/admin/settings/token" style="margin:0">
+        <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+        <button class="btn btn-primary btn-sm" type="submit">生成新 Token</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-h"><h2>收款平台与币种</h2></div>
+      <div class="card-b">
+        <p class="section-desc" style="margin-bottom:12px">
+          独角数卡通过 JSON 调用 <span class="mono">create-order</span>，网关返回收银台地址
+          <span class="mono">payment_url</span>。付款人先选择 Binance 或 OKX，再选择 USDT 或 USDC，
+          最后按页面显示的精确金额发起站内转账。
+        </p>
+        <div class="table-wrap">
+          <table style="min-width:0">
+            <thead><tr><th>收款平台</th><th>支持币种</th><th>到账确认方式</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><b>Binance</b></td>
+                <td>USDT / USDC</td>
+                <td>通过只读 API 查询站内转账，按 UID、币种和精确金额确认订单</td>
+              </tr>
+              <tr>
+                <td><b>OKX</b></td>
+                <td>USDT / USDC</td>
+                <td>展示收款 UID，通过只读 API 查询站内转账；链上充值不会自动确认</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="section-desc" style="margin:12px 0 0">
+          可用币种：{{range .Currencies}}<span class="tag" style="margin-right:4px">{{.}}</span>{{end}}
+          订单有效期 {{.Expire}} 分钟。收银台只展示 UID，不生成静态收款二维码。
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>支付结果通知</h2><span class="hint">网关发送到你的商城</span></div>
+      <div class="card-b">
+        <p class="section-desc">
+          下单时传入的 <span class="mono">notify_url</span> 是结果通知地址，独角数卡会自动拼接。
+          网关使用 <b>POST JSON</b> 发送 BEpusdt 标准通知。支付成功通知要求 HTTP 2xx，且响应正文精确为
+          <span class="mono">success</span> 或 <span class="mono">ok</span>（不区分大小写）；
+          过期通知按官方协议要求 HTTP 2xx，并会把明确的 <span class="mono">fail</span> 正文判为失败。
+          部分 Dujiao Next 版本会拒绝 <span class="mono">status=3</span>，此时网关只能结束本地监听，
+          无法强制修改商户订单状态。失败时会按配置的间隔重试，最终结果以通知记录为准。
+        </p>
+        <pre>{"trade_id":"LP...","order_id":"商户订单号","amount":128,
+ "actual_amount":17.54,"token":"收款地址","status":2,"signature":"..."}</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-h"><h2>独角数卡配置步骤</h2></div>
+    <div class="card-b">
+      <ol class="steps">
+        <li>进入独角数卡后台，打开“支付配置”，新增支付渠道并选择“BEpusdt”。</li>
+        <li>网关地址填写 <b>{{.BaseURL}}</b>，只填写域名，不要附加接口路径。</li>
+        <li>粘贴上方 API Token。Token 由系统随机生成，只能通过“生成新 Token”轮换。结算法币固定为 <span class="mono">USD</span>，USDT / USDC 按 1:1 计。</li>
+        <li>订单模式选择“收银台”，网关会调用 <span class="mono">create-order</span>。币种限制可留空，或填写 <span class="mono">{{range $i, $c := .Currencies}}{{if $i}},{{end}}{{$c}}{{end}}</span>。</li>
+        <li>付款人依次选择 Binance 或 OKX、USDT 或 USDC，然后按页面金额发起站内转账。</li>
+        <li>同一商户订单号下未过期的待支付订单会复用，且不会延长原有效期；已过期、已取消或被替换的旧订单会静默退役。</li>
+        <li>支付成功后，网关发送 <span class="mono">status=2</span> 的结果通知。独角数卡返回 <span class="mono">success</span> 后即完成发货流程。</li>
+        <li>独角数卡主动取消订单时会调用 <span class="mono">/api/v1/order/cancel-transaction</span>。网关随即停止确认到账，不再发送过期通知。</li>
+        <li>网关自动过期或后台提前结束时，会在支付窗口和宽限期结束后发送 <span class="mono">status=3</span>。若 Dujiao Next 返回 <span class="mono">fail</span>，订单会显示通知失败；网关不能伪造支付成功回调，也不会承诺强制关闭商户订单。</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h2>签名规则与自测</h2><span class="hint">排查对接问题时使用</span></div>
+    <div class="card-b">
+      <p class="section-desc">
+        签名：除 <span class="mono">signature</span> 外的非空参数，按参数名 ASCII 升序拼成
+        <span class="mono">k1=v1&amp;k2=v2...</span>，末尾直接追加 API Token，取 MD5 小写 32 位。
+      </p>
+      <pre>POST {{.SubmitURL}}
+Content-Type: application/json
+{"order_id":"TEST001","amount":10,"fiat":"USD","currencies":"USDT,USDC","reselect":true,
+ "notify_url":"https://你的商城/api/v1/payments/callback","redirect_url":"https://你的商城/pay","signature":"&lt;MD5&gt;"}</pre>
+    </div>
+  </div>
+</div>
+{{template "theme_script" .}}
+
+<script>
+(function () {
+  document.querySelectorAll('[data-copy]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.getAttribute('data-copy');
+      var done = function () {
+        var old = btn.textContent;
+        btn.textContent = '已复制';
+        setTimeout(function () { btn.textContent = old; }, 1200);
+      };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done).catch(fallback);
+      } else { fallback(); }
+      function fallback() {
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    });
+  });
+
+  var keyEl = document.getElementById('keyValue');
+  var toggle = document.getElementById('keyToggle');
+  if (keyEl && toggle) {
+    var shown = false;
+    toggle.addEventListener('click', function () {
+      shown = !shown;
+      keyEl.textContent = shown ? keyEl.getAttribute('data-real') : keyEl.getAttribute('data-mask');
+      keyEl.classList.toggle('blur', !shown);
+      toggle.textContent = shown ? '隐藏' : '显示';
+    });
+  }
+})();
+</script>
+</body>
+</html>

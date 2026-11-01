@@ -1,0 +1,18 @@
+# 生产启动配置（服务器 /opt/litepay/config.yaml）
+# 支付业务配置保存在 SQLite，由 /admin/settings 维护。
+
+server:
+  addr: "0.0.0.0:3000"
+  base_url: "https://pay.9527.tr"
+  trusted_proxies:
+    - "172.18.0.2/32"
+
+database:
+  path: "/app/data/litepay.db"
+
+admin:
+  username: "admin"
+  password: ""
+  session_hours: 12
+
+log_level: "info"

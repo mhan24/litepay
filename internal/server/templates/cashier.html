@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>{{.Title}} · {{.OriginAmount}} {{.OriginCurrency}}</title>
+{{template "theme_head" .}}
+{{template "theme_css" .}}
+<style>
+  body.brand-binance{
+    --accent:#f0b90b;--accent-ink:#181816;--accent-deep:#856100;
+    --accent-soft:#fff9e6;--accent-line:#f0dfa5;
+  }
+  body.brand-okx{
+    --accent:#111111;--accent-ink:#ffffff;--accent-deep:#111111;
+    --accent-soft:#f1f1ef;--accent-line:#d2d2ce;
+  }
+  :root[data-theme=dark] body.brand-binance{
+    --accent:#f0b90b;--accent-ink:#181816;--accent-deep:#f5ca42;
+    --accent-soft:#2a2513;--accent-line:#544821;
+  }
+  :root[data-theme=dark] body.brand-okx{
+    --accent:#f4f4f1;--accent-ink:#111111;--accent-deep:#f4f4f1;
+    --accent-soft:#292927;--accent-line:#4b4b46;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    min-height:100dvh;
+    background:
+      radial-gradient(720px 360px at 50% -12%,color-mix(in srgb,var(--accent) 18%,transparent) 0%,transparent 70%),
+      var(--bg);
+    color:var(--text);
+    display:flex;align-items:center;justify-content:center;
+    padding:34px 16px 44px;
+  }
+  .page{width:100%;max-width:472px}
+  .card{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:var(--radius-lg);
+    padding:22px;
+    box-shadow:var(--shadow);
+  }
+  .topline{display:flex;align-items:center;justify-content:space-between;gap:16px}
+  .wordmark{display:flex;align-items:center;gap:10px;min-width:0}
+  .mark{
+    width:34px;height:34px;flex:0 0 34px;border-radius:11px;
+    display:flex;align-items:center;justify-content:center;
+    background:var(--text);color:var(--bg);font-size:11px;font-weight:750;letter-spacing:-.2px;
+  }
+  .wordmark-copy{display:flex;flex-direction:column;gap:1px;min-width:0}
+  .wordmark-copy strong{font-size:14px;font-weight:680;letter-spacing:-.2px}
+  .wordmark-copy span{font-size:11px;color:var(--muted)}
+  .badge{
+    margin-left:0;flex:0 0 auto;font-size:10.5px;color:var(--accent-deep);
+    background:var(--accent-soft);border:1px solid var(--accent-line);
+    padding:5px 9px;border-radius:999px;white-space:nowrap;
+  }
+  .channel{
+    display:flex;align-items:center;gap:11px;margin-top:18px;padding:12px;
+    border:1px solid var(--line);border-radius:14px;background:var(--surface-2);
+  }
+  .channel-icon{
+    width:38px;height:38px;flex:0 0 38px;border-radius:11px;background:var(--surface);
+    border:1px solid var(--line);display:flex;align-items:center;justify-content:center;padding:7px;
+  }
+  .channel-icon img{width:100%;height:100%;object-fit:contain;display:block}
+  :root[data-theme=dark] body.brand-okx .channel-icon img[src*="okx"],
+  :root[data-theme=dark] body.brand-okx .choice-icon img[src*="okx"]{filter:invert(1)}
+  .channel-copy{min-width:0;flex:1}
+  .channel-copy strong{display:block;font-size:13.5px;font-weight:660}
+  .channel-copy span{display:block;margin-top:2px;font-size:11.5px;color:var(--muted);line-height:1.45}
+  .channel-state{font-size:10.5px;color:var(--ok);white-space:nowrap}
+  .channel-state::before{content:"";display:inline-block;width:6px;height:6px;margin-right:5px;border-radius:50%;background:currentColor;vertical-align:1px}
+  .brand-icon{width:100%;height:100%;object-fit:contain;display:block}
+  .order-meta{
+    margin-top:18px;padding:2px 0;border-radius:0;
+    background:transparent;border:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+    display:flex;flex-direction:column;gap:0;
+  }
+  .order-meta .row{display:flex;justify-content:space-between;gap:18px;font-size:12.5px;padding:10px 1px}
+  .order-meta .row + .row{border-top:1px solid var(--line)}
+  .order-meta .v{font-weight:570;text-align:right;word-break:break-all}
+  .amount-box{
+    margin-top:18px;padding:20px;
+    border-radius:15px;border:1px solid var(--accent-line);
+    background:var(--accent-soft);
+  }
+  .amount-label{font-size:11.5px;color:var(--accent-deep);display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .amount-label span:last-child{color:var(--muted);font-size:10.5px}
+  .amount-row{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:9px;min-width:0}
+  .amount{
+    font-size:clamp(36px,10vw,48px);line-height:1;font-weight:780;letter-spacing:-2.2px;
+    font-variant-numeric:tabular-nums;min-width:0;overflow-wrap:anywhere;
+  }
+  .amount-token{width:30px;height:30px;flex:0 0 30px;object-fit:contain}
+  .currency{
+    display:inline-flex;align-items:center;gap:7px;font-size:16px;line-height:1.2;
+    font-weight:760;color:var(--accent-deep);letter-spacing:.15px;
+  }
+  .pay-focus{
+    display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;
+    margin-top:12px;padding:12px 13px;border-radius:12px;
+    background:var(--surface);border:1px solid var(--accent-line);
+  }
+  .pay-focus .label{display:block;color:var(--muted);font-size:10.5px;font-weight:600;letter-spacing:.25px}
+  .pay-focus .value{
+    display:flex;align-items:center;gap:8px;margin-top:5px;
+    font-size:clamp(18px,5.2vw,23px);line-height:1.25;font-weight:760;
+    letter-spacing:-.35px;color:var(--text);overflow-wrap:anywhere;
+  }
+  .pay-focus .value img{width:22px;height:22px;flex:0 0 22px;object-fit:contain}
+  .pay-focus .uid{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:clamp(16px,4.5vw,20px)}
+  .pay-focus .copy{margin-left:auto}
+  .amount-sub{margin-top:9px;font-size:11.5px;color:var(--muted);line-height:1.55}
+  .choice-title{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:20px 0 10px}
+  .choice-title h2{margin:0;font-size:14.5px;font-weight:680;letter-spacing:-.2px}
+  .choice-title span{font-size:10.5px;color:var(--faint)}
+  .provider-list,.currency-list{display:grid;gap:9px}
+  .provider-btn,.currency-btn{
+    width:100%;display:flex;align-items:center;gap:12px;text-align:left;
+    border:1px solid var(--line);background:var(--surface);color:var(--text);
+    border-radius:13px;padding:11px 12px;cursor:pointer;transition:border-color .16s,background .16s,transform .16s;
+  }
+  .provider-btn:hover:not(:disabled),.currency-btn:hover:not(:disabled){border-color:var(--line-strong);background:var(--surface);transform:translateY(-1px)}
+  .provider-btn:active:not(:disabled),.currency-btn:active:not(:disabled){transform:scale(.992)}
+  .provider-btn:disabled,.currency-btn:disabled{opacity:.43;cursor:not-allowed}
+  .loading{opacity:.7;pointer-events:none}
+  .provider-btn.selected,.currency-btn.selected{border-color:var(--accent-line);background:var(--accent-soft);box-shadow:none}
+  .choice-icon{
+    width:39px;height:39px;flex:0 0 39px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+    background:var(--surface-2);border:1px solid var(--line);padding:8px;
+  }
+  .choice-icon img{width:100%;height:100%;object-fit:contain;display:block}
+  .choice-body{flex:1;min-width:0}
+  .choice-name{display:block;font-size:13.5px;font-weight:660}
+  .choice-sub{display:block;margin-top:2px;font-size:11.5px;color:var(--muted);line-height:1.45}
+  .provider-btn *,.currency-btn *{min-width:0}
+  .choice-arrow{color:var(--faint);font-size:18px;line-height:1}
+  .reselect{margin:12px 0 0;border:0;background:transparent;color:var(--accent-deep);font-size:12px;padding:4px 0;cursor:pointer}
+  .reselect:hover{text-decoration:underline}
+  .copy{
+    border:1px solid var(--accent-line);background:var(--surface);color:var(--accent-deep);
+    font-size:11.5px;font-weight:650;padding:5px 10px;border-radius:9px;
+    cursor:pointer;transition:.16s;white-space:nowrap;
+    display:inline-flex;align-items:center;gap:4px;
+  }
+  .copy:hover{background:var(--accent-soft);border-color:var(--line-strong)}
+  .copy:active{transform:scale(.97)}
+  .copy.done{background:var(--ok-soft);border-color:var(--ok-line);color:var(--ok)}
+  .amount-row .copy{margin-left:auto;flex:0 0 auto}
+  .warn{
+    margin-top:11px;padding:10px 12px;border-radius:11px;
+    background:var(--danger-soft);border:1px solid var(--danger-line);
+    color:var(--danger);font-size:12px;line-height:1.6;
+    display:flex;gap:8px;align-items:flex-start;
+  }
+  .warn svg{flex:0 0 15px;margin-top:2px}
+  .warn b{color:var(--danger)}
+  .pay-note{
+    margin-top:10px;padding:10px 12px;border-radius:11px;
+    background:var(--surface);border:1px solid var(--line);
+    color:var(--muted);font-size:11.5px;line-height:1.6;
+  }
+  .pay-note b{color:var(--text);font-weight:650}
+  .pay-note.error{background:var(--danger-soft);border-color:var(--danger-line);color:var(--danger)}
+  .timer{margin-top:17px}
+  .timer-head{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-bottom:7px}
+  .timer-head .clock{font-weight:680;color:var(--text);font-variant-numeric:tabular-nums}
+  .timer-head .clock.urgent{color:var(--danger)}
+  .bar{height:4px;border-radius:999px;background:var(--surface-3);overflow:hidden}
+  .bar-inner{height:100%;width:100%;border-radius:999px;background:var(--accent);transition:width .9s linear,background .3s}
+  .bar-inner.urgent{background:var(--danger)}
+  .status{margin-top:14px;display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted)}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);position:relative;flex:0 0 6px}
+  .dot::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--accent-line);animation:pulse 1.8s ease-out infinite}
+  @keyframes pulse{0%{transform:scale(.85);opacity:.8}70%,100%{transform:scale(1.5);opacity:0}}
+  .foot{
+    margin-top:16px;padding-top:13px;border-top:1px solid var(--line);
+    font-size:10.5px;color:var(--faint);line-height:1.65;display:flex;flex-direction:column;gap:2px;
+  }
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.96em}
+  .page-tip{text-align:center;margin:13px 0 0;font-size:11px;color:var(--faint)}
+  .overlay{
+    position:fixed;inset:0;z-index:50;display:none;
+    align-items:center;justify-content:center;padding:24px;
+    background:var(--overlay);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);
+  }
+  .overlay.show{display:flex;animation:fade .25s ease}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .ov-card{
+    width:100%;max-width:330px;background:var(--surface);border:1px solid var(--line);border-radius:18px;
+    padding:28px 24px;text-align:center;box-shadow:var(--shadow);
+    animation:pop .3s cubic-bezier(.2,.8,.3,1);
+  }
+  @keyframes pop{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
+  .ov-card h2{font-size:18px;letter-spacing:-.3px}
+  .ov-card p{margin:0;font-size:12.5px;color:var(--muted);line-height:1.6}
+  .check circle{stroke:var(--ok);stroke-width:2.4;fill:none;stroke-dasharray:166;stroke-dashoffset:166;animation:draw .55s ease forwards}
+  .check path{stroke:var(--ok);stroke-width:3.4;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:48;stroke-dashoffset:48;animation:draw .4s .35s ease forwards}
+  .check.expired circle{stroke:var(--warn)}
+  .check.expired path{stroke:var(--warn)}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @media (max-width:420px){
+    body{padding:14px 10px 30px;align-items:flex-start}
+    .card{padding:17px;border-radius:16px}
+    .amount{font-size:36px;letter-spacing:-1.5px}
+    .amount-token{width:22px;height:22px;flex-basis:22px}
+    .channel-state{display:none}
+    .pay-focus{grid-template-columns:minmax(0,1fr);gap:9px}
+    .pay-focus .copy{justify-self:start;margin-left:0}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}
+    .provider-btn,.currency-btn,.copy{transition:none}
+  }
+</style>
+</head>
+<body class="{{if eq .Provider "binance"}}brand-binance{{else if eq .Provider "okx"}}brand-okx{{else}}brand-neutral{{end}}">
+<div class="page">
+  <section class="card">
+    <header class="topline">
+      <div class="wordmark">
+        <span class="mark">LP</span>
+        <span class="wordmark-copy">
+          <strong>LitePay</strong>
+          <span>安全收银台</span>
+        </span>
+      </div>
+      <span class="badge">站内转账</span>
+    </header>
+
+    {{if not .NeedsProvider}}
+    <div class="channel">
+      <span class="channel-icon">
+        {{if eq .Provider "binance"}}<img src="/assets/brand/binance.svg" alt="">{{else if eq .Provider "okx"}}<img src="/assets/brand/okx.svg" alt="">{{else}}LP{{end}}
+      </span>
+      <span class="channel-copy">
+        <strong>{{.ProviderName}}</strong>
+        <span>{{.ProviderSubtitle}}</span>
+      </span>
+      <span class="channel-state">已连接</span>
+    </div>
+    {{end}}
+
+    <div class="order-meta">
+      <div class="row"><span class="k">商品名称</span><span class="v">{{if .Name}}{{.Name}}{{else}}订单 {{.OutTradeNo}}{{end}}</span></div>
+      <div class="row"><span class="k">商户订单号</span><span class="v mono">{{.OutTradeNo}}</span></div>
+    </div>
+
+    {{if .NeedsProvider}}
+    <div class="choice-title">
+      <h2>选择收款平台</h2>
+      <span>第 1 / 2 步</span>
+    </div>
+    <div class="provider-list">
+      {{range .Providers}}
+      <button class="provider-btn{{if .Selected}} selected{{end}}" type="button" data-provider="{{.Key}}" {{if not .Enabled}}disabled{{end}}>
+        <span class="choice-icon"><img class="brand-icon" src="{{.Logo}}" alt=""></span>
+        <span class="choice-body">
+          <span class="choice-name">{{.Name}}</span>
+          <span class="choice-sub">{{.Subtitle}}{{if not .Enabled}} · 当前不可用{{end}}</span>
+        </span>
+        <span class="choice-arrow">›</span>
+      </button>
+      {{end}}
+    </div>
+    {{end}}
+
+    {{if .NeedsCurrency}}
+    <div class="choice-title">
+      <h2>选择币种</h2>
+      <span>第 2 / 2 步</span>
+    </div>
+    <div class="currency-list">
+      {{range .CurrencyOptions}}
+      <button class="currency-btn{{if .Selected}} selected{{end}}" type="button" data-currency="{{.Currency}}" {{if not .Enabled}}disabled{{end}}>
+        <span class="choice-icon"><img class="brand-icon" src="{{.Icon}}" alt=""></span>
+        <span class="choice-body">
+          <span class="choice-name">{{.Currency}}</span>
+          <span class="choice-sub">
+            {{if eq $.Provider "okx"}}OKX 站内转账 · 按精确金额自动确认{{else if eq $.Provider "binance"}}Binance 站内转账 · 按精确金额自动确认{{else}}按精确金额自动确认{{end}}
+            {{if not .Enabled}} · 当前不可用{{end}}
+          </span>
+        </span>
+        <span class="choice-arrow">›</span>
+      </button>
+      {{end}}
+    </div>
+    <button class="reselect" type="button" data-back>← 返回选择收款平台</button>
+    {{end}}
+
+    {{if not .NeedsProvider}}{{if not .NeedsCurrency}}
+    <div class="amount-box">
+      <div class="amount-label"><span>应付金额</span><span>请复制完整金额</span></div>
+      <div class="amount-row">
+        {{if eq .Currency "USDT"}}<img class="amount-token" src="/assets/brand/usdt.svg" alt="">{{else if eq .Currency "USDC"}}<img class="amount-token" src="/assets/brand/usdc.svg" alt="">{{end}}
+        <span class="amount" id="amount">{{.Amount}}</span>
+        <button class="copy" type="button" data-copy="{{.Amount}}" id="copy-amount">复制金额</button>
+      </div>
+      <div class="pay-focus" style="margin-top:13px">
+        <div>
+          <span class="label">收款币种</span>
+          <div class="value">
+            {{if eq .Currency "USDT"}}<img src="/assets/brand/usdt.svg" alt="">{{else if eq .Currency "USDC"}}<img src="/assets/brand/usdc.svg" alt="">{{end}}
+            <span class="currency">{{.Currency}}</span>
+          </div>
+        </div>
+        <span class="badge" style="margin:0">站内转账</span>
+      </div>
+      <div class="amount-sub">订单金额 ${{.OriginMoney}} USD · 1 {{.Currency}} = 1 USD</div>
+    </div>
+
+    <div class="warn">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
+      </svg>
+      <span>请转账<b>{{.Amount}} {{.Currency}}</b>。系统按订单金额的小数位四舍五入匹配，实际到账修约后一致即自动确认。</span>
+    </div>
+
+    {{if .HasPayee}}
+    <div class="pay-focus">
+      <div>
+        <span class="label">收款 UID</span>
+        <div class="value uid">{{.UID}}</div>
+      </div>
+      <button class="copy" type="button" data-copy="{{.UID}}">复制 UID</button>
+    </div>
+    <div class="pay-note">在 <b>{{if eq .Provider "okx"}}OKX{{else}}Binance{{end}}</b> 向此 UID 发起<b>站内转账</b>，币种选择 <b>{{.Currency}}</b>，金额填写 <b>{{.Amount}}</b>。</div>
+    {{else}}
+    <div class="pay-note error">商户尚未配置收款 UID，请稍后重试或联系商户。</div>
+    {{end}}
+
+    <div class="timer">
+      <div class="timer-head">
+        <span>剩余支付时间</span>
+        <span class="clock" id="clock">--:--</span>
+      </div>
+      <div class="bar"><div class="bar-inner" id="bar"></div></div>
+    </div>
+
+    <div class="status">
+      <span class="dot"></span>
+      <span id="status-text">正在确认 {{if eq .Provider "okx"}}OKX{{else}}Binance{{end}} 到账，请保持页面打开…</span>
+    </div>
+    {{if .CanReselect}}
+    <button class="reselect" type="button" data-back>← 更换收款平台或币种</button>
+    {{end}}
+    {{end}}{{end}}
+
+    <div class="foot">
+      <span>订单编号 <span class="mono">{{.TradeNo}}</span></span>
+      <span>下单时间 {{.CreatedAt}} · 请在 {{.ExpiredAt}} 前付款</span>
+    </div>
+  </section>
+
+  <p class="page-tip">{{if .Note}}{{.Note}}{{else}}付款完成后通常 1~5 秒自动确认，请勿重复支付{{end}}</p>
+</div>
+{{template "theme_script" .}}
+
+<div class="overlay" id="overlay">
+  <div class="ov-card">
+    <svg class="check" id="ov-icon" width="64" height="64" viewBox="0 0 52 52">
+      <circle cx="26" cy="26" r="24"/>
+      <path d="M15 27.5 22.5 35 37 19.5"/>
+    </svg>
+    <h2 id="ov-title">支付成功</h2>
+    <p id="ov-desc">正在跳转回商户页面…</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var TRADE_NO = "{{.TradeNo}}";
+  var RETURN_URL = {{externalURL .ReturnURL}};
+  var TOTAL = {{.TotalSeconds}};
+  var remain = {{.RemainSeconds}};
+  var finished = false;
+
+  var clockEl = document.getElementById('clock');
+  var barEl = document.getElementById('bar');
+  var statusEl = document.getElementById('status-text');
+  var overlay = document.getElementById('overlay');
+  var showPayment = !!clockEl && !!barEl && !!statusEl && !!overlay;
+
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function renderTimer() {
+    if (!showPayment) return;
+    if (remain < 0) remain = 0;
+    clockEl.textContent = pad(Math.floor(remain / 60)) + ':' + pad(remain % 60);
+    var pct = TOTAL > 0 ? Math.max(0, Math.min(100, remain / TOTAL * 100)) : 0;
+    barEl.style.width = pct + '%';
+    if (remain <= 60) {
+      clockEl.classList.add('urgent');
+      barEl.classList.add('urgent');
+    }
+  }
+
+  function tick() {
+    if (finished || !showPayment) return;
+    renderTimer();
+    if (remain <= 0) { onExpired(); return; }
+    remain--;
+  }
+
+  // ---- 复制 ----
+  function copyText(text, btn) {
+    function done() {
+      var old = btn.textContent;
+      btn.textContent = '已复制';
+      btn.classList.add('done');
+      setTimeout(function () { btn.textContent = old; btn.classList.remove('done'); }, 1400);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+    } else { fallback(); }
+
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) {}
+      document.body.removeChild(ta);
+    }
+  }
+
+  document.querySelectorAll('[data-copy]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      copyText(btn.getAttribute('data-copy'), btn);
+    });
+  });
+
+  var PROVIDER = {{.Provider}};
+  var NEEDS_PROVIDER = {{if .NeedsProvider}}true{{else}}false{{end}};
+  var NEEDS_CURRENCY = {{if .NeedsCurrency}}true{{else}}false{{end}};
+
+  // 第一步：选择收款平台。刷新后由服务端仅渲染该平台支持的币种。
+  document.querySelectorAll('[data-provider]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var provider = btn.getAttribute('data-provider');
+      window.location.href = window.location.pathname + '?reselect=1&provider=' + encodeURIComponent(provider);
+    });
+  });
+
+  // 第二步：选择币种，后端原子锁定平台、收款 UID 和金额。
+  document.querySelectorAll('[data-currency]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (!PROVIDER) {
+        alert('请先选择收款平台');
+        return;
+      }
+      submitPayment(PROVIDER, btn.getAttribute('data-currency'), btn);
+    });
+  });
+
+  function submitPayment(provider, currency, btn) {
+    if (finished) return;
+    document.querySelectorAll('.provider-btn,.currency-btn').forEach(function (b) { b.disabled = true; });
+    if (btn) btn.classList.add('loading');
+    var body = new URLSearchParams({ trade_no: TRADE_NO, provider: provider, currency: currency });
+    fetch('/api/order/payment', {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded'},
+      body: body
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res && res.code === 0) {
+          try { sessionStorage.removeItem('lp-provider:' + TRADE_NO); } catch (e) {}
+          window.location.href = window.location.pathname;
+          return;
+        }
+        throw new Error((res && res.msg) || '无法保存收款平台和币种，请刷新页面后重试');
+      })
+      .catch(function (e) {
+        alert((e && e.message) || '无法保存收款平台和币种，请刷新页面后重试');
+        document.querySelectorAll('.provider-btn,.currency-btn').forEach(function (b) { b.disabled = false; });
+        if (btn) btn.classList.remove('loading');
+      });
+  }
+
+  // “返回重选”先打开收款平台列表，再由用户选择目标平台。
+  document.querySelectorAll('[data-back]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (finished) return;
+      window.location.href = window.location.pathname + '?reselect=1';
+    });
+  });
+
+  // ---- 查询订单状态（仅在实际展示收款信息时）----
+  function poll() {
+    if (finished) return;
+    fetch('/api/order/status?order_id=' + encodeURIComponent(TRADE_NO), { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (!res || res.code !== 0) return;
+        var d = res.data;
+        if (typeof d.remain_seconds === 'number') remain = d.remain_seconds;
+        if (d.status === 'PAID') { onPaid(d); }
+        else if (d.status === 'EXPIRED') { onExpired(); }
+        else if (d.status === 'CANCELED') { onCanceled(); }
+        else if (d.provider && d.provider !== PROVIDER) { window.location.reload(); }
+      })
+      .catch(function () { /* 网络抖动忽略，下次继续 */ });
+  }
+
+  function onPaid(d) {
+    if (finished || !showPayment) return;
+    finished = true;
+    statusEl.textContent = '支付成功，正在返回商户页面…';
+    document.getElementById('ov-title').textContent = '支付成功';
+    document.getElementById('ov-desc').textContent = '正在跳转回商户页面…';
+    overlay.classList.add('show');
+    var target = (d && d.return_url) ? d.return_url : RETURN_URL;
+    setTimeout(function () {
+      if (target) { window.location.href = target; }
+      else { document.getElementById('ov-desc').textContent = '支付已完成，可关闭本页面。'; }
+    }, 2000);
+  }
+
+  function onExpired() {
+    if (finished || !showPayment) return;
+    finished = true;
+    clockEl.textContent = '00:00';
+    barEl.style.width = '0%';
+    statusEl.textContent = '订单已超时，请返回商户重新下单';
+    var icon = document.getElementById('ov-icon');
+    icon.classList.add('expired');
+    document.getElementById('ov-title').textContent = '订单已超时';
+    document.getElementById('ov-desc').textContent = '请返回商户重新下单。如果已经付款，请联系商户客服。';
+    overlay.classList.add('show');
+  }
+
+  function onCanceled() {
+    if (finished || !showPayment) return;
+    finished = true;
+    statusEl.textContent = '订单已取消，请返回商户页面';
+    var icon = document.getElementById('ov-icon');
+    icon.classList.add('expired');
+    document.getElementById('ov-title').textContent = '订单已取消';
+    document.getElementById('ov-desc').textContent = '请返回商户页面查看最新状态。';
+    overlay.classList.add('show');
+  }
+
+  if (!NEEDS_PROVIDER && !NEEDS_CURRENCY) {
+    renderTimer();
+    setInterval(tick, 1000);
+    setInterval(poll, 2000);
+    poll();
+  }
+})();
+</script>
+</body>
+</html>

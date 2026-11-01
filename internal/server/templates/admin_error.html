@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>操作失败 · LitePay 管理后台</title>
+{{template "theme_head" .}}
+{{template "admin_css" .}}
+</head>
+<body>
+{{template "admin_nav" .}}
+<div class="shell">
+  <div class="card">
+    <div class="card-b" style="text-align:center;padding:48px 20px">
+      <div style="width:54px;height:54px;border-radius:50%;background:var(--danger-soft);color:var(--danger);
+        display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;margin:0 auto 16px">!</div>
+      <h1 style="margin:0 0 8px;font-size:17px">无法完成操作</h1>
+      <p class="muted" style="margin:0 0 18px;font-size:13px">{{.Error}}</p>
+      <a class="btn btn-ghost btn-sm" href="/admin/orders">返回订单列表重试</a>
+    </div>
+  </div>
+</div>
+{{template "theme_script" .}}
+</body>
+</html>
