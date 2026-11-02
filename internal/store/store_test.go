@@ -263,14 +263,16 @@ func TestSelectPaymentReselectsAcrossProvidersAndCurrencies(t *testing.T) {
 	if got := slotCount(t, st); got != 1 {
 		t.Fatalf("slots after reselect = %d, want 1", got)
 	}
+	// 重选后旧档位保留为冷却占用（order_id=0，至原窗口结束），
+	// 防止窗口内针对旧金额的迟到转账被归到复用该金额的其他订单。
 	var reserved int64
 	if err := st.DB().Model(&model.AmountSlot{}).
 		Where("provider = ? AND currency = ? AND order_id = 0", "okx", "USDT").
 		Count(&reserved).Error; err != nil {
 		t.Fatal(err)
 	}
-	if reserved != 0 {
-		t.Fatalf("reselect left %d detached slots from the same order", reserved)
+	if reserved != 1 {
+		t.Fatalf("reselect left %d cooldown slots for okx/USDT, want 1", reserved)
 	}
 
 	o, err = st.SelectPayment(ctx, o.TradeNo, "binance", "USDT",
@@ -637,6 +639,8 @@ func TestForceExpireKeepsGraceAndFinalizesLate(t *testing.T) {
 		t.Fatal(err)
 	}
 	sentBeforeForce := time.Now()
+	// 截止时间以数据库当前值为准（上面的 Updates 刚改过 expired_at）。
+	o, _ = st.GetByTradeNo(ctx, o.TradeNo)
 	deadlineBeforeForce := o.ExpiredAt
 	if err := st.ForceExpire(ctx, o.TradeNo); err != nil {
 		t.Fatal(err)

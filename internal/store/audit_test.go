@@ -112,6 +112,12 @@ func TestAuditOrderReplacementWaitsForInFlightCallback(t *testing.T) {
 	if err := st.ForceExpire(ctx, o.TradeNo); err != nil {
 		t.Fatal(err)
 	}
+	// createTestOrder 的过期时间在未来，FinalizeExpired 只结算已过期的订单；
+	// 先回拨过期时间，订单才会进入“已结算、待通知”状态。
+	if err := st.DB().Model(&model.Order{}).Where("trade_no = ?", o.TradeNo).
+		Update("expired_at", time.Now().Add(-time.Minute)).Error; err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.FinalizeExpired(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +153,10 @@ func TestAuditCallbackDoesNotBlockUnrelatedMerchantOrder(t *testing.T) {
 	st := openTestStore(t)
 	o := createTestOrder(t, st, "lock-a", "merchant-a", 0)
 	if err := st.ForceExpire(ctx, o.TradeNo); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB().Model(&model.Order{}).Where("trade_no = ?", o.TradeNo).
+		Update("expired_at", time.Now().Add(-time.Minute)).Error; err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.FinalizeExpired(ctx, 0); err != nil {

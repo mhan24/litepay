@@ -226,19 +226,36 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 	var skipOut, skipType, skipRecv, skipAmt, skipCur int
 	matched := 0
 
+	// observe 把未归属交易写入观察账本；写入失败只降级为日志，不影响扫描。
+	observe := func(tx *incomingTransaction, reason, orderTradeNo string) {
+		obs := model.TxObservation{
+			Provider: provider, TransactionID: tx.ID, Type: tx.Type,
+			Amount: tx.Amount, Currency: tx.Currency, ReceiverID: tx.ReceiverID,
+			TransactionTime: tx.Time, Reason: reason, OrderTradeNo: orderTradeNo, Raw: tx.Raw,
+		}
+		if err := p.store.RecordTxObservation(ctx, obs); err != nil {
+			slog.Warn("记录未归属交易失败", "provider", provider, "tx", tx.ID, "err", err)
+		}
+	}
+
 	for _, tx := range txs {
-		switch rejectTransaction(provider, cfg, &tx) {
-		case transactionOutgoing:
-			skipOut++
-			continue
-		case transactionType:
-			skipType++
-			continue
-		case transactionCurrency:
-			skipCur++
-			continue
-		case transactionReceiver:
-			skipRecv++
+		reject := rejectTransaction(provider, cfg, &tx)
+		if reject != transactionAccepted {
+			switch reject {
+			case transactionOutgoing:
+				skipOut++
+			case transactionType:
+				skipType++
+			case transactionCurrency:
+				skipCur++
+			case transactionReceiver:
+				skipRecv++
+			}
+			// 支出类流水不属于潜在漏单证据，不入账本；类型/币种/收款人被拒
+			// 的流水（如走了链上充值、付错币种）必须留痕。
+			if reject != transactionOutgoing {
+				observe(&tx, observationReason(reject), "")
+			}
 			continue
 		}
 
@@ -270,6 +287,7 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 				Raw:             tx.Raw,
 			}, cfg.Order.AmountPrecision)
 			if err != nil {
+				observe(&tx, "claim_failed", o.TradeNo)
 				slog.Error("订单入账失败", "trade_no", o.TradeNo, "tx", tx.ID, "err", err)
 				continue
 			}
@@ -294,6 +312,7 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 		}
 		if !hit {
 			skipAmt++
+			observe(&tx, "no_match", "")
 		}
 	}
 
@@ -311,9 +330,10 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 		s.SkipCurrency = skipCur
 	})
 
-	if matched > 0 {
-		slog.Info("本轮到账确认完成", "provider", provider,
-			"matched", matched, "fetched", len(txs))
+	if len(txs) > 0 {
+		slog.Info("到账扫描完成", "provider", provider, "fetched", len(txs), "matched", matched,
+			"skip_outgoing", skipOut, "skip_type", skipType, "skip_currency", skipCur,
+			"skip_receiver", skipRecv, "skip_amount", skipAmt)
 	}
 }
 
@@ -346,6 +366,21 @@ func rejectTransaction(provider string, cfg *config.Config, tx *incomingTransact
 		return transactionCurrency
 	}
 	return transactionAccepted
+}
+
+// observationReason 把拒绝原因映射为观察账本里的稳定标记。
+func observationReason(r transactionRejectReason) string {
+	switch r {
+	case transactionOutgoing:
+		return "outgoing"
+	case transactionType:
+		return "type"
+	case transactionCurrency:
+		return "currency"
+	case transactionReceiver:
+		return "receiver"
+	}
+	return "unknown"
 }
 
 func orderMatchesTransaction(o *model.Order, tx *incomingTransaction, amountPrecision int) bool {

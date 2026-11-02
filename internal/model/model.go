@@ -117,6 +117,29 @@ type IncomingTx struct {
 // TableName 指定表名。
 func (IncomingTx) TableName() string { return "incoming_txs" }
 
+// TxObservation 未归属交易观察账本。
+//
+// 记录扫描到但未能核销到订单的流水：被过滤器跳过、无匹配订单、或核销被拒。
+// 与 incoming_txs 分表存放，避免干扰核销幂等；迟到付款与错误币种/金额的
+// 转账在这里留痕，供后台排查与对账。
+type TxObservation struct {
+	Provider        string    `gorm:"primaryKey;size:16"`
+	TransactionID   string    `gorm:"primaryKey;size:128"`
+	Type            string    `gorm:"size:16"`
+	Amount          float64   `gorm:"column:amount"`
+	Currency        string    `gorm:"size:16;index"`
+	ReceiverID      string    `gorm:"size:128"`
+	TransactionTime time.Time `gorm:"index"`
+	Reason          string    `gorm:"size:32;index"`
+	OrderTradeNo    string    `gorm:"size:64;index"`
+	Raw             string    `gorm:"type:text"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// TableName 指定表名。
+func (TxObservation) TableName() string { return "tx_observations" }
+
 // NotifyLog 回调尝试记录。
 type NotifyLog struct {
 	ID              uint   `gorm:"primaryKey"`

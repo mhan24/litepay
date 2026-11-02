@@ -92,7 +92,7 @@ func Open(path string) (*Store, error) {
 	sqlDB.SetMaxIdleConns(1)
 
 	if err := db.AutoMigrate(&model.Order{}, &model.AmountSlot{}, &model.IncomingTx{},
-		&model.NotifyLog{}, &model.Setting{}, &model.Credential{}); err != nil {
+		&model.TxObservation{}, &model.NotifyLog{}, &model.Setting{}, &model.Credential{}); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
 	return &Store{db: db, orderLocks: make(map[string]*orderLock)}, nil
@@ -309,9 +309,9 @@ func (s *Store) SelectPayment(ctx context.Context, tradeNo, provider, currency s
 		}
 		// Different rounding grids can overlap even when exact amounts differ.
 		// Only the currently bound slot is replaced. Detached slots belong
-		// to canceled/superseded/finalized orders and stay reserved until
-		// their original payment window ends, preventing late transfers from
-		// being credited to another order.
+		// to canceled/superseded/finalized orders or to this order's earlier
+		// selections, and stay reserved until their original payment window
+		// ends, preventing late transfers from being credited to another order.
 		var incompatible int64
 		if err := tx.Model(&model.AmountSlot{}).
 			Where("amount_slots.provider = ? AND amount_slots.currency = ? AND amount_slots.expires_at > ? AND amount_slots.amount_precision <> ?", provider, currency, time.Now(), amountPrecision).
@@ -339,29 +339,46 @@ func (s *Store) SelectPayment(ctx context.Context, tradeNo, provider, currency s
 			if res.Error != nil {
 				return res.Error
 			}
-			if res.RowsAffected == 1 {
-				selectedAt := time.Now().Truncate(time.Millisecond)
-				if err := tx.Where("order_id = ? AND id <> ?", order.ID, slot.ID).
-					Delete(&model.AmountSlot{}).Error; err != nil {
+			if res.RowsAffected == 0 {
+				// 金额已被占用。占用者是本订单此前释放的档位（重选同一金额）
+				// 时重新绑定；否则该金额处于冷却期，尝试下一个偏移。
+				var existing model.AmountSlot
+				if err := tx.Where("provider = ? AND currency = ? AND amount = ?", provider, currency, candidate).
+					First(&existing).Error; err != nil {
 					return err
 				}
-				if err := tx.Model(&order).Updates(map[string]any{
-					"currency":   currency,
-					"collection": provider, "pay_address": payAddress,
-					"pay_amount": candidate, "slot_offset": i,
-					"amount_precision": amountPrecision, "selected_at": selectedAt,
-					"status": model.StatusReady, "updated_at": time.Now(),
+				if existing.TradeNo != order.TradeNo {
+					continue
+				}
+				if err := tx.Model(&model.AmountSlot{}).Where("id = ?", existing.ID).Updates(map[string]any{
+					"order_id": order.ID, "expires_at": order.ExpiredAt.Add(slotGrace),
+					"amount_precision": amountPrecision,
 				}).Error; err != nil {
 					return err
 				}
-				order.Currency, order.Collection = currency, provider
-				order.PayAddress = payAddress
-				order.PayAmount, order.SlotOffset = candidate, i
-				order.AmountPrecision, order.SelectedAt = amountPrecision, &selectedAt
-				order.Status = model.StatusReady
-				updated = order
-				return nil
+				slot.ID = existing.ID
 			}
+			selectedAt := time.Now().Truncate(time.Millisecond)
+			if err := tx.Model(&model.AmountSlot{}).Where("order_id = ? AND id <> ?", order.ID, slot.ID).
+				Update("order_id", 0).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&order).Updates(map[string]any{
+				"currency":   currency,
+				"collection": provider, "pay_address": payAddress,
+				"pay_amount": candidate, "slot_offset": i,
+				"amount_precision": amountPrecision, "selected_at": selectedAt,
+				"status": model.StatusReady, "updated_at": time.Now(),
+			}).Error; err != nil {
+				return err
+			}
+			order.Currency, order.Collection = currency, provider
+			order.PayAddress = payAddress
+			order.PayAmount, order.SlotOffset = candidate, i
+			order.AmountPrecision, order.SelectedAt = amountPrecision, &selectedAt
+			order.Status = model.StatusReady
+			updated = order
+			return nil
 		}
 		return ErrNoSlotAvailable
 	})
@@ -532,8 +549,10 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 			return errors.New("订单状态已变化，撤销本次流水认领")
 		}
 
-		// 3) 释放唯一应付金额
-		if err := d.Model(&model.AmountSlot{}).Where("order_id = ?", order.ID).Delete(&model.AmountSlot{}).Error; err != nil {
+		// 3) 释放唯一应付金额的占用。档位行保留至原支付窗口结束（冷却期），
+		// 防止付款人重复转账在窗口内被错误归到复用该金额的新订单。
+		if err := d.Model(&model.AmountSlot{}).Where("order_id = ?", order.ID).
+			Update("order_id", 0).Error; err != nil {
 			return err
 		}
 		claimed = true
@@ -763,4 +782,28 @@ func (s *Store) HasActivePayments(ctx context.Context) (bool, error) {
 	var count int64
 	err := s.db.WithContext(ctx).Model(&model.AmountSlot{}).Where("order_id <> 0 AND expires_at > ?", time.Now()).Count(&count).Error
 	return count > 0, err
+}
+
+// RecordTxObservation 记录未归属交易的观察证据（迟到付款、币种/金额不符、
+// 被过滤器拒绝、核销被拒等）。同一流水以最近一次状态覆盖旧值。
+func (s *Store) RecordTxObservation(ctx context.Context, obs model.TxObservation) error {
+	now := time.Now()
+	obs.CreatedAt = now
+	obs.UpdatedAt = now
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "provider"}, {Name: "transaction_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"reason", "order_trade_no", "updated_at"}),
+	}).Create(&obs).Error
+}
+
+// RecentTxObservations 返回最近的未归属交易记录（后台排查用）。
+func (s *Store) RecentTxObservations(ctx context.Context, limit int) ([]model.TxObservation, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	var out []model.TxObservation
+	err := s.db.WithContext(ctx).
+		Order("transaction_time DESC, provider ASC, transaction_id ASC").
+		Limit(limit).Find(&out).Error
+	return out, err
 }

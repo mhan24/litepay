@@ -154,10 +154,23 @@ func requestLogger() gin.HandlerFunc {
 		}
 		slog.Info("HTTP",
 			"method", c.Request.Method,
-			"path", c.Request.URL.Path,
+			"path", redactedPath(c),
 			"status", c.Writer.Status(),
 			"ip", c.ClientIP(),
 			"cost", time.Since(start).String(),
 		)
 	}
+}
+
+// redactedPath 收银台 URL 的订单号是访问凭据，不能原样写入日志。
+// 已匹配路由记录路由模板；未匹配路径只保留首段。
+func redactedPath(c *gin.Context) string {
+	if pattern := c.FullPath(); pattern != "" {
+		return pattern
+	}
+	parts := strings.Split(strings.Trim(c.Request.URL.Path, "/"), "/")
+	if len(parts) == 1 && parts[0] != "" {
+		return "/" + parts[0]
+	}
+	return "/" + parts[0] + "/*"
 }
