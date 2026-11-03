@@ -50,6 +50,7 @@ type PollerStats struct {
 }
 
 type incomingTransaction struct {
+	OrderID      string
 	ReferenceID  string
 	AmountText   string
 	ID           string
@@ -652,7 +653,7 @@ func (p *Poller) binanceTransactions(ctx context.Context, cfg *config.Config,
 	out := make([]incomingTransaction, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, incomingTransaction{
-			ID: row.TransactionID, ReferenceID: row.ReferenceID, Type: strings.ToUpper(row.OrderType),
+			ID: row.TransactionID, ReferenceID: row.ReferenceID, OrderID: row.OrderID, Type: strings.ToUpper(row.OrderType),
 			Amount: row.Amount, AmountText: row.AmountText, Currency: strings.ToUpper(row.Currency),
 			Time: row.TransactionTime, ReceiverID: row.ReceiverID,
 			ReceiverAddr: row.ReceiverID, Incoming: row.Incoming, Raw: row.Raw,

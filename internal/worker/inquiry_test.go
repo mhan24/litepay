@@ -19,8 +19,11 @@ import (
 
 func TestCustomerInquiryRejectsUnsafeEvidence(t *testing.T) {
 	for _, provider := range []string{"binance", "okx"} {
-		for _, scenario := range []string{"valid", "early", "missing", "wrong_amount", "wrong_currency", "wrong_type", "wrong_uid", "old_time", "future_time", "pending", "closed", "api_error", "different_reference", "consumed", "ambiguous", "no_depid"} {
+		for _, scenario := range []string{"valid", "order_reference", "missing_order_reference", "early", "missing", "wrong_amount", "wrong_currency", "wrong_type", "wrong_uid", "old_time", "future_time", "pending", "closed", "api_error", "different_reference", "consumed", "ambiguous", "no_depid"} {
 			t.Run(provider+"/"+scenario, func(t *testing.T) {
+				if provider == "okx" && (scenario == "order_reference" || scenario == "missing_order_reference") {
+					t.Skip("Binance optional orderId field")
+				}
 				ctx := context.Background()
 				now := time.Now()
 				var calls atomic.Int32
@@ -72,7 +75,7 @@ func TestCustomerInquiryRejectsUnsafeEvidence(t *testing.T) {
 					rows := []any{}
 					if scenario != "missing" {
 						if provider == "binance" {
-							rows = append(rows, map[string]any{"transactionId": id, "transactionTime": stamp, "orderType": kind, "currency": currency, "amount": amount, "receiverInfo": map[string]string{"binanceId": "receiver"}})
+							rows = append(rows, map[string]any{"orderId": "app-order-77", "transactionId": id, "transactionTime": stamp, "orderType": kind, "currency": currency, "amount": amount, "receiverInfo": map[string]string{"binanceId": "receiver"}})
 						} else {
 							if r.URL.Query().Get("fromWdId") != "reference-1" || r.URL.Query().Get("type") != "3" || r.URL.Query().Get("ccy") != "USDT" {
 								t.Error("missing targeted OKX filters")
@@ -146,8 +149,15 @@ func TestCustomerInquiryRejectsUnsafeEvidence(t *testing.T) {
 					}
 				}
 				p := NewPoller(settings.New(cfg, st), st)
-				result, err := p.CheckPayment(ctx, o.TradeNo, "reference-1")
-				wantPaid := scenario == "valid" || (provider == "binance" && (scenario == "pending" || scenario == "ambiguous" || scenario == "no_depid"))
+				reference := "reference-1"
+				if provider == "binance" && scenario == "order_reference" {
+					reference = "app-order-77"
+				}
+				if provider == "binance" && scenario == "missing_order_reference" {
+					reference = "app-order-not-returned"
+				}
+				result, err := p.CheckPayment(ctx, o.TradeNo, reference)
+				wantPaid := scenario == "valid" || (provider == "binance" && (scenario == "order_reference" || scenario == "pending" || scenario == "ambiguous" || scenario == "no_depid"))
 				if wantPaid {
 					if err != nil || result != "paid" {
 						t.Fatalf("expected paid: %s %v", result, err)

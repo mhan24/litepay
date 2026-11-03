@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"litepay/internal/config"
 	"litepay/internal/maintenance"
@@ -22,13 +23,16 @@ var (
 	ErrInquiryClosed  = errors.New("订单已关闭，请联系商户人工核对，勿重复付款")
 )
 
-var referencePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+func validPaymentReference(ref string) bool {
+	return len(ref) > 0 && len(ref) <= 128 && utf8.ValidString(ref) &&
+		!strings.ContainsAny(ref, "<>\"'\\") && strings.IndexFunc(ref, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) < 0
+}
 
 // CheckPayment only consumes authenticated exchange evidence, never the submitted reference itself.
 // It does not advance scan cursors, release scan gaps, or resend merchant callbacks.
 func (p *Poller) CheckPayment(ctx context.Context, tradeNo, reference string) (string, error) {
 	reference = strings.TrimSpace(reference)
-	if !referencePattern.MatchString(reference) {
+	if !validPaymentReference(reference) {
 		return "", ErrInquiryInvalid
 	}
 	if maintenance.Blocked() || !p.workMu.TryLock() {
@@ -89,7 +93,7 @@ func (p *Poller) CheckPayment(ctx context.Context, tradeNo, reference string) (s
 		}
 		var matched []incomingTransaction
 		for _, tx := range txs {
-			if tx.ReferenceID == reference {
+			if tx.ReferenceID == reference || (tx.OrderID != "" && tx.OrderID == reference) {
 				matched = append(matched, tx)
 			}
 		}

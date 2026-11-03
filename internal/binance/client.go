@@ -61,16 +61,18 @@ func (c *Client) UseTestTransport() {
 
 // Transaction 一条 Binance 站内转账记录（已解析）。
 type Transaction struct {
-	ReferenceID     string    `json:"reference_id"` // Exchange ID before canonical fundsDetail suffixes.
-	OrderType       string    `json:"orderType"`
-	TransactionID   string    `json:"transactionId"`
-	TransactionTime time.Time `json:"transactionTime"`
-	AmountText      string    `json:"amount_text"`
-	Amount          float64   `json:"amount"` // 绝对值；收支方向由 Incoming 表示
-	Incoming        bool      `json:"incoming"`
-	Currency        string    `json:"currency"`
-	ReceiverID      string    `json:"receiverId"` // 收款方 binanceId
-	Raw             string    `json:"raw"`
+	OrderID          string    `json:"orderId"` // Optional exchange-provided App reference, never inferred.
+	RawTransactionID string    `json:"raw_transaction_id"`
+	ReferenceID      string    `json:"reference_id"` // Exchange ID before canonical fundsDetail suffixes.
+	OrderType        string    `json:"orderType"`
+	TransactionID    string    `json:"transactionId"`
+	TransactionTime  time.Time `json:"transactionTime"`
+	AmountText       string    `json:"amount_text"`
+	Amount           float64   `json:"amount"` // 绝对值；收支方向由 Incoming 表示
+	Incoming         bool      `json:"incoming"`
+	Currency         string    `json:"currency"`
+	ReceiverID       string    `json:"receiverId"` // 收款方 binanceId
+	Raw              string    `json:"raw"`
 }
 
 // AccountUID 返回当前 API Key 所属账户的 Binance UID。
@@ -230,6 +232,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 	seenRecords := make(map[string]struct{}, len(payload.Data))
 	for _, raw := range payload.Data {
 		var d struct {
+			OrderID         flexString `json:"orderId"`
 			OrderType       flexString `json:"orderType"`
 			TransactionID   flexString `json:"transactionId"`
 			TransactionTime flexInt64  `json:"transactionTime"`
@@ -270,12 +273,14 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			return nil, 0, fmt.Errorf("币安转账 %s 缺少有效时间", id)
 		}
 		base := Transaction{
-			OrderType:       strings.ToUpper(string(d.OrderType)),
-			TransactionID:   id,
-			ReferenceID:     id,
-			TransactionTime: time.UnixMilli(int64(d.TransactionTime)),
-			ReceiverID:      strings.TrimSpace(string(d.ReceiverInfo.BinanceID)),
-			Raw:             truncate(string(raw), maxStoredRawBytes),
+			OrderID:          strings.TrimSpace(string(d.OrderID)),
+			RawTransactionID: id,
+			OrderType:        strings.ToUpper(string(d.OrderType)),
+			TransactionID:    id,
+			ReferenceID:      id,
+			TransactionTime:  time.UnixMilli(int64(d.TransactionTime)),
+			ReceiverID:       strings.TrimSpace(string(d.ReceiverInfo.BinanceID)),
+			Raw:              truncate(string(raw), maxStoredRawBytes),
 		}
 		if len(d.FundsDetail) > 0 {
 			// A non-zero top-level amount is authoritative. Only when it is

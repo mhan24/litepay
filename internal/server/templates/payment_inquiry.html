@@ -5,11 +5,11 @@
 </style>
 <details class="payment-inquiry" id="payment-inquiry" {{if gt .InquiryDelay 0}}hidden{{end}}>
   <summary>已付款但未确认？提交转账编号查款</summary>
-  <p>仅核对当前订单的真实到账记录。请勿重复转账。{{if eq .Provider "okx"}}请填写付款方欧易站内转账的提现编号，不是收款编号或链上哈希。{{else}}请填写币安 Pay 付款详情中的交易编号，不是商城订单号。{{end}}</p>
+  <p>仅核对当前订单的真实到账记录。请勿重复转账。{{if eq .Provider "okx"}}请填写付款方欧易站内转账的提现编号，不是收款编号或链上哈希。{{else}}请填写币安付款详情中的订单编号或交易编号，不是商城订单号。若 API 未返回对应编号，需联系商户核对。{{end}}</p>
   <form id="payment-inquiry-form" method="post" action="/api/order/inquiry">
     <input type="hidden" name="trade_no" value="{{.TradeNo}}">
     <label for="payment-reference">{{if eq .Provider "okx"}}付款方提现编号{{else}}Binance Pay 交易编号{{end}}</label>
-    <input id="payment-reference" name="reference" maxlength="128" pattern="[A-Za-z0-9_\-]{1,128}" autocomplete="off" required>
+    <input id="payment-reference" name="reference" maxlength="128" autocomplete="off" required>
     <button type="submit">验证付款</button>
   </form>
   <div id="payment-inquiry-message" role="status" aria-live="polite"></div>
