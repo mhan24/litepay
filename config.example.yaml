@@ -4,6 +4,8 @@
 # 都保存在 SQLite 中，首次启动后请在 /admin/settings 配置。
 
 server:
+  # 访问根地址时跳转到商店；留空返回 404。
+  store_url: ""
   addr: "0.0.0.0:8080"
   base_url: "http://localhost:8080"
   # 生产环境只填写实际反向代理的固定 IP/CIDR；默认忽略转发 IP 头。
@@ -14,6 +16,8 @@ database:
   path: "./data/litepay.db"
 
 admin:
+  # 后台入口前缀，可改为不易猜到的单层路径；修改后重启。
+  path: "/admin"
   username: "admin"
   password: ""
   session_hours: 12

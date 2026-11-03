@@ -2,6 +2,8 @@
 # 支付业务配置保存在 SQLite，由 /admin/settings 维护。
 
 server:
+  # 访问根地址时跳转到商店；留空返回 404。
+  store_url: ""
   addr: "0.0.0.0:3000"
   base_url: "https://pay.9527.tr"
   trusted_proxies:
@@ -11,6 +13,8 @@ database:
   path: "/app/data/litepay.db"
 
 admin:
+  # 后台入口前缀，可改为不易猜到的单层路径；修改后重启。
+  path: "/admin"
   username: "admin"
   password: ""
   session_hours: 12

@@ -19,7 +19,7 @@ body{padding:40px 24px}.login{max-width:920px;margin:40px auto}.brand{display:fl
     {{template "theme_toggle" .}}
   </div>
   <div class="login-frame"><section class="login-context"><h2>收款与对账，<br>从这里查看。</h2><p>管理 Binance 和 OKX 收款，核对交易流水，追踪商户回调。</p><ul><li>检查到账扫描与服务状态</li><li>核对订单和未匹配的交易</li><li>处理回调失败与重试</li></ul></section>
-  <form class="card" method="post" action="/admin/login">
+  <form class="card" method="post" action="{{adminPath}}/login">
     {{if .Error}}<div class="err" role="alert">{{.Error}}</div>{{end}}
     <input type="hidden" name="next" value="{{.Next}}">
     <label for="username">管理员账号</label>

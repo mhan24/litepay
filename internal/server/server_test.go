@@ -892,7 +892,7 @@ func TestAllAdminTemplatesRender(t *testing.T) {
 	staleCopy := []string{"Binance Pay", "选择交易所", "待选支付方式"}
 	for _, path := range []string{
 		"/admin", "/admin/orders", "/admin/orders/" + o.TradeNo,
-		"/admin/settings", "/admin/integration", "/",
+		"/admin/settings", "/admin/integration",
 	} {
 		rec := requestAsAdmin(t, engine, cfg, path)
 		if rec.Code != http.StatusOK {

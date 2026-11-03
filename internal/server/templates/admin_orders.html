@@ -17,7 +17,7 @@
   </header>
 
   <section class="card">
-    <form class="filters" method="get" action="/admin/orders">
+    <form class="filters" method="get" action="{{adminPath}}/orders">
       <select name="status" aria-label="订单状态">
         <option value="" {{if eq .Status ""}}selected{{end}}>全部状态</option>
         <option value="PENDING" {{if eq .Status "PENDING"}}selected{{end}}>待选择平台</option>
@@ -29,7 +29,7 @@
       </select>
       <input class="grow" type="search" name="q" value="{{.Keyword}}" placeholder="订单编号、商户订单号或平台交易号">
       <button class="btn btn-primary btn-sm" type="submit">筛选</button>
-      {{if or .Keyword .Status}}<a class="btn btn-ghost btn-sm" href="/admin/orders">清除条件</a>{{end}}
+      {{if or .Keyword .Status}}<a class="btn btn-ghost btn-sm" href="{{adminPath}}/orders">清除条件</a>{{end}}
     </form>
     <div class="table-wrap">
       <table>
@@ -39,7 +39,7 @@
           <tr>
             <td class="muted mono">{{.CreatedAt.Format "01-02 15:04:05"}}</td>
             <td>
-              <a href="/admin/orders/{{.TradeNo}}" class="mono">{{.OutTradeNo}}</a>
+              <a href="{{adminPath}}/orders/{{.TradeNo}}" class="mono">{{.OutTradeNo}}</a>
               {{if .Name}}<div class="muted" style="font-size:12px;margin-top:2px">{{.Name}}</div>{{end}}
             </td>
             <td class="num">{{fmtOrderAmount .PayAmount .AmountPrecision}} <span class="muted" style="font-weight:400">{{if .Currency}}{{.Currency}}{{else}}待选择{{end}}</span></td>
@@ -58,7 +58,7 @@
               {{else}}<span class="muted">—</span>{{end}}
             </td>
             <td class="mono muted">{{if .TxID}}{{.TxID}}{{else}}—{{end}}</td>
-            <td><a class="btn btn-ghost btn-sm" href="/admin/orders/{{.TradeNo}}">查看</a></td>
+            <td><a class="btn btn-ghost btn-sm" href="{{adminPath}}/orders/{{.TradeNo}}">查看</a></td>
           </tr>
         {{else}}
           <tr><td colspan="7" class="empty">没有符合条件的订单。</td></tr>
@@ -68,9 +68,9 @@
     </div>
     <div class="pager">
       <span>共 {{.Total}} 条</span>
-      {{if .HasPrev}}<a href="/admin/orders?page={{.PrevPage}}&status={{.Status}}&q={{.Keyword}}">上一页</a>{{else}}<span class="dis">上一页</span>{{end}}
+      {{if .HasPrev}}<a href="{{adminPath}}/orders?page={{.PrevPage}}&status={{.Status}}&q={{.Keyword}}">上一页</a>{{else}}<span class="dis">上一页</span>{{end}}
       <span class="dis">{{.Page}} / {{.TotalPages}}</span>
-      {{if .HasNext}}<a href="/admin/orders?page={{.NextPage}}&status={{.Status}}&q={{.Keyword}}">下一页</a>{{else}}<span class="dis">下一页</span>{{end}}
+      {{if .HasNext}}<a href="{{adminPath}}/orders?page={{.NextPage}}&status={{.Status}}&q={{.Keyword}}">下一页</a>{{else}}<span class="dis">下一页</span>{{end}}
     </div>
   </section>
 </main>

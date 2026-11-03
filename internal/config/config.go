@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -72,6 +73,7 @@ func IsSupportedCurrency(currency string) bool {
 
 // ServerConfig HTTP 服务配置。
 type ServerConfig struct {
+	StoreURL       string   `yaml:"store_url"`       // 根地址跳转目标；留空返回 404。
 	TrustedProxies []string `yaml:"trusted_proxies"` // Only explicit reverse proxies may supply client IP headers.
 	Addr           string   `yaml:"addr"`            // 监听地址，如 0.0.0.0:8080
 	BaseURL        string   `yaml:"base_url"`        // 网关对外访问地址
@@ -142,6 +144,7 @@ type NotifyConfig struct {
 
 // AdminConfig 后台管理配置。密码留空则不启用后台。
 type AdminConfig struct {
+	Path         string `yaml:"path"` // 后台入口前缀，修改后重启生效。
 	Username     string `yaml:"username"`
 	Password     string `yaml:"password"`
 	SessionHours int    `yaml:"session_hours"`
@@ -219,6 +222,9 @@ func Load(path string) (*Config, error) {
 
 // normalize 补齐派生字段并做基本校验。
 func (c *Config) normalize() error {
+	if err := c.ValidateWebRoutes(); err != nil {
+		return err
+	}
 	c.Server.BaseURL = strings.TrimRight(strings.TrimSpace(c.Server.BaseURL), "/")
 	if c.Server.BaseURL == "" {
 		c.Server.BaseURL = "http://127.0.0.1" + portSuffix(c.Server.Addr)
@@ -300,6 +306,37 @@ func (c *Config) normalize() error {
 	}
 	if c.Admin.Password == "" {
 		fmt.Fprintln(os.Stderr, "[WARN] 未在 config.yaml 配置 admin.password，后台管理已禁用")
+	}
+	return nil
+}
+
+// AdminPath returns the configured mount point; existing installations retain /admin.
+func (c *Config) AdminPath() string {
+	if c.Admin.Path == "" {
+		return "/admin"
+	}
+	return c.Admin.Path
+}
+
+// ValidateWebRoutes rejects ambiguous paths and unsafe or looping homepage redirects.
+func (c *Config) ValidateWebRoutes() error {
+	root := c.AdminPath()
+	if !regexp.MustCompile(`^/[A-Za-z0-9][A-Za-z0-9_-]{2,95}$`).MatchString(root) {
+		return fmt.Errorf("admin.path 必须为 / 开头、3~96 位字母数字或下划线及连字符的单层路径")
+	}
+	switch root {
+	case "/pay", "/api", "/assets", "/healthz", "/readyz":
+		return fmt.Errorf("admin.path 与系统路径冲突")
+	}
+	if c.Server.StoreURL != "" {
+		u, err := url.Parse(c.Server.StoreURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || strings.ContainsAny(c.Server.StoreURL, "\r\n") {
+			return fmt.Errorf("server.store_url 必须是无用户信息的 HTTP(S) 商店地址")
+		}
+		base, _ := url.Parse(c.Server.BaseURL)
+		if base != nil && strings.EqualFold(u.Host, base.Host) {
+			return fmt.Errorf("server.store_url 必须指向网关以外的商店站点")
+		}
 	}
 	return nil
 }

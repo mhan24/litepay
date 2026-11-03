@@ -15,6 +15,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -257,7 +258,7 @@ func (h *Handlers) AdminAuth() gin.HandlerFunc {
 
 func (h *Handlers) redirectLogin(c *gin.Context) {
 	next := c.Request.URL.RequestURI()
-	c.Redirect(http.StatusSeeOther, "/admin/login?next="+url.QueryEscape(next))
+	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?next=")+url.QueryEscape(next))
 	c.Abort()
 }
 
@@ -295,7 +296,7 @@ func (h *Handlers) adminBase(c *gin.Context, active, title string) AdminBase {
 func (h *Handlers) AdminLoginPage(c *gin.Context) {
 	if cookie, err := c.Cookie(adminCookieName); err == nil {
 		if _, ok := h.currentAdmin().parse(cookie); ok {
-			c.Redirect(http.StatusSeeOther, "/admin")
+			c.Redirect(http.StatusSeeOther, h.adminURL("/admin"))
 			return
 		}
 	}
@@ -312,7 +313,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
 	if !auth.allow(ip) {
-		c.Redirect(http.StatusSeeOther, "/admin/login?err="+url.QueryEscape("尝试过于频繁，请 10 分钟后再试"))
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("尝试过于频繁，请 10 分钟后再试"))
 		return
 	}
 
@@ -323,7 +324,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	if !auth.checkCredentials(user, pass) {
 		// Attempts are reserved atomically in allow, including concurrent requests.
 		auth.failed(ip)
-		c.Redirect(http.StatusSeeOther, "/admin/login?err="+url.QueryEscape("账号或密码错误"))
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("账号或密码错误"))
 		return
 	}
 	auth.succeeded(ip)
@@ -331,14 +332,14 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	token, _, err := auth.issue()
 	if err != nil {
 		slog.Error("创建后台会话失败", "err", err)
-		c.Redirect(http.StatusSeeOther, "/admin/login?err="+url.QueryEscape("登录服务暂时不可用，请稍后重试"))
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("登录服务暂时不可用，请稍后重试"))
 		return
 	}
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(adminCookieName, token, int(auth.ttl.Seconds()), "/", "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
+	c.SetCookie(adminCookieName, token, int(auth.ttl.Seconds()), h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
 
-	if next == "" || !strings.HasPrefix(next, "/admin") {
-		next = "/admin"
+	if !safeAdminNext(next, h.C().AdminPath()) {
+		next = h.adminURL("/admin")
 	}
 	c.Redirect(http.StatusSeeOther, next)
 }
@@ -346,8 +347,8 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 // AdminLogout POST /admin/logout
 func (h *Handlers) AdminLogout(c *gin.Context) {
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(adminCookieName, "", -1, "/", "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
-	c.Redirect(http.StatusSeeOther, "/admin/login")
+	c.SetCookie(adminCookieName, "", -1, h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
+	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login"))
 }
 
 // -----------------------------------------------------------------------------
@@ -509,7 +510,7 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 func (h *Handlers) AdminOrderAction(c *gin.Context) {
 	tradeNo := c.Param("trade_no")
 	action := c.PostForm("action")
-	back := "/admin/orders/" + tradeNo
+	back := h.adminURL("/admin/orders/") + tradeNo
 
 	var err error
 	var msg string
@@ -569,28 +570,28 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 	p, errs := parseSettingsForm(c)
 	if len(errs) > 0 {
-		c.Redirect(http.StatusSeeOther, "/admin/settings?msg="+url.QueryEscape(strings.Join(errs, "；"))+"&t=err")
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape(strings.Join(errs, "；"))+"&t=err")
 		return
 	}
 
 	operator := c.GetString("admin_user")
 	if err := h.cfg.Update(c.Request.Context(), p, operator); err != nil {
-		c.Redirect(http.StatusSeeOther, "/admin/settings?msg="+url.QueryEscape(err.Error())+"&t=err")
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
 
 	slog.Info("后台配置已更新", "operator", operator)
 	if p.VerifyAccounts {
-		c.Redirect(http.StatusSeeOther, "/admin/settings?msg="+url.QueryEscape("已完整配置的平台 API Key 与收款 UID 核验通过，配置已保存"))
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape("已完整配置的平台 API Key 与收款 UID 核验通过，配置已保存"))
 		return
 	}
-	c.Redirect(http.StatusSeeOther, "/admin/settings?msg="+url.QueryEscape("配置已保存并立即生效"))
+	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape("配置已保存并立即生效"))
 }
 
 // AdminAccountSave updates credentials after reauthentication.
 func (h *Handlers) AdminAccountSave(c *gin.Context) {
 	fail := func(msg string) {
-		c.Redirect(http.StatusSeeOther, "/admin/settings?msg="+url.QueryEscape(msg)+"&t=err")
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape(msg)+"&t=err")
 	}
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
@@ -641,12 +642,12 @@ func (h *Handlers) AdminRotateToken(c *gin.Context) {
 	_, err := h.cfg.RotateAPIToken(c.Request.Context(), c.GetString("admin_user"))
 	if err != nil {
 		c.Redirect(http.StatusSeeOther,
-			"/admin/integration?msg="+url.QueryEscape("API Token 生成失败，请重试")+"&t=err")
+			h.adminURL("/admin/integration?msg=")+url.QueryEscape("API Token 生成失败，请重试")+"&t=err")
 		return
 	}
 	slog.Info("BEpusdt API Token 已轮换", "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther,
-		"/admin/integration?msg="+url.QueryEscape("API Token 已轮换；请立即更新独角数卡")+
+		h.adminURL("/admin/integration?msg=")+url.QueryEscape("API Token 已轮换；请立即更新独角数卡")+
 			"&token_rotated=1")
 }
 
@@ -807,4 +808,17 @@ func maskSecret(s string) string {
 		return "********"
 	}
 	return s[:4] + "********" + s[len(s)-4:]
+}
+
+// adminURL maps internal destinations onto the configured mount point.
+func (h *Handlers) adminURL(route string) string {
+	return h.C().AdminPath() + strings.TrimPrefix(route, "/admin")
+}
+
+func safeAdminNext(raw, root string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Opaque != "" || strings.ContainsAny(raw, "\\\r\n") || strings.ContainsAny(u.Path, "\\\r\n") || path.Clean(u.Path) != u.Path {
+		return false
+	}
+	return u.Path == root || strings.HasPrefix(u.Path, root+"/")
 }

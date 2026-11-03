@@ -15,7 +15,7 @@
   {{template "admin_flash" .}}
 
   <div style="margin-bottom:12px">
-    <a href="/admin/orders" class="muted" style="font-size:12.5px;text-decoration:none">← 返回订单列表</a>
+    <a href="{{adminPath}}/orders" class="muted" style="font-size:12.5px;text-decoration:none">← 返回订单列表</a>
   </div>
 
   <div class="detail-head">
@@ -30,7 +30,7 @@
 
     <div class="actions">
       {{if .CanPay}}
-      <form method="post" action="/admin/orders/{{.Order.TradeNo}}/action" style="margin:0"
+      <form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/action" style="margin:0"
             data-confirm="仅使用账本中真实流水，仍检查金额、币种、收款人、支付窗口与流水唯一性。核销后发送回调；已终结订单请先与商户协调。">
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
         <input type="hidden" name="action" value="pay">
@@ -40,7 +40,7 @@
       {{end}}
 
       {{if .CanRetry}}
-      <form method="post" action="/admin/orders/{{.Order.TradeNo}}/action" style="margin:0">
+      <form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/action" style="margin:0">
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
         <input type="hidden" name="action" value="notify">
         <button class="btn btn-ghost btn-sm" type="submit">重新发送结果通知</button>
@@ -48,7 +48,7 @@
       {{end}}
 
       {{if .CanExpire}}
-      <form method="post" action="/admin/orders/{{.Order.TradeNo}}/action" style="margin:0"
+      <form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/action" style="margin:0"
             data-confirm="结束后，收银台会立即关闭，付款截止时间和金额占用不变；宽限期内仍会确认已经发出的付款，宽限结束后停止监听并发送 status=3。独角数卡部分版本会拒绝该状态，请以通知记录为准。">
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
         <input type="hidden" name="action" value="expire">

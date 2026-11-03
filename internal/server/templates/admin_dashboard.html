@@ -17,7 +17,7 @@
       <h1>收款概览</h1>
       <p class="sub">{{.Now}} · BEpusdt 收银台 · USD 结算 · 稳定币 1:1</p>
     </div>
-    <a class="btn btn-ghost" href="/admin/orders">查看全部订单</a>
+    <a class="btn btn-ghost" href="{{adminPath}}/orders">查看全部订单</a>
   </header>
 
   {{if and (not .BinanceOn) (not .OKXOn)}}
@@ -29,7 +29,7 @@
   {{end}}
 
   <section class="card" aria-labelledby="attention-title">
-    <div class="card-h"><h2 id="attention-title">需要处理</h2><a href="/admin/orders" class="btn btn-ghost btn-sm">核对订单</a></div>
+    <div class="card-h"><h2 id="attention-title">需要处理</h2><a href="{{adminPath}}/orders" class="btn btn-ghost btn-sm">核对订单</a></div>
     <div class="attention-row">
       <div class="attention-item">待人工对账<strong>{{.Operations.ReconciliationOrders}}</strong><p>超过 24 小时未确认 {{.Operations.OverdueOrders}} 笔</p></div>
       <div class="attention-item">商户回调重试<strong>{{.Operations.NotifyRetrying}}</strong><p>租约到期待恢复 {{.Operations.NotifyRecoverable}} 笔</p></div>
@@ -62,7 +62,7 @@
 
   <div class="grid-2 dashboard-work">
     <section class="card">
-      <div class="card-h"><h2>最近订单</h2><a href="/admin/orders" class="muted" style="font-size:12px">全部</a></div>
+      <div class="card-h"><h2>最近订单</h2><a href="{{adminPath}}/orders" class="muted" style="font-size:12px">全部</a></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>时间</th><th>商户订单号</th><th>应付</th><th>状态</th><th>通知</th></tr></thead>
@@ -70,7 +70,7 @@
           {{range .Recent}}
             <tr>
               <td class="muted mono">{{.CreatedAt.Format "01-02 15:04"}}</td>
-              <td><a href="/admin/orders/{{.TradeNo}}" class="mono">{{.OutTradeNo}}</a></td>
+              <td><a href="{{adminPath}}/orders/{{.TradeNo}}" class="mono">{{.OutTradeNo}}</a></td>
               <td class="num">{{fmtOrderAmount .PayAmount .AmountPrecision}} <span class="muted" style="font-weight:400">{{if .Currency}}{{.Currency}}{{else}}待选择{{end}}</span></td>
               <td>
                 {{if eq .Status "PAID"}}<span class="badge b-ok">已支付</span>

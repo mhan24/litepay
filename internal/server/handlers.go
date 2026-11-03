@@ -494,12 +494,11 @@ func (h *Handlers) Health(c *gin.Context) {
 
 // Index GET /
 func (h *Handlers) Index(c *gin.Context) {
-	c.HTML(http.StatusOK, "index.html", gin.H{
-		"Currency":    h.C().DefaultCurrency(),
-		"Provider":    "Binance / OKX",
-		"Expire":      h.C().Order.ExpireMinutes,
-		"PollSeconds": min(h.C().Binance.PollInterval, h.C().OKX.PollInterval),
-	})
+	if target := externalURL(h.C().Server.StoreURL); target != "" {
+		c.Redirect(http.StatusFound, target)
+		return
+	}
+	c.Status(http.StatusNotFound)
 }
 
 // -----------------------------------------------------------------------------

@@ -27,10 +27,14 @@ var staticFS embed.FS
 
 // New 构建 gin 引擎并注册全部路由。
 func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.Engine, error) {
+	if err := mgr.Get().ValidateWebRoutes(); err != nil {
+		return nil, err
+	}
 	gin.SetMode(gin.ReleaseMode)
 
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"externalURL": externalURL,
+		"adminPath":   func() string { return mgr.Get().AdminPath() },
 		"hasStr": func(list []string, v string) bool {
 			for _, item := range list {
 				if strings.EqualFold(item, v) {
@@ -120,11 +124,15 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 
 	// ---- 后台管理 ----
 	if cfg.AdminEnabled() {
-		r.GET("/admin/login", h.AdminLoginPage)
-		r.POST("/admin/login", h.AdminLoginSubmit)
-		r.POST("/admin/logout", h.AdminLogout)
+		adminRoot := r.Group(cfg.AdminPath(), func(c *gin.Context) {
+			c.Set("admin_route", true)
+			c.Next()
+		})
+		adminRoot.GET("/login", h.AdminLoginPage)
+		adminRoot.POST("/login", h.AdminLoginSubmit)
+		adminRoot.POST("/logout", h.AdminLogout)
 
-		adm := r.Group("/admin", h.AdminAuth())
+		adm := adminRoot.Group("", h.AdminAuth())
 		adm.GET("", h.AdminDashboard)
 		adm.GET("/orders", h.AdminOrders)
 		adm.GET("/orders/:trade_no", h.AdminOrderDetail)
@@ -134,7 +142,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.POST("/settings", h.AdminSettingsSave)
 		adm.POST("/settings/token", h.AdminRotateToken)
 		adm.POST("/settings/account", h.AdminAccountSave)
-		slog.Info("后台管理已启用", "url", "/admin", "user", cfg.Admin.Username)
+		slog.Info("后台管理已启用")
 	} else {
 		slog.Warn("config.yaml 未配置 admin.password，后台管理未启用")
 	}
@@ -174,6 +182,9 @@ func requestLogger() gin.HandlerFunc {
 // redactedPath 收银台 URL 的订单号是访问凭据，不能原样写入日志。
 // 已匹配路由记录路由模板；未匹配路径只保留首段。
 func redactedPath(c *gin.Context) string {
+	if c.GetBool("admin_route") {
+		return "/[admin]"
+	}
 	if pattern := c.FullPath(); pattern != "" {
 		return pattern
 	}

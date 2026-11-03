@@ -47,17 +47,17 @@ body{padding-left:88px}
 {{define "admin_nav"}}
 <header class="topbar">
   <div class="topbar-in">
-    <a class="brand" href="/admin"><span class="mark">{{template "brand_mark" .}}</span><span class="brand-name">LitePay</span><span class="brand-sub">管理后台</span></a>
+    <a class="brand" href="{{adminPath}}"><span class="mark">{{template "brand_mark" .}}</span><span class="brand-name">LitePay</span><span class="brand-sub">管理后台</span></a>
     <nav class="nav" aria-label="管理后台导航">
-      <a href="/admin" class="{{if eq .Base.Active "dashboard"}}on{{end}}" aria-label="概览"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10h7V3H3v7Zm11 11h7v-7h-7v7ZM3 21h7v-7H3v7Zm11-11h7V3h-7v7Z"/></svg><span class="nav-label">概览</span></a>
-      <a href="/admin/orders" class="{{if eq .Base.Active "orders"}}on{{end}}" aria-label="订单"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Z"/><path d="M9 8h6M9 12h6"/></svg><span class="nav-label">订单</span></a>
-      <a href="/admin/integration" class="{{if eq .Base.Active "integration"}}on{{end}}" aria-label="接入"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-5 5 5 5m6-10 5 5-5 5m-2-13-2 20"/></svg><span class="nav-label">接入</span></a>
-      <a href="/admin/settings" class="{{if eq .Base.Active "settings"}}on{{end}}" aria-label="设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--bg)"/><circle cx="15" cy="17" r="3" fill="var(--bg)"/></svg><span class="nav-label">设置</span></a>
+      <a href="{{adminPath}}" class="{{if eq .Base.Active "dashboard"}}on{{end}}" aria-label="概览"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10h7V3H3v7Zm11 11h7v-7h-7v7ZM3 21h7v-7H3v7Zm11-11h7V3h-7v7Z"/></svg><span class="nav-label">概览</span></a>
+      <a href="{{adminPath}}/orders" class="{{if eq .Base.Active "orders"}}on{{end}}" aria-label="订单"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Z"/><path d="M9 8h6M9 12h6"/></svg><span class="nav-label">订单</span></a>
+      <a href="{{adminPath}}/integration" class="{{if eq .Base.Active "integration"}}on{{end}}" aria-label="接入"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-5 5 5 5m6-10 5 5-5 5m-2-13-2 20"/></svg><span class="nav-label">接入</span></a>
+      <a href="{{adminPath}}/settings" class="{{if eq .Base.Active "settings"}}on{{end}}" aria-label="设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--bg)"/><circle cx="15" cy="17" r="3" fill="var(--bg)"/></svg><span class="nav-label">设置</span></a>
     </nav>
     <div class="userbox">
       {{template "theme_toggle" .}}
       <span class="who">{{.Base.User}}</span>
-      <form method="post" action="/admin/logout" style="margin:0">
+      <form method="post" action="{{adminPath}}/logout" style="margin:0">
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
         <button type="submit" class="linkbtn">退出</button>
       </form>

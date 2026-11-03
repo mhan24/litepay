@@ -60,6 +60,17 @@ go run . -config config.yaml
 
 首次启动后登录 `/admin/settings`，填写交易所只读密钥与收款 UID。API Token 由系统随机生成，在 `/admin/integration` 查看；需要更换时点击“生成新 Token”，旧值会立即失效。
 
+根地址不再展示网关介绍或后台入口。可在启动配置中设置商店跳转和后台前缀：
+
+```yaml
+server:
+  store_url: "https://shop.example.com"
+admin:
+  path: "/workspace-your-random-suffix"
+```
+
+这两项修改后需重启；其余启动配置保持原值。`store_url` 留空时根地址返回 404，不能指向网关本站。`admin.path` 留空兼容旧 `/admin`；自定义后旧 `/admin` 返回 404，不会跳转或提示新入口。路径必须是单层、3~96 位字母数字、下划线或连字符，不能占用系统路由。登录、会话 Cookie、导航、表单与跳转均使用新前缀。路径隐藏不代替密码、限流或 CSRF；请保存入口地址，勿发布到公共仓库。支付 API、收银台、健康和就绪地址不变。
+
 ## 部署
 
 ```bash

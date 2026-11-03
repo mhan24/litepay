@@ -32,7 +32,7 @@
     <button type="button" data-settings-view="merchant" aria-pressed="false">商户回调</button>
     <button type="button" data-settings-view="account" aria-pressed="false">管理员</button>
   </nav>
-  <form data-settings-account method="post" action="/admin/settings/account">
+  <form data-settings-account method="post" action="{{adminPath}}/settings/account">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <section data-settings-group="account" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>管理员账号</h2><span class="hint">修改后请重新登录</span></div>
@@ -47,7 +47,7 @@
       </div>
     </section>
   </form>
-  <form data-settings-payment method="post" action="/admin/settings">
+  <form data-settings-payment method="post" action="{{adminPath}}/settings">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
 
     <section data-settings-group="checkout" class="card" style="margin-bottom:12px">
@@ -194,8 +194,8 @@
             <label>API Token</label>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <span class="mono" style="padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)">{{.BEpusdtKeyMask}}</span>
-              <button class="btn btn-ghost btn-sm" type="submit" form="rotate-token" formaction="/admin/settings/token">轮换并生成新 Token</button>
-              <a class="btn btn-ghost btn-sm" href="/admin/integration">查看接入信息</a>
+              <button class="btn btn-ghost btn-sm" type="submit" form="rotate-token" formaction="{{adminPath}}/settings/token">轮换并生成新 Token</button>
+              <a class="btn btn-ghost btn-sm" href="{{adminPath}}/integration">查看接入信息</a>
             </div>
             <span class="hint">Token 只能由系统安全随机生成。轮换后旧 Token 立即失效，新 Token 会展示在接入页，请立即更新独角数卡。</span>
           </div>
@@ -235,7 +235,7 @@
       </div>
     </div>
   </form>
-  <form id="rotate-token" method="post" action="/admin/settings/token" hidden>
+  <form id="rotate-token" method="post" action="{{adminPath}}/settings/token" hidden>
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
   </form>
 </main>

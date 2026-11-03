@@ -281,7 +281,11 @@ func TestAuditPublicHealthAndHomeDoNotExposeOrderStats(t *testing.T) {
 	for _, path := range []string{"/healthz", "/"} {
 		rec := httptest.NewRecorder()
 		engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-		if rec.Code != http.StatusOK {
+		want := http.StatusOK
+		if path == "/" {
+			want = http.StatusNotFound
+		}
+		if rec.Code != want {
 			t.Fatalf("%s HTTP %d", path, rec.Code)
 		}
 		body := strings.ToLower(rec.Body.String())
