@@ -1,0 +1,29 @@
+{{define "payment_inquiry"}}
+{{if .CanInquire}}
+<style>
+.payment-inquiry{margin-top:24px;padding-top:20px;border-top:1px solid var(--line);font-size:14px}.payment-inquiry[hidden]{display:none}.payment-inquiry summary{cursor:pointer;min-height:44px;display:list-item;line-height:44px;font-weight:500}.payment-inquiry p{font-size:13px;color:var(--muted);line-height:1.7;margin:8px 0 16px}.payment-inquiry label{display:block;margin-bottom:8px}.payment-inquiry input{width:100%;min-height:44px;padding:10px 12px;background:var(--surface);color:var(--text);border:1px solid var(--line-strong);border-radius:6px}.payment-inquiry button{margin-top:12px;min-height:44px;padding:10px 16px;border:0;border-radius:6px;background:var(--text);color:var(--surface);cursor:pointer}.payment-inquiry button:disabled{opacity:.6}.payment-inquiry [role=status]{margin-top:12px;font-size:13px;line-height:1.7;color:var(--muted)}
+</style>
+<details class="payment-inquiry" id="payment-inquiry" {{if gt .InquiryDelay 0}}hidden{{end}}>
+  <summary>已付款但未确认？提交转账编号查款</summary>
+  <p>仅核对当前订单的真实到账记录。请勿重复转账。{{if eq .Provider "okx"}}请填写付款方欧易站内转账的提现编号，不是收款编号或链上哈希。{{else}}请填写币安 Pay 付款详情中的交易编号，不是商城订单号。{{end}}</p>
+  <form id="payment-inquiry-form" method="post" action="/api/order/inquiry">
+    <input type="hidden" name="trade_no" value="{{.TradeNo}}">
+    <label for="payment-reference">{{if eq .Provider "okx"}}付款方提现编号{{else}}Binance Pay 交易编号{{end}}</label>
+    <input id="payment-reference" name="reference" maxlength="128" pattern="[A-Za-z0-9_\-]{1,128}" autocomplete="off" required>
+    <button type="submit">验证付款</button>
+  </form>
+  <div id="payment-inquiry-message" role="status" aria-live="polite"></div>
+</details>
+<script>
+(function(){
+var box=document.getElementById('payment-inquiry'),form=document.getElementById('payment-inquiry-form'),msg=document.getElementById('payment-inquiry-message'),button=form.querySelector('button');
+setTimeout(function(){box.hidden=false},{{.InquiryDelay}}*1000);
+form.addEventListener('submit',async function(event){event.preventDefault();if(button.disabled)return;button.disabled=true;msg.textContent='正在向交易所核对付款，请稍候…';
+try{var response=await fetch(form.action,{method:'POST',body:new URLSearchParams(new FormData(form)),credentials:'same-origin'});var result=await response.json();msg.textContent=result.msg||'暂时无法查款，请稍后重试，勿重复付款';if(result.result==='paid'){form.hidden=true;setTimeout(function(){location.reload()},1500);return;}}
+catch(error){msg.textContent='查款请求未完成，请稍后查看订单状态，勿重复付款';}
+setTimeout(function(){button.disabled=false},60000);
+});
+})();
+</script>
+{{end}}
+{{end}}

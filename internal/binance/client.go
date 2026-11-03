@@ -61,6 +61,7 @@ func (c *Client) UseTestTransport() {
 
 // Transaction 一条 Binance 站内转账记录（已解析）。
 type Transaction struct {
+	ReferenceID     string    `json:"reference_id"` // Exchange ID before canonical fundsDetail suffixes.
 	OrderType       string    `json:"orderType"`
 	TransactionID   string    `json:"transactionId"`
 	TransactionTime time.Time `json:"transactionTime"`
@@ -271,6 +272,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 		base := Transaction{
 			OrderType:       strings.ToUpper(string(d.OrderType)),
 			TransactionID:   id,
+			ReferenceID:     id,
 			TransactionTime: time.UnixMilli(int64(d.TransactionTime)),
 			ReceiverID:      strings.TrimSpace(string(d.ReceiverInfo.BinanceID)),
 			Raw:             truncate(string(raw), maxStoredRawBytes),

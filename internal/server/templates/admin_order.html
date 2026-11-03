@@ -72,6 +72,7 @@
           <div class="k">客户端 IP</div><div class="v mono">{{if .Order.ClientIP}}{{.Order.ClientIP}}{{else}}—{{end}}</div>
           <div class="k">下单时间</div><div class="v">{{.Order.CreatedAt.Format "2006-01-02 15:04:05"}}</div>
           <div class="k">付款截止</div><div class="v">{{.Order.ExpiredAt.Format "2006-01-02 15:04:05"}}</div>
+          {{with .Inquiry}}<div class="k">用户提交查款</div><div class="v">{{.Attempts}} 次 · 最近 {{.LastAttemptAt.Format "01-02 15:04:05"}}<br><span class="mono">{{.Reference}}</span><br>{{if eq .Result "paid"}}付款已确认{{else if eq .Result "not_found"}}暂未找到付款{{else if eq .Result "needs_review"}}需人工核对{{else if eq .Result "api_error"}}交易所或数据库查询失败{{else}}查款进行中或被中断，可稍后重试{{end}}</div>{{end}}
         </div>
       </div>
     </div>

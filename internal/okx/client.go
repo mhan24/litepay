@@ -157,6 +157,15 @@ func (c *Client) depositHistoryPage(ctx context.Context, currency string, after 
 	if after > 0 {
 		q.Set("after", strconv.FormatInt(after, 10))
 	}
+	return c.depositHistoryQuery(ctx, q)
+}
+
+// DepositBySenderReference queries the receiving account using the sender's withdrawal ID.
+func (c *Client) DepositBySenderReference(ctx context.Context, currency, reference string) ([]Deposit, error) {
+	return c.depositHistoryQuery(ctx, url.Values{"ccy": {currency}, "type": {"3"}, "fromWdId": {reference}, "limit": {strconv.Itoa(c.limit)}})
+}
+
+func (c *Client) depositHistoryQuery(ctx context.Context, q url.Values) ([]Deposit, error) {
 	body, err := c.get(ctx, "/api/v5/asset/deposit-history", q)
 	if err != nil {
 		return nil, err

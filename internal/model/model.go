@@ -214,6 +214,16 @@ type TxObservation struct {
 // TableName 指定表名。
 func (TxObservation) TableName() string { return "tx_observations" }
 
+// PaymentInquiry stores a customer's latest untrusted reference separately from exchange evidence.
+type PaymentInquiry struct {
+	TradeNo       string `gorm:"primaryKey;size:64"`
+	Reference     string `gorm:"size:128"`
+	Result        string `gorm:"size:32"`
+	Attempts      int
+	LastAttemptAt time.Time
+	UpdatedAt     time.Time
+}
+
 // NotifyLog 回调尝试记录。
 type NotifyLog struct {
 	LeaseID         string

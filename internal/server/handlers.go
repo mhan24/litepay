@@ -36,6 +36,9 @@ func (h *Handlers) C() *config.Config { return h.cfg.Get() }
 
 // CashierData 收银台模板数据。
 type CashierData struct {
+	CanInquire       bool
+	InquiryDelay     int
+	NotifyStatus     string
 	Title            string
 	Provider         string
 	ProviderName     string
@@ -163,6 +166,8 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 	currencyOptions := currencyOptionsFor(cfg, o, provider)
 
 	data := CashierData{
+		CanInquire:       !needsProvider && !needsCurrency && o.Status == model.StatusReady,
+		InquiryDelay:     inquiryDelay(o),
 		Title:            providerName,
 		Provider:         provider,
 		ProviderName:     providerName,
@@ -410,16 +415,20 @@ func (h *Handlers) selectPayment(c *gin.Context) {
 
 func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 	data := CashierData{
-		Title:       "支付结果",
-		TradeNo:     o.TradeNo,
-		OutTradeNo:  o.OutTradeNo,
-		Name:        o.Name,
-		Amount:      amount.FormatPrecision(o.PayAmount, o.AmountPrecision),
-		Currency:    o.Currency,
-		OriginMoney: o.OriginMoney,
-		ReturnURL:   o.ReturnURL,
-		Status:      o.Status,
-		CreatedAt:   o.CreatedAt.Format("2006-01-02 15:04:05"),
+		CanInquire:   o.Status == model.StatusExpired && !o.ExpireFinalized && o.SelectedAt != nil,
+		InquiryDelay: inquiryDelay(o),
+		Provider:     o.Collection,
+		NotifyStatus: o.NotifyStatus,
+		Title:        "支付结果",
+		TradeNo:      o.TradeNo,
+		OutTradeNo:   o.OutTradeNo,
+		Name:         o.Name,
+		Amount:       amount.FormatPrecision(o.PayAmount, o.AmountPrecision),
+		Currency:     o.Currency,
+		OriginMoney:  o.OriginMoney,
+		ReturnURL:    o.ReturnURL,
+		Status:       o.Status,
+		CreatedAt:    o.CreatedAt.Format("2006-01-02 15:04:05"),
 	}
 	c.HTML(http.StatusOK, "result.html", data)
 }

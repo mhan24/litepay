@@ -129,6 +129,14 @@ func (e *exchange) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestPaymentAcceptanceHTTPToMerchantDelivery(t *testing.T) {
+	runPaymentAcceptance(t, false)
+}
+
+func TestPaymentInquiryHTTPToMerchantDelivery(t *testing.T) {
+	runPaymentAcceptance(t, true)
+}
+
+func runPaymentAcceptance(t *testing.T, selfService bool) {
 	for _, provider := range []string{"binance", "okx"} {
 		for _, currency := range []string{"USDT", "USDC"} {
 			t.Run(provider+"/"+currency, func(t *testing.T) {
@@ -213,6 +221,12 @@ func TestPaymentAcceptanceHTTPToMerchantDelivery(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if selfService {
+					// Advance only the eligibility clock, never payment or callback state.
+					if err := st.DB().Model(order).Updates(map[string]any{"created_at": time.Now().Add(-2 * time.Minute), "selected_at": time.Now().Add(-61 * time.Second)}).Error; err != nil {
+						t.Fatal(err)
+					}
+				}
 				// Time changes belong to the fake exchange only: no direct payment-state writes.
 				at := time.Now().Add(time.Millisecond)
 				for time.Now().Before(at) {
@@ -293,7 +307,30 @@ func TestPaymentAcceptanceHTTPToMerchantDelivery(t *testing.T) {
 				ex.mu.Lock()
 				ex.amount = selected.Data.Amount
 				ex.mu.Unlock()
-				worker.AcceptanceScan(poll, ctx, cfg, provider)
+				if selfService {
+					ref := "realistic-id"
+					if provider == "okx" {
+						ref = "from-" + ref
+					}
+					for attempt := 0; attempt < 2; attempt++ {
+						resp, err := http.PostForm(api.URL+"/api/order/inquiry", url.Values{"trade_no": {shop.trade}, "reference": {ref}})
+						if err != nil {
+							t.Fatal(err)
+						}
+						var got map[string]any
+						json.NewDecoder(resp.Body).Decode(&got)
+						resp.Body.Close()
+						if resp.StatusCode != 200 || got["result"] != "paid" {
+							t.Fatalf("inquiry failed: %d %+v", resp.StatusCode, got)
+						}
+					}
+					inquiry, err := st.PaymentInquiry(ctx, shop.trade)
+					if err != nil || inquiry == nil || inquiry.Result != "paid" || inquiry.Attempts != 1 {
+						t.Fatalf("inquiry audit: %+v %v", inquiry, err)
+					}
+				} else {
+					worker.AcceptanceScan(poll, ctx, cfg, provider)
+				}
 				order, _ = st.GetByTradeNo(ctx, shop.trade)
 				if order.Status != model.StatusPaid {
 					t.Fatalf("not credited: %+v", order)

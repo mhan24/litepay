@@ -493,15 +493,17 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 		return
 	}
 	logs, _ := h.st.NotifyLogs(c.Request.Context(), o.ID, 30)
+	inquiry, _ := h.st.PaymentInquiry(c.Request.Context(), o.TradeNo)
 	canPay := o.PayAmount > 0 && !o.ExpireFinalized && (o.Status == model.StatusReady || o.Status == model.StatusExpired)
 	canExpire := o.Status == model.StatusPending || o.Status == model.StatusReady
 
 	c.HTML(http.StatusOK, "admin_order.html", gin.H{
-		"Base":   h.adminBase(c, "orders", "订单详情"),
-		"Order":  o,
-		"Logs":   logs,
-		"Amount": amount.FormatPrecision(o.PayAmount, o.AmountPrecision),
-		"CanPay": canPay,
+		"Base":    h.adminBase(c, "orders", "订单详情"),
+		"Order":   o,
+		"Logs":    logs,
+		"Inquiry": inquiry,
+		"Amount":  amount.FormatPrecision(o.PayAmount, o.AmountPrecision),
+		"CanPay":  canPay,
 		"CanRetry": o.Status == model.StatusPaid ||
 			(o.Status == model.StatusExpired && o.ExpireFinalized),
 		"CanExpire": canExpire,

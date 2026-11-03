@@ -119,6 +119,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	// ---- 前端订单状态查询接口 ----
 	r.GET("/api/order/status", h.OrderStatus)
 	r.POST("/api/order/payment", h.SelectPayment)
+	r.POST("/api/order/inquiry", h.PaymentInquiry)
 
 	// ---- 运维 ----
 	r.GET("/healthz", h.Health)

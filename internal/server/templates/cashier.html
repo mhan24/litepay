@@ -158,6 +158,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{end}}
     {{end}}{{end}}
 
+    {{template "payment_inquiry" .}}
     <div class="foot">
       <span>订单编号 <span class="mono">{{.TradeNo}}</span></span>
       <span>下单时间 {{.CreatedAt}} · 请在 {{.ExpiredAt}} 前付款</span>
@@ -177,6 +178,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     </svg>
     <h2 id="ov-title">支付成功</h2>
     <p id="ov-desc">正在跳转回商户页面…</p>
+    <a id="ov-review" href="/pay/{{.TradeNo}}" hidden style="display:none;margin-top:20px;font-size:14px;text-underline-offset:4px">查看订单及查款</a>
   </div>
 </div>
 
@@ -338,11 +340,12 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     finished = true;
     clockEl.textContent = '00:00';
     barEl.style.width = '0%';
-    statusEl.textContent = '订单已超时，请返回商户重新下单';
+    statusEl.textContent = '付款窗口已结束，已付款请勿重复下单或转账';
     var icon = document.getElementById('ov-icon');
     icon.classList.add('expired');
     document.getElementById('ov-title').textContent = '订单已超时';
     document.getElementById('ov-desc').textContent = '请返回商户查看订单。如果已经付款，请联系商户客服。';
+    var review=document.getElementById('ov-review');review.hidden=false;review.style.display='inline-block';
     overlay.classList.add('show');
   }
 

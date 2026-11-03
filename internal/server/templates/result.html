@@ -35,6 +35,7 @@
     <div class="icon ok"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></div>
     <h1>支付成功</h1>
     <p>款项已确认到账，请返回商户页面查看订单进度。</p>
+    {{if ne .NotifyStatus "SUCCESS"}}<p style="margin-top:12px">付款已确认，商户通知尚未确认成功。请稍后查看商户订单；如一直未更新，请联系商户，勿重复付款。</p>{{end}}
     {{else if eq .Status "CANCELED"}}
     <div class="icon canceled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
     <h1>订单已取消</h1>
@@ -56,6 +57,7 @@
       <div><span>订单编号</span><b class="mono">{{.TradeNo}}</b></div>
       <div><span>下单时间</span><b>{{.CreatedAt}}</b></div>
     </div>
+    {{template "payment_inquiry" .}}
     {{with externalURL .ReturnURL}}<a class="btn" href="{{.}}">返回商户查看订单</a>{{end}}
   </main>
 {{template "theme_script" .}}

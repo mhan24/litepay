@@ -50,6 +50,7 @@ type PollerStats struct {
 }
 
 type incomingTransaction struct {
+	ReferenceID  string
 	AmountText   string
 	ID           string
 	Type         string
@@ -74,8 +75,10 @@ const (
 
 // Poller 同时确认 Binance 和 OKX 到账；每笔订单只按自己选择的平台确认。
 type Poller struct {
-	cfg   *settings.Manager
-	store *store.Store
+	workMu      sync.Mutex // Shared clients and UID checks must not race with customer inquiries.
+	inquiryNext map[string]time.Time
+	cfg         *settings.Manager
+	store       *store.Store
 
 	lastRuns   map[string]time.Time
 	retryAfter map[string]time.Time
@@ -282,6 +285,8 @@ type scanTotals struct {
 }
 
 func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) {
+	p.workMu.Lock()
+	defer p.workMu.Unlock()
 	p.setStats(provider, func(s *PollStats) {
 		s.LastRunAt = time.Now()
 		s.TotalRuns++
@@ -647,7 +652,7 @@ func (p *Poller) binanceTransactions(ctx context.Context, cfg *config.Config,
 	out := make([]incomingTransaction, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, incomingTransaction{
-			ID: row.TransactionID, Type: strings.ToUpper(row.OrderType),
+			ID: row.TransactionID, ReferenceID: row.ReferenceID, Type: strings.ToUpper(row.OrderType),
 			Amount: row.Amount, AmountText: row.AmountText, Currency: strings.ToUpper(row.Currency),
 			Time: row.TransactionTime, ReceiverID: row.ReceiverID,
 			ReceiverAddr: row.ReceiverID, Incoming: row.Incoming, Raw: row.Raw,
