@@ -478,6 +478,13 @@ func (m *Manager) LoadReadOnly(ctx context.Context) error {
 		}
 		patch.Apply(next)
 	}
+	stored, err := m.st.LoadCredential(ctx, "bepusdt_api_token")
+	if err != nil {
+		return fmt.Errorf("无法只读加载现有凭据")
+	}
+	if stored != nil {
+		next.BEpusdt.APIToken = stored.Value
+	}
 	normalize(next)
 	if err := Validate(next); err != nil {
 		return fmt.Errorf("只读预检配置无效")
