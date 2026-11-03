@@ -9,16 +9,16 @@
 {{template "theme_css" .}}
 <style>
   body{display:flex;align-items:center;justify-content:center;padding:24px}
-  .card{width:100%;max-width:420px;padding:32px 26px;border:1px solid var(--line);border-radius:var(--radius-xl);
-    background:var(--surface);box-shadow:var(--shadow);text-align:center}
-  .icon{width:66px;height:66px;margin:0 auto 18px;border-radius:50%;display:grid;place-items:center}
-  .icon.ok{background:var(--ok-soft);color:var(--ok)}
-  .icon.exp{background:var(--warn-soft);color:var(--warn)}
+  .card{width:100%;max-width:560px;padding:32px 26px;border:1px solid var(--line);border-radius:var(--radius-xl);
+    background:var(--surface);box-shadow:none;text-align:left}
+  .icon{width:66px;height:66px;margin:0 0 24px;border-radius:0;display:grid;place-items:center}
+  .icon.ok{background:none;color:var(--ok)}
+  .icon.exp{background:none;color:var(--warn)}
   .icon.canceled{background:var(--surface-3);color:var(--muted)}
   .icon svg{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round}
   h1{margin:0 0 8px;font-size:20px;letter-spacing:-.3px}
   p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.7}
-  .amount{margin:20px 0 6px;font-size:34px;font-weight:800;letter-spacing:-.8px;font-variant-numeric:tabular-nums}
+  .amount{margin:20px 0 6px;font-size:36px;font-weight:550;letter-spacing:-.8px;font-variant-numeric:tabular-nums}
   .amount span{margin-left:4px;color:var(--muted);font-size:14px;font-weight:600}
   .meta{margin-top:18px;padding:13px 14px;border:1px solid var(--line);border-radius:var(--radius-md);
     background:var(--surface-2);font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:7px;text-align:left}
@@ -38,7 +38,7 @@
     {{else if eq .Status "CANCELED"}}
     <div class="icon canceled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
     <h1>订单已取消</h1>
-    <p>商户已取消该订单，系统不再确认新的付款。<br>如已付款，请联系商户客服处理。</p>
+    <p>商户已取消该订单，请勿继续向此订单付款。<br>如已付款，请联系商户客服处理。</p>
     {{else if eq .Status "SUPERSEDED"}}
     <div class="icon canceled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
     <h1>订单已失效</h1>
@@ -46,7 +46,7 @@
     {{else}}
     <div class="icon exp"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
     <h1>订单已超时</h1>
-    <p>该订单已超过支付时间，请返回商户重新下单。<br>如已付款，请联系商户客服处理。</p>
+    <p>该订单已超过支付时间，请返回商户查看订单。<br>如已付款，请联系商户客服处理。</p>
     {{end}}
 
     <div class="amount">{{.Amount}}<span>{{.Currency}}</span></div>

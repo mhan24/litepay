@@ -15,19 +15,26 @@
   <header class="pagehead">
     <div>
       <h1>支付设置</h1>
-      <p class="sub">所有运行配置保存在 SQLite 中，保存后立即生效。{{if .HasSaved}}最近更新于 {{.UpdatedAt}}。{{end}}</p>
+      <p class="sub">设置保存在本机，保存后立即生效。{{if .HasSaved}}最近更新于 {{.UpdatedAt}}。{{end}}</p>
     </div>
   </header>
 
   {{if not .CollectionOn}}
   <div class="banner" role="status">
-    <span>至少完整配置一个收款平台后才会创建新订单；未完成时网关会拒绝下单。</span>
+    <span>请先完整配置至少一个收款平台，否则无法创建新订单。</span>
   </div>
   {{end}}
 
-  <form method="post" action="/admin/settings/account">
+  <nav class="settings-nav" aria-label="设置分组" hidden>
+    <button type="button" data-settings-view="checkout" aria-pressed="true">收款信息</button>
+    <button type="button" data-settings-view="keys" aria-pressed="false">平台密钥</button>
+    <button type="button" data-settings-view="orders" aria-pressed="false">订单规则</button>
+    <button type="button" data-settings-view="merchant" aria-pressed="false">商户回调</button>
+    <button type="button" data-settings-view="account" aria-pressed="false">管理员</button>
+  </nav>
+  <form data-settings-account method="post" action="/admin/settings/account">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
-    <section class="card" style="margin-bottom:12px">
+    <section data-settings-group="account" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>管理员账号</h2><span class="hint">修改后请重新登录</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -40,10 +47,10 @@
       </div>
     </section>
   </form>
-  <form method="post" action="/admin/settings">
+  <form data-settings-payment method="post" action="/admin/settings">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
 
-    <section class="card" style="margin-bottom:12px">
+    <section data-settings-group="checkout" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>收银台</h2><span class="hint">先选平台，再选币种</span></div>
       <div class="card-b">
         <p class="section-desc">仅支持 USDT 与 USDC。付款人先选择 Binance 或 OKX，再选择币种；订单只确认所选平台和币种的站内转账。</p>
@@ -56,14 +63,14 @@
           </div>
           <div class="field full">
             <label>收银台提示</label>
-            <input class="input" name="checkout_note" value="{{.Cfg.Checkout.Note}}" placeholder="例如：请转账精确金额，付款后通常数秒内自动确认">
+            <input class="input" name="checkout_note" value="{{.Cfg.Checkout.Note}}" placeholder="例如：请复制完整金额，已付款请勿重复转账">
             <label class="switch"><input type="checkbox" name="clear_checkout_note"><span>清除收银台提示</span></label>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="card" style="margin-bottom:12px">
+    <section data-settings-group="checkout" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>收款 UID</h2><span class="hint">站内转账唯一收款标识</span></div>
       <div class="card-b">
         <p class="section-desc">更换 API 凭据或 UID 时，保存前会联网核对所属账户；不一致或核验失败将拒绝保存。收款 UID 必须与对应只读 API 所属账户一致。收银台只展示和复制 UID，所有付款信息都以当前订单页为准。</p>
@@ -84,7 +91,7 @@
       </div>
     </section>
 
-    <section class="card" style="margin-bottom:12px">
+    <section data-settings-group="keys" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>Binance</h2><span class="hint">只读 API · 站内转账</span></div>
       <div class="card-b">
         <p class="section-desc">系统只接受 PAY 与 C2C 正向转账，并校验收款 UID、币种和精确金额。请仅授予读取权限并配置 IP 白名单。</p>
@@ -112,7 +119,7 @@
       </div>
     </section>
 
-    <section class="card" style="margin-bottom:12px">
+    <section data-settings-group="keys" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>OKX</h2><span class="hint">只读 API · 站内转账</span></div>
       <div class="card-b">
         <p class="section-desc">只接受已完成的 OKX 站内转账。链上充值、等待确认的记录和 UID 不一致的转账都不会入账。</p>
@@ -145,7 +152,7 @@
       </div>
     </section>
 
-    <section class="card" style="margin-bottom:12px">
+    <section data-settings-group="orders" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>订单</h2><span class="hint">USD 结算 · 稳定币 1:1</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -179,7 +186,7 @@
       </div>
     </section>
 
-    <section class="card" style="margin-bottom:12px">
+    <section data-settings-group="merchant" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>独角数卡</h2><span class="hint">BEpusdt 收银台模式</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -200,7 +207,7 @@
       </div>
     </section>
 
-    <section class="card" style="margin-bottom:12px">
+    <section data-settings-group="merchant" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>支付结果通知</h2><span class="hint">发送给独角数卡</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -224,7 +231,7 @@
       <div class="sticky-bar">
         <span class="tip">SQLite {{.DBSize}} · {{.DBPath}}</span>
         <button class="btn" type="submit" name="verify_accounts" value="on">核验 Key / UID 并保存</button>
-        <button class="btn btn-primary" type="submit">保存并立即生效</button>
+        <button class="btn btn-primary" type="submit">保存全部支付设置</button>
       </div>
     </div>
   </form>
@@ -233,5 +240,26 @@
   </form>
 </main>
 {{template "theme_script" .}}
+<script>
+(function(){
+  var nav=document.querySelector('.settings-nav');
+  if(!nav)return;
+  var panels=document.querySelectorAll('[data-settings-group]');
+  var buttons=nav.querySelectorAll('[data-settings-view]');
+  var payment=document.querySelector('[data-settings-payment]');
+  var account=document.querySelector('[data-settings-account]');
+  function show(name){
+    panels.forEach(function(panel){panel.hidden=panel.dataset.settingsGroup!==name;});
+    payment.hidden=name==='account';account.hidden=name!=='account';
+    buttons.forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.settingsView===name));});
+  }
+  nav.hidden=false;show('checkout');
+  buttons.forEach(function(button){button.addEventListener('click',function(){show(button.dataset.settingsView);});});
+  document.addEventListener('invalid',function(event){
+    var panel=event.target.closest('[data-settings-group]');
+    if(panel&&panel.hidden){show(panel.dataset.settingsGroup);requestAnimationFrame(function(){event.target.focus();});}
+  },true);
+})();
+</script>
 </body>
 </html>

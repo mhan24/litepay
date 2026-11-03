@@ -40,7 +40,7 @@
             <td class="muted mono">{{.CreatedAt.Format "01-02 15:04:05"}}</td>
             <td>
               <a href="/admin/orders/{{.TradeNo}}" class="mono">{{.OutTradeNo}}</a>
-              {{if .Name}}<div class="muted" style="font-size:10.5px;margin-top:2px">{{.Name}}</div>{{end}}
+              {{if .Name}}<div class="muted" style="font-size:12px;margin-top:2px">{{.Name}}</div>{{end}}
             </td>
             <td class="num">{{fmtOrderAmount .PayAmount .AmountPrecision}} <span class="muted" style="font-weight:400">{{if .Currency}}{{.Currency}}{{else}}待选择{{end}}</span></td>
             <td>

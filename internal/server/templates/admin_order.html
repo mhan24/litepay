@@ -102,8 +102,8 @@
             {{else}}<span class="muted">—</span>{{end}}
             <span class="muted" style="font-size:12px"> 本轮尝试 {{.Order.NotifyAttempts}} 次 · 人工重发 {{.Order.NotifyResets}}/2</span>
           </div>
-          <div class="k">通知地址</div><div class="v mono" style="font-size:11.5px">{{.Order.NotifyURL}}</div>
-          <div class="k">返回地址</div><div class="v mono" style="font-size:11.5px">{{if .Order.ReturnURL}}{{.Order.ReturnURL}}{{else}}未设置{{end}}</div>
+          <div class="k">通知地址</div><div class="v mono" style="font-size:12px">{{.Order.NotifyURL}}</div>
+          <div class="k">返回地址</div><div class="v mono" style="font-size:12px">{{if .Order.ReturnURL}}{{.Order.ReturnURL}}{{else}}未设置{{end}}</div>
           <div class="k">商户履约</div><div class="v">未知，请到商城核对交付记录；回调确认不等于已经交付。</div>
           <div class="k">商户最近响应</div><div class="v" style="font-size:12px">{{if .Order.LastNotifyResp}}{{.Order.LastNotifyResp}}{{else}}尚无响应{{end}}</div>
         </div>
@@ -127,7 +127,7 @@
             <td class="muted" style="max-width:260px;word-break:break-all;font-size:12px">{{if .Error}}{{.Error}}{{else}}—{{end}}</td>
           </tr>
         {{else}}
-          <tr><td colspan="6" class="empty">暂无结果通知记录。订单状态变化后，发送记录会显示在这里。</td></tr>
+          <tr><td colspan="6" class="empty">还没有发送记录。支付或过期通知发出后，会列在这里。</td></tr>
         {{end}}
         </tbody>
       </table>

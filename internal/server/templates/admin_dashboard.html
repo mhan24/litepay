@@ -14,7 +14,7 @@
   {{template "admin_flash" .}}
   <header class="pagehead">
     <div>
-      <h1>运行概览</h1>
+      <h1>收款概览</h1>
       <p class="sub">{{.Now}} · BEpusdt 收银台 · USD 结算 · 稳定币 1:1</p>
     </div>
     <a class="btn btn-ghost" href="/admin/orders">查看全部订单</a>
@@ -28,11 +28,15 @@
   <div class="banner info"><span>OKX 尚未启用，收银台目前只提供 Binance。</span></div>
   {{end}}
 
-  <section class="card"><div class="card-h"><h2>对账与交付告警</h2></div><div class="card-b">
-  <p>待人工对账 {{.Operations.ReconciliationOrders}} 笔 · 超过24小时 {{.Operations.OverdueOrders}} 笔 · 未归属 {{.Operations.Unassigned}} 笔（核销拒绝 {{.Operations.ClaimFailures}} 笔）</p>
-  <p>回调重试 {{.Operations.NotifyRetrying}} 笔 · 重试耗尽 {{.Operations.NotifyExhausted}} 笔 · 租约过期待恢复 {{.Operations.NotifyRecoverable}} 笔。商城是否交付需在商城核实。</p>
-  {{range .Operations.Scans}}<p>{{.Provider}} · {{if .ScannedUntil.IsZero}}尚未完成查询{{else}}已查询至 {{.ScannedUntil.Format "01-02 15:04:05"}}{{end}}{{if .GapEnd}} · <strong>历史存在缺口，需人工对账</strong>{{end}}{{if .LastError}} · <strong>最近扫描失败</strong>{{end}}</p>{{end}}
-  </div></section>
+  <section class="card" aria-labelledby="attention-title">
+    <div class="card-h"><h2 id="attention-title">需要处理</h2><a href="/admin/orders" class="btn btn-ghost btn-sm">核对订单</a></div>
+    <div class="attention-row">
+      <div class="attention-item">待人工对账<strong>{{.Operations.ReconciliationOrders}}</strong><p>超过 24 小时未确认 {{.Operations.OverdueOrders}} 笔</p></div>
+      <div class="attention-item">商户回调重试<strong>{{.Operations.NotifyRetrying}}</strong><p>租约到期待恢复 {{.Operations.NotifyRecoverable}} 笔</p></div>
+      <div class="attention-item">回调重试耗尽<strong>{{.Operations.NotifyExhausted}}</strong><p>请先到商城核对付款与交付</p></div>
+    </div>
+    <div class="scan-progress">{{range .Operations.Scans}}<p>{{.Provider}} · {{if .ScannedUntil.IsZero}}尚未完成查询{{else}}已查至 {{.ScannedUntil.Format "01-02 15:04:05"}}{{end}}{{if .GapEnd}} · <strong>历史缺口，需人工对账</strong>{{end}}{{if .LastError}} · <strong>最近扫描失败</strong>{{end}}</p>{{else}}<p>本次尚无持久化扫描进度，请检查平台设置和服务就绪状态。</p>{{end}}</div>
+  </section>
   <div class="grid-4">
     <div class="stat accent">
       <div class="k">今日收款</div>
@@ -52,13 +56,13 @@
     <div class="stat">
       <div class="k">通知异常</div>
       <div class="v">{{.NotifyFail}}</div>
-      <div class="s">结果通知未送达商户{{if .ExpireNotifyFail}}，含过期通知 {{.ExpireNotifyFail}} 笔{{end}}</div>
+      <div class="s">商户尚未确认回调{{if .ExpireNotifyFail}}，含过期通知 {{.ExpireNotifyFail}} 笔{{end}}</div>
     </div>
   </div>
 
-  <div class="grid-2">
+  <div class="grid-2 dashboard-work">
     <section class="card">
-      <div class="card-h"><h2>最近订单</h2><a href="/admin/orders" class="muted" style="font-size:11.5px">全部</a></div>
+      <div class="card-h"><h2>最近订单</h2><a href="/admin/orders" class="muted" style="font-size:12px">全部</a></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>时间</th><th>商户订单号</th><th>应付</th><th>状态</th><th>通知</th></tr></thead>
@@ -84,7 +88,7 @@
               </td>
             </tr>
           {{else}}
-            <tr><td colspan="5" class="empty">暂无订单。首笔支付创建后会显示在这里。</td></tr>
+            <tr><td colspan="5" class="empty">还没有订单。商户创建的收款订单会列在这里。</td></tr>
           {{end}}
           </tbody>
         </table>
@@ -92,7 +96,7 @@
     </section>
 
     <section class="card">
-      <div class="card-h"><h2>到账监听</h2><span class="hint">双平台独立轮询</span></div>
+      <div class="card-h"><h2>平台扫描</h2><span class="hint">分别检查收款记录</span></div>
       <div class="card-b">
         <div class="kv">
           <div class="k">Binance</div>
@@ -111,16 +115,16 @@
           <div class="v">读取 {{.OKXPoll.LastFetched}} 条 · 确认 {{.OKXPoll.LastMatched}} 笔{{if or .OKXPoll.SkipType .OKXPoll.SkipCurrency .OKXPoll.SkipReceiver .OKXPoll.SkipAmount .OKXPoll.SkipDuplicate}} · 跳过 类型{{.OKXPoll.SkipType}}/币种{{.OKXPoll.SkipCurrency}}/收款人{{.OKXPoll.SkipReceiver}}/金额{{.OKXPoll.SkipAmount}}/已入账{{.OKXPoll.SkipDuplicate}}{{end}}</div>
           <div class="k">累计确认</div>
           <div class="v">Binance {{.Poll.TotalMatched}} 笔 · OKX {{.OKXPoll.TotalMatched}} 笔</div>
-          {{if .Poll.LastError}}<div class="k">Binance 异常</div><div class="v" style="color:var(--danger);font-size:11.5px">{{.Poll.LastError}}</div>{{end}}
-          {{if .OKXPoll.LastError}}<div class="k">OKX 异常</div><div class="v" style="color:var(--danger);font-size:11.5px">{{.OKXPoll.LastError}}</div>{{end}}
+          {{if .Poll.LastError}}<div class="k">Binance 异常</div><div class="v" style="color:var(--danger);font-size:12px">{{.Poll.LastError}}</div>{{end}}
+          {{if .OKXPoll.LastError}}<div class="k">OKX 异常</div><div class="v" style="color:var(--danger);font-size:12px">{{.OKXPoll.LastError}}</div>{{end}}
           <div class="k">数据库</div><div class="v">{{.DBSize}}</div>
-          <div class="k">网关地址</div><div class="v mono" style="font-size:11.5px">{{.BaseURL}}</div>
+          <div class="k">网关地址</div><div class="v mono" style="font-size:12px">{{.BaseURL}}</div>
         </div>
       </div>
     </section>
 
     <section class="card">
-      <div class="card-h"><h2>未归属流水</h2><span class="hint">候选交易证据，包含类型、币种或收款人不符；需核对实际到账{{if .ObservationCount}}（共 {{.ObservationCount}} 笔）{{end}}</span></div>
+      <div class="card-h"><h2>待核对流水</h2><span class="hint">包含无法匹配或被过滤的流水，请先核对实际收款{{if .ObservationCount}}（共 {{.ObservationCount}} 笔，核销拒绝 {{.Operations.ClaimFailures}} 笔）{{end}}</span></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>交易时间 / 流水标识</th><th>通道</th><th>币种 / 金额</th><th>原因</th><th>尝试订单</th><th>最近观察</th></tr></thead>
@@ -142,7 +146,7 @@
               <td class="muted mono">{{.UpdatedAt.Format "01-02 15:04:05"}}</td>
             </tr>
           {{else}}
-            <tr><td colspan="6" class="empty">暂无未归属流水。</td></tr>
+            <tr><td colspan="6" class="empty">暂无待核对流水。</td></tr>
           {{end}}
           </tbody>
         </table>

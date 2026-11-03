@@ -24,3 +24,5 @@ dist/
 *.db-journal
 
 __pycache__/
+
+.taste-skill/
