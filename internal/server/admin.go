@@ -638,6 +638,39 @@ func (h *Handlers) AdminAccountSave(c *gin.Context) {
 	h.AdminLogout(c)
 }
 
+// AdminSiteSave changes the public redirect and admin entry after reauthentication.
+func (h *Handlers) AdminSiteSave(c *gin.Context) {
+	fail := func(msg string) {
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?view=account&msg=")+url.QueryEscape(msg)+"&t=err")
+	}
+	auth := h.currentAdmin()
+	ip := c.ClientIP()
+	if !auth.allow(ip) {
+		fail("尝试过于频繁，请 10 分钟后再试")
+		return
+	}
+	if !auth.checkCredentials(c.GetString("admin_user"), c.PostForm("current_password")) {
+		auth.failed(ip)
+		fail("当前密码错误")
+		return
+	}
+	auth.succeeded(ip)
+	root := strings.TrimSpace(c.PostForm("admin_path"))
+	storeURL := strings.TrimSpace(c.PostForm("store_url"))
+	if root == "" {
+		fail("请填写后台入口，以 / 开头")
+		return
+	}
+	oldRoot := h.C().AdminPath()
+	if err := h.cfg.Update(c.Request.Context(), settings.Patch{AdminPath: &root, StoreURL: &storeURL}, auth.user); err != nil {
+		fail(err.Error())
+		return
+	}
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(adminCookieName, "", -1, oldRoot, "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
+	h.AdminLogout(c)
+}
+
 // AdminRotateToken POST /admin/settings/token —— 服务端生成新 Token，
 // 新值只在本次跳转的接入页展示，不在设置表单中回填。
 func (h *Handlers) AdminRotateToken(c *gin.Context) {

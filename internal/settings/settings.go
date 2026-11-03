@@ -31,6 +31,8 @@ import (
 
 // Patch 配置补丁：字段为指针，nil 表示“不修改”。
 type Patch struct {
+	AdminPath         *string `json:"admin_path,omitempty"`
+	StoreURL          *string `json:"store_url,omitempty"`
 	VerifyAccounts    bool    `json:"-"`
 	AdminUsername     *string `json:"admin_username,omitempty"`
 	AdminPasswordHash *string `json:"admin_password_hash,omitempty"`
@@ -71,6 +73,12 @@ type Patch struct {
 
 // Apply 把补丁应用到配置副本。
 func (p Patch) Apply(c *config.Config) {
+	if p.AdminPath != nil {
+		c.Admin.Path = strings.TrimSpace(*p.AdminPath)
+	}
+	if p.StoreURL != nil {
+		c.Server.StoreURL = strings.TrimSpace(*p.StoreURL)
+	}
 	if p.AdminUsername != nil {
 		c.Admin.Username = strings.TrimSpace(*p.AdminUsername)
 	}
@@ -159,6 +167,8 @@ func Snapshot(c *config.Config) Patch {
 	b := func(v bool) *bool { return &v }
 
 	return Patch{
+		AdminPath:          s(c.AdminPath()),
+		StoreURL:           s(c.Server.StoreURL),
 		AdminUsername:      s(c.Admin.Username),
 		BEpusdtReselect:    b(c.BEpusdt.Reselect),
 		CheckoutCurrencies: &[]string{},
@@ -374,6 +384,9 @@ func normalize(c *config.Config) {
 
 // Validate 校验配置合法性。
 func Validate(c *config.Config) error {
+	if err := c.ValidateWebRoutes(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.Admin.Username) == "" || utf8.RuneCountInString(c.Admin.Username) > 64 {
 		return fmt.Errorf("管理员用户名需为 1~64 个字符")
 	}

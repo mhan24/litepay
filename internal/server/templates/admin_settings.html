@@ -47,6 +47,21 @@
       </div>
     </section>
   </form>
+  <form data-settings-site method="post" action="{{adminPath}}/settings/site">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+    <section data-settings-group="account" class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>访问入口</h2><span class="hint">保存后立即生效，请重新登录</span></div>
+      <div class="card-b">
+        <p class="section-desc">修改后台入口后，旧地址立即失效。请先记下新地址；收银台和支付 API 地址不变。</p>
+        <div class="form-grid">
+          <div class="field full"><label for="site-admin-path">后台入口</label><input id="site-admin-path" class="input" name="admin_path" value="{{adminPath}}" pattern="/[A-Za-z0-9][A-Za-z0-9_\-]{2,95}" maxlength="97" required><span class="hint">以 / 开头，后接 3~96 位字母、数字、下划线或连字符。</span></div>
+          <div class="field full"><label for="site-store-url">商店跳转地址</label><input id="site-store-url" class="input" type="url" name="store_url" value="{{.Cfg.Server.StoreURL}}" placeholder="https://shop.example.com"><span class="hint">网关首页跳转到此地址，留空则返回 404。</span></div>
+          <div class="field full"><label for="site-current-password">当前密码</label><input id="site-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required></div>
+        </div>
+        <button class="btn" type="submit" style="margin-top:16px">保存访问入口并重新登录</button>
+      </div>
+    </section>
+  </form>
   <form data-settings-payment method="post" action="{{adminPath}}/settings">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
 
@@ -248,12 +263,14 @@
   var buttons=nav.querySelectorAll('[data-settings-view]');
   var payment=document.querySelector('[data-settings-payment]');
   var account=document.querySelector('[data-settings-account]');
+  var site=document.querySelector('[data-settings-site]');
   function show(name){
     panels.forEach(function(panel){panel.hidden=panel.dataset.settingsGroup!==name;});
     payment.hidden=name==='account';account.hidden=name!=='account';
+    site.hidden=name!=='account';
     buttons.forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.settingsView===name));});
   }
-  nav.hidden=false;show('checkout');
+  nav.hidden=false;show(new URLSearchParams(location.search).get('view')==='account'?'account':'checkout');
   buttons.forEach(function(button){button.addEventListener('click',function(){show(button.dataset.settingsView);});});
   document.addEventListener('invalid',function(event){
     var panel=event.target.closest('[data-settings-group]');

@@ -50,6 +50,9 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	}
 
 	r := gin.New()
+	// Do not reveal or redirect retired admin paths before the dynamic guard runs.
+	r.RedirectTrailingSlash = false
+	r.RedirectFixedPath = false
 	// Proxy headers are ignored unless the deployment explicitly trusts their source.
 	if err := r.SetTrustedProxies(mgr.Get().Server.TrustedProxies); err != nil {
 		return nil, err
@@ -124,7 +127,11 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 
 	// ---- 后台管理 ----
 	if cfg.AdminEnabled() {
-		adminRoot := r.Group(cfg.AdminPath(), func(c *gin.Context) {
+		adminRoot := r.Group("/:admin_entry", func(c *gin.Context) {
+			if "/"+c.Param("admin_entry") != mgr.Get().AdminPath() {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
 			c.Set("admin_route", true)
 			c.Next()
 		})
@@ -142,6 +149,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.POST("/settings", h.AdminSettingsSave)
 		adm.POST("/settings/token", h.AdminRotateToken)
 		adm.POST("/settings/account", h.AdminAccountSave)
+		adm.POST("/settings/site", h.AdminSiteSave)
 		slog.Info("后台管理已启用")
 	} else {
 		slog.Warn("config.yaml 未配置 admin.password，后台管理未启用")
