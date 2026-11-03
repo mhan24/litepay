@@ -108,29 +108,20 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 		var cursor model.ScanCursor
 		cursor, err = p.st.Cursor(ctx, provider)
 		if err == nil {
-			lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
-			start := cursor.ScannedUntil.Add(-lookback)
-			if cursor.ScannedUntil.IsZero() {
-				start = end.Add(-cfg.ScanRetention())
-			}
-			// 空闲期可能让游标落后很久，但早于最早一张待付款订单选择时间的到账已不可能
-			// 再归属任何订单，所以从这里开始补查即可，不必重读中间整段空白历史。
-			var earliest model.Order
-			if e := p.st.DB().WithContext(ctx).Where("status = ? AND provider = ?", model.Ready, provider).Order("selected_at").First(&earliest).Error; e == nil && earliest.SelectedAt != nil {
-				if floor := earliest.SelectedAt.Add(-lookback); floor.After(start) {
-					start = floor
-				}
-			}
-			if end.Sub(start) > time.Hour {
-				end = start.Add(time.Hour)
-			}
-			var rows []model.Transaction
-			rows, err = cli.History(ctx, start, end)
+			var start time.Time
+			start, err = p.scanStart(ctx, cfg, provider, cursor, end)
 			if err == nil {
-				markAmbiguous(rows)
-				for _, t := range rows {
-					if _, err = p.st.Process(ctx, t, ""); err != nil {
-						break
+				if end.Sub(start) > time.Hour {
+					end = start.Add(time.Hour)
+				}
+				var rows []model.Transaction
+				rows, err = cli.History(ctx, start, end)
+				if err == nil {
+					markAmbiguous(rows)
+					for _, t := range rows {
+						if _, err = p.st.Process(ctx, t, ""); err != nil {
+							break
+						}
 					}
 				}
 			}
@@ -143,6 +134,38 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 		return e
 	}
 	return err
+}
+
+// scanStart 计算本次历史查询的起点，保证所有需要自动核销的付款窗口都被覆盖：
+//   - 游标有覆盖时从游标处继续，跨过更早的空白历史；
+//   - 首次扫描没有任何覆盖，必须回溯到最早一张待付款订单的窗口，否则那张订单的
+//     付款可能永远读不到，而游标却已推进到它之后；
+//   - 未确认到账按记录创建时间分页，状态变化不会移动记录，所以只要它还在补查期
+//     内，起点就要回到它的原始时间，否则游标一越过就再也看不到它。
+func (p *Poller) scanStart(ctx context.Context, cfg *config.Config, provider string, cursor model.ScanCursor, end time.Time) (time.Time, error) {
+	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
+	first := cursor.ScannedUntil.IsZero()
+	start := cursor.ScannedUntil.Add(-lookback)
+	if first {
+		start = end.Add(-cfg.ScanRetention())
+	}
+	var earliest model.Order
+	if e := p.st.DB().WithContext(ctx).Where("status = ? AND provider = ?", model.Ready, provider).Order("selected_at").First(&earliest).Error; e == nil && earliest.SelectedAt != nil {
+		floor := earliest.SelectedAt.Add(-lookback)
+		if (first && floor.Before(start)) || (!first && floor.After(start)) {
+			start = floor
+		}
+	}
+	pending, err := p.st.PendingSince(ctx, provider, cfg.ScanRetention())
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !pending.IsZero() {
+		if floor := pending.Add(-lookback); floor.Before(start) {
+			start = floor
+		}
+	}
+	return start, nil
 }
 func (p *Poller) Inquiry(ctx context.Context, no, ref string) (string, error) {
 	if len(ref) < 1 || len(ref) > 128 {

@@ -358,6 +358,24 @@ func (s *Store) ScanDue(ctx context.Context, provider string, retention time.Dur
 	}
 	return n > 0, nil
 }
+
+// PendingSince returns the earliest occurrence of an unconfirmed deposit still inside the
+// retention window. Exchange history pages by record creation time and a later status change
+// does not move the record, so the scanner has to reopen that original window; once the cursor
+// moved past it the deposit can no longer be seen. The zero time means nothing is pending, and
+// deposits older than retention are ignored: they are never attributed automatically, their
+// evidence stays available for manual review.
+func (s *Store) PendingSince(ctx context.Context, provider string, retention time.Duration) (time.Time, error) {
+	var row model.Transaction
+	err := s.db.WithContext(ctx).
+		Where("provider = ? AND state = ? AND occurred_at >= ?", provider, model.Unconfirmed, time.Now().Add(-retention)).
+		Order("occurred_at").First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return time.Time{}, nil
+	}
+	return row.OccurredAt, err
+}
+
 func (s *Store) ReserveInquiry(ctx context.Context, no, ref string) (*model.Order, error) {
 	var o model.Order
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {

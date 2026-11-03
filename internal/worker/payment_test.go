@@ -30,10 +30,21 @@ func (f *fixture) AccountUID(context.Context) (string, error) { return "receiver
 func (f *fixture) History(_ context.Context, start, end time.Time) ([]model.Transaction, error) {
 	f.calls++
 	f.from, f.to = start, end
-	return f.rows, f.err
+	return f.inWindow(start, end), f.err
 }
-func (f *fixture) Lookup(context.Context, string, time.Time, time.Time) ([]model.Transaction, error) {
-	return f.rows, f.err
+func (f *fixture) Lookup(_ context.Context, _ string, start, end time.Time) ([]model.Transaction, error) {
+	return f.inWindow(start, end), f.err
+}
+
+// inWindow 模拟交易所按查询时间窗口返回记录：窗口外的流水不会被读到。
+func (f *fixture) inWindow(start, end time.Time) []model.Transaction {
+	out := []model.Transaction{}
+	for _, t := range f.rows {
+		if !t.OccurredAt.Before(start) && !t.OccurredAt.After(end) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 func TestScanInquiryAndSignedCallback(t *testing.T) {
 	ctx := context.Background()
@@ -236,5 +247,117 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 	}
 	if time.Since(f.from) > 10*time.Minute || f.to.Before(f.from) {
 		t.Fatal("scan did not resume near the open payment window", f.from, f.to)
+	}
+}
+
+// 首次成功扫描发生在订单创建很久之后：游标还没有任何覆盖，扫描必须回到最早一张待付款
+// 订单的完整付款窗口，而不能从默认补查期限起步后把那张订单的付款漏掉。
+func TestFirstScanCoversOldPaymentWindow(t *testing.T) {
+	ctx := context.Background()
+	st, e := store.Open(":memory:")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if e = mgr.Load(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Create(ctx, model.Order{TradeNo: "old", OutTradeNo: "old", OriginUnits: 10000000, NotifyURL: "https://merchant.example/callback", ExpiresAt: time.Now().Add(10 * time.Minute)}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Select(ctx, "old", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e != nil {
+		t.Fatal(e)
+	}
+	// 付款方式三小时前就已选定，但这期间没有任何一次成功扫描覆盖过它的窗口。
+	selected := time.Now().Add(-3 * time.Hour)
+	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "old").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
+		t.Fatal(e)
+	}
+	paidAt := selected.Add(30 * time.Second)
+	f := &fixture{rows: []model.Transaction{{Provider: "binance", EventID: "old-event", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: paidAt, State: model.Confirmed}}}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: f}
+
+	if e = p.Scan(ctx, "binance"); e != nil {
+		t.Fatal(e)
+	}
+	if !f.from.Before(paidAt) {
+		t.Fatal("first scan started after the payment", f.from, paidAt)
+	}
+	o, e := st.GetByTradeNo(ctx, "old")
+	if e != nil || o.Status != model.Paid {
+		t.Fatal("first scan missed the on-time payment", o.Status, e)
+	}
+}
+
+// OKX 充值历史的 ts 是记录创建时间，状态随后才变为成功。普通游标一旦越过该时间，
+// 回看窗口就再也读不到这条记录，因此仍处于补查期的未确认到账必须保持可读，状态变为
+// 成功后照常走统一核销。
+func TestPendingDepositStaysReadableAfterCursorAdvances(t *testing.T) {
+	ctx := context.Background()
+	st, e := store.Open(":memory:")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.OKX.APIKey = "key"
+	cfg.OKX.APISecret = "secret"
+	cfg.OKX.Passphrase = "pass"
+	cfg.Checkout.OKX.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if e = mgr.Load(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Create(ctx, model.Order{TradeNo: "okx-order", OutTradeNo: "okx-order", OriginUnits: 10000000, NotifyURL: "https://merchant.example/callback", ExpiresAt: time.Now().Add(10 * time.Minute)}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Select(ctx, "okx-order", "okx", "USDT", "receiver", 2, 10000, 10000, 99, 120); e != nil {
+		t.Fatal(e)
+	}
+	selected := time.Now().Add(-5 * time.Minute)
+	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "okx-order").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
+		t.Fatal(e)
+	}
+	deposit := model.Transaction{Provider: "okx", EventID: "dep-1", Reference: "wd-1", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: selected.Add(20 * time.Second), State: model.Unconfirmed}
+	f := &fixture{rows: []model.Transaction{deposit}}
+	p := NewPoller(mgr, st)
+	p.clients["okx"] = &connection{config: *mgr.Get(), source: f}
+
+	// 未确认的充值不会被核销，证据先落库。
+	if e = p.Scan(ctx, "okx"); e != nil {
+		t.Fatal(e)
+	}
+	if o, _ := st.GetByTradeNo(ctx, "okx-order"); o.Status != model.Ready {
+		t.Fatal("unconfirmed deposit paid the order", o.Status)
+	}
+	// 普通游标继续前进到这笔记录创建时间之外。
+	f.rows = nil
+	for i := 0; i < 3; i++ {
+		if e = p.Scan(ctx, "okx"); e != nil {
+			t.Fatal(e)
+		}
+	}
+	cursor, e := st.Cursor(ctx, "okx")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !cursor.ScannedUntil.After(deposit.OccurredAt.Add(2 * time.Minute)) {
+		t.Fatal("cursor did not move past the deposit", cursor.ScannedUntil, deposit.OccurredAt)
+	}
+	// 交易所随后把同一条记录改为成功，创建时间不变。
+	deposit.State = model.Confirmed
+	f.rows = []model.Transaction{deposit}
+	if e = p.Scan(ctx, "okx"); e != nil {
+		t.Fatal(e)
+	}
+	o, e := st.GetByTradeNo(ctx, "okx-order")
+	if e != nil || o.Status != model.Paid {
+		t.Fatal("confirmed deposit outside the lookback window was lost", o.Status, e)
 	}
 }
