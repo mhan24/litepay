@@ -115,6 +115,14 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		h.bepusdtFail(c, "amount must be a positive exact decimal with at most six significant fractional digits")
 		return
 	}
+	// 商城侧（dujiao-next BEpusdt 适配器）回调验签用 %v(float64) 重新渲染金额：
+	// 金额 >= 1000000 或 < 0.0001 会被渲染成指数形式（1e+06 / 1e-05），与这里按
+	// 十进制字符串生成的签名永远不一致，回调会被商城静默拒绝。在创建订单时就显式
+	// 拒绝互操作范围之外的金额，避免付款后无法交付。
+	if units < 100 || units >= 1000000*money.Scale {
+		h.bepusdtFail(c, "amount outside the upstream mall interoperable range [0.0001, 1000000)")
+		return
+	}
 
 	var req bepusdtCreateRequest
 	if err := json.Unmarshal(raw, &req); err != nil {

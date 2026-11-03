@@ -3,11 +3,16 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +28,7 @@ import (
 
 // merchantMock 模拟 BEpusdt 商城：校验回调签名与契约，第一次不确认，重试才确认。
 // fulfilled 按商户订单号去重，因此它始终等于"收到过回调的已支付订单数"。
+// 验签复刻 dujiao-next BEpusdt 适配器的真实算法，而不是用 LitePay 自己的通用验签。
 type merchantMock struct {
 	t         *testing.T
 	token     *string
@@ -35,20 +41,87 @@ type merchantMock struct {
 	seen      map[string]bool
 }
 
+// dujiaoCallback 与 dujiao-next 的 CallbackData 字段一致；金额字段故意保留为
+// interface{}，由验签逻辑按适配器行为转成 float64 后用 %v 渲染。
+type dujiaoCallback struct {
+	TradeID            string      `json:"trade_id"`
+	OrderID            string      `json:"order_id"`
+	Amount             interface{} `json:"amount"`
+	ActualAmount       interface{} `json:"actual_amount"`
+	Token              string      `json:"token"`
+	BlockTransactionID string      `json:"block_transaction_id"`
+	Signature          string      `json:"signature"`
+	Status             int         `json:"status"`
+}
+
+// dujiaoSign 复刻 dujiao-next：非空非 signature 参数按 ASCII 排序，k=v 用 & 连接，
+// 末尾拼接 token 后取 md5 小写。金额已由调用方转成 float64，%v 在 >= 1e6 或
+// < 1e-4 时会渲染成指数形式——这正是网关必须拒绝互操作范围外金额的原因。
+func dujiaoSign(params map[string]any, token string) string {
+	keys := make([]string, 0, len(params))
+	for k, v := range params {
+		if k == "signature" || dujiaoEmpty(v) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, fmt.Sprintf("%s=%v", k, params[k]))
+	}
+	sum := md5.Sum([]byte(strings.Join(pairs, "&") + token))
+	return hex.EncodeToString(sum[:])
+}
+
+func dujiaoEmpty(v any) bool {
+	if v == nil {
+		return true
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s) == ""
+	}
+	return false
+}
+
+func dujiaoFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case string:
+		f, _ := strconv.ParseFloat(n, 64)
+		return f
+	}
+	return 0
+}
+
 func (m *merchantMock) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]any
-		d := json.NewDecoder(r.Body)
-		d.UseNumber()
-		if d.Decode(&payload) != nil || !sign.BEpusdtVerifyGeneric(payload, *m.token) {
-			m.t.Error("merchant received invalid callback signature")
+		body, _ := io.ReadAll(r.Body)
+		var cb dujiaoCallback
+		if json.Unmarshal(body, &cb) != nil {
+			m.t.Error("merchant received undecodable callback")
 			w.WriteHeader(400)
 			return
 		}
-		if payload["block_transaction_id"] != m.eventID || payload["status"] != json.Number("2") || payload["actual_amount"] != json.Number(m.amount) || payload["token"] != m.receiver {
-			m.t.Error("incorrect callback contract", payload)
+		params := map[string]any{
+			"trade_id":             cb.TradeID,
+			"order_id":             cb.OrderID,
+			"amount":               dujiaoFloat(cb.Amount),
+			"actual_amount":        dujiaoFloat(cb.ActualAmount),
+			"token":                cb.Token,
+			"block_transaction_id": cb.BlockTransactionID,
+			"status":               cb.Status,
 		}
-		key := payload["order_id"].(string)
+		if !strings.EqualFold(dujiaoSign(params, *m.token), cb.Signature) {
+			m.t.Error("merchant signature verification failed (dujiao-next algorithm)")
+			w.WriteHeader(400)
+			return
+		}
+		if cb.Status != 2 || cb.BlockTransactionID != m.eventID || dujiaoFloat(cb.ActualAmount) != dujiaoFloat(m.amount) || cb.Token != m.receiver {
+			m.t.Error("incorrect callback contract", cb)
+		}
+		key := cb.OrderID
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if !m.seen[key] {
