@@ -22,6 +22,15 @@ cp /tmp/litepay-ci-binary "$root/package/litepay"
 tar czf "$root/first.tar.gz" -C "$root/package" .
 DEPLOY_PATH="$root/release" ARCHIVE="$root/first.tar.gz" bash scripts/deploy-activate.sh
 curl -fsS http://127.0.0.1:3101/healthz >/dev/null
+# No exchange credentials in CI: business readiness must remain false, but the
+# actual notifier/reaper loops must have started after the maintenance gate.
+workers_started=0
+for ((i=0;i<15;i++)); do
+  result=$(curl -sS -m 3 http://127.0.0.1:3101/readyz)
+  if python3 -c 'import json,sys; r=json.loads(sys.argv[1]); sys.exit(0 if r.get("workers_started") and not r.get("ready") else 1)' "$result"; then workers_started=1; break; fi
+  sleep 1
+done
+(( workers_started == 1 )) || { echo 'Workers did not start after deployment gate release' >&2; exit 1; }
 # A valid image that passes read-only database verification but never becomes healthy.
 cat > "$root/package/litepay" <<'BAD'
 #!/bin/sh

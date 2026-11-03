@@ -31,10 +31,11 @@
     <div class="actions">
       {{if .CanPay}}
       <form method="post" action="/admin/orders/{{.Order.TradeNo}}/action" style="margin:0"
-            data-confirm="人工标记为已支付后，系统会立即向商户发送支付成功通知。请先确认收款平台确实收到款项。">
+            data-confirm="仅使用账本中真实流水，仍检查金额、币种、收款人、支付窗口与流水唯一性。核销后发送回调；已终结订单请先与商户协调。">
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
         <input type="hidden" name="action" value="pay">
-        <button class="btn btn-primary btn-sm" type="submit">人工确认已收款</button>
+        <input name="transaction_id" required maxlength="128" placeholder="未归属账本中的真实流水号" aria-label="真实流水号">
+        <button class="btn btn-primary btn-sm" type="submit">核验流水并补单</button>
       </form>
       {{end}}
 
@@ -103,6 +104,7 @@
           </div>
           <div class="k">通知地址</div><div class="v mono" style="font-size:11.5px">{{.Order.NotifyURL}}</div>
           <div class="k">返回地址</div><div class="v mono" style="font-size:11.5px">{{if .Order.ReturnURL}}{{.Order.ReturnURL}}{{else}}未设置{{end}}</div>
+          <div class="k">商户履约</div><div class="v">未知，请到商城核对交付记录；回调确认不等于已经交付。</div>
           <div class="k">商户最近响应</div><div class="v" style="font-size:12px">{{if .Order.LastNotifyResp}}{{.Order.LastNotifyResp}}{{else}}尚无响应{{end}}</div>
         </div>
       </div>

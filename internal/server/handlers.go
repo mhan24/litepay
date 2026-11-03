@@ -14,6 +14,7 @@ import (
 
 	"litepay/internal/amount"
 	"litepay/internal/config"
+	"litepay/internal/maintenance"
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/store"
@@ -512,4 +513,36 @@ func generateTradeNo() string {
 		panic("secure random source unavailable")
 	}
 	return "LP" + hex.EncodeToString(buf[:])
+}
+
+// Ready reports current-process work, not merely an open database.
+func (h *Handlers) Ready(c *gin.Context) {
+	workersOK := h.st.WorkerHealthy("notifier", 2*time.Minute) && h.st.WorkerHealthy("reaper", 2*time.Minute)
+	ready := !maintenance.Blocked() && workersOK
+	enabled := false
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX} {
+		stats := h.poller.StatsFor(provider)
+		if !stats.Enabled {
+			continue
+		}
+		enabled = true
+		age := time.Duration(h.C().ProviderInterval(provider)) * time.Second * 3
+		if age < 5*time.Minute {
+			age = 5 * time.Minute
+		}
+		if stats.LastOKAt.IsZero() || time.Since(stats.LastOKAt) > age || stats.LastError != "" {
+			ready = false
+		}
+	}
+	if !enabled {
+		ready = false
+	}
+	if err := h.st.Ping(c.Request.Context()); err != nil {
+		ready = false
+	}
+	code := http.StatusOK
+	if !ready {
+		code = http.StatusServiceUnavailable
+	}
+	c.JSON(code, gin.H{"ready": ready, "workers_started": workersOK})
 }

@@ -70,7 +70,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		return nil, err
 	}
 	r.Use(func(c *gin.Context) {
-		if c.Request.URL.Path != "/healthz" && maintenance.Blocked() {
+		if c.Request.URL.Path != "/healthz" && c.Request.URL.Path != "/readyz" && maintenance.Blocked() {
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "正在维护，请稍后重试"})
 			return
 		}
@@ -115,6 +115,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 
 	// ---- 运维 ----
 	r.GET("/healthz", h.Health)
+	r.GET("/readyz", h.Ready)
 	r.GET("/", h.Index)
 
 	// ---- 后台管理 ----

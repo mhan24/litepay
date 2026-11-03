@@ -28,6 +28,11 @@
   <div class="banner info"><span>OKX 尚未启用，收银台目前只提供 Binance。</span></div>
   {{end}}
 
+  <section class="card"><div class="card-h"><h2>对账与交付告警</h2></div><div class="card-b">
+  <p>待人工对账 {{.Operations.ReconciliationOrders}} 笔 · 超过24小时 {{.Operations.OverdueOrders}} 笔 · 未归属 {{.Operations.Unassigned}} 笔（核销拒绝 {{.Operations.ClaimFailures}} 笔）</p>
+  <p>回调重试 {{.Operations.NotifyRetrying}} 笔 · 重试耗尽 {{.Operations.NotifyExhausted}} 笔 · 租约过期待恢复 {{.Operations.NotifyRecoverable}} 笔。商城是否交付需在商城核实。</p>
+  {{range .Operations.Scans}}<p>{{.Provider}} · {{if .ScannedUntil.IsZero}}尚未完成查询{{else}}已查询至 {{.ScannedUntil.Format "01-02 15:04:05"}}{{end}}{{if .GapEnd}} · <strong>历史存在缺口，需人工对账</strong>{{end}}{{if .LastError}} · <strong>最近扫描失败</strong>{{end}}</p>{{end}}
+  </div></section>
   <div class="grid-4">
     <div class="stat accent">
       <div class="k">今日收款</div>
@@ -91,13 +96,15 @@
       <div class="card-b">
         <div class="kv">
           <div class="k">Binance</div>
-          <div class="v">{{if .BinanceOn}}{{if .Poll.LastError}}<span class="badge b-err">查询异常</span>{{else}}<span class="badge b-ok">运行中</span>{{end}}{{else}}<span class="badge b-gray">未启用</span>{{end}}</div>
+          <div class="v">{{if .BinanceOn}}{{if .Poll.LastError}}<span class="badge b-err">查询异常</span>{{else if .Poll.LastOKAt.IsZero}}<span class="badge b-wait">等待首次成功</span>{{else}}<span class="badge b-ok">查询已成功</span>{{end}}{{else}}<span class="badge b-gray">未启用</span>{{end}}</div>
+          <div class="k">最近成功</div><div class="v">{{if .Poll.LastOKAt.IsZero}}本次启动尚未成功{{else}}{{.Poll.LastOKAt.Format "01-02 15:04:05"}}{{end}} · 连续失败 {{.Poll.ConsecutiveFailures}}</div>
           <div class="k">最近检查</div>
           <div class="v">{{if .Poll.LastRunAt.IsZero}}<span class="muted">尚未运行</span>{{else}}{{.Poll.LastRunAt.Format "01-02 15:04:05"}}{{end}}</div>
           <div class="k">最近结果</div>
           <div class="v">读取 {{.Poll.LastFetched}} 条 · 确认 {{.Poll.LastMatched}} 笔{{if or .Poll.SkipType .Poll.SkipCurrency .Poll.SkipReceiver .Poll.SkipAmount .Poll.SkipDuplicate}} · 跳过 类型{{.Poll.SkipType}}/币种{{.Poll.SkipCurrency}}/收款人{{.Poll.SkipReceiver}}/金额{{.Poll.SkipAmount}}/已入账{{.Poll.SkipDuplicate}}{{end}}</div>
+          <div class="k">OKX 最近成功</div><div class="v">{{if .OKXPoll.LastOKAt.IsZero}}本次启动尚未成功{{else}}{{.OKXPoll.LastOKAt.Format "01-02 15:04:05"}}{{end}} · 连续失败 {{.OKXPoll.ConsecutiveFailures}}</div>
           <div class="k">OKX</div>
-          <div class="v">{{if .OKXOn}}{{if .OKXPoll.LastError}}<span class="badge b-err">查询异常</span>{{else}}<span class="badge b-ok">运行中</span>{{end}}{{else}}<span class="badge b-gray">未启用</span>{{end}}</div>
+          <div class="v">{{if .OKXOn}}{{if .OKXPoll.LastError}}<span class="badge b-err">查询异常</span>{{else if .OKXPoll.LastOKAt.IsZero}}<span class="badge b-wait">等待首次成功</span>{{else}}<span class="badge b-ok">查询已成功</span>{{end}}{{else}}<span class="badge b-gray">未启用</span>{{end}}</div>
           <div class="k">最近检查</div>
           <div class="v">{{if .OKXPoll.LastRunAt.IsZero}}<span class="muted">尚未运行</span>{{else}}{{.OKXPoll.LastRunAt.Format "01-02 15:04:05"}}{{end}}</div>
           <div class="k">最近结果</div>
@@ -113,14 +120,14 @@
     </section>
 
     <section class="card">
-      <div class="card-h"><h2>未归属流水</h2><span class="hint">扫描到但至今仍未核销到订单的交易，用于漏单排查{{if .ObservationCount}}（共 {{.ObservationCount}} 笔）{{end}}</span></div>
+      <div class="card-h"><h2>未归属流水</h2><span class="hint">候选交易证据，包含类型、币种或收款人不符；需核对实际到账{{if .ObservationCount}}（共 {{.ObservationCount}} 笔）{{end}}</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>交易时间</th><th>通道</th><th>币种 / 金额</th><th>原因</th><th>尝试订单</th><th>最近观察</th></tr></thead>
+          <thead><tr><th>交易时间 / 流水标识</th><th>通道</th><th>币种 / 金额</th><th>原因</th><th>尝试订单</th><th>最近观察</th></tr></thead>
           <tbody>
           {{range .Observations}}
             <tr>
-              <td class="muted mono">{{.TransactionTime.Format "01-02 15:04:05"}}</td>
+              <td class="muted mono">{{.TransactionTime.Format "01-02 15:04:05"}}<br>{{.TransactionID}}</td>
               <td>{{.Provider}}</td>
               <td class="num">{{.Currency}} {{.Amount}}</td>
               <td>

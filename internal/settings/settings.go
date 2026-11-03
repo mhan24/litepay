@@ -463,3 +463,25 @@ func (m *Manager) WithPaymentConfig(fn func()) {
 	defer m.mu.Unlock()
 	fn()
 }
+
+// LoadReadOnly loads exchange settings without generating or rotating any credentials.
+func (m *Manager) LoadReadOnly(ctx context.Context) error {
+	payload, err := m.st.LoadSettingPayload(ctx)
+	if err != nil {
+		return err
+	}
+	next := clone(m.cur.Load())
+	if payload != "" {
+		var patch Patch
+		if err := json.Unmarshal([]byte(payload), &patch); err != nil {
+			return fmt.Errorf("配置无法解析")
+		}
+		patch.Apply(next)
+	}
+	normalize(next)
+	if err := Validate(next); err != nil {
+		return fmt.Errorf("只读预检配置无效")
+	}
+	m.cur.Store(next)
+	return nil
+}

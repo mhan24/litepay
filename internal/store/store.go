@@ -30,7 +30,8 @@ var ErrNoSlotAvailable = errors.New("当前支付通道繁忙，请稍后重试"
 
 // Store 数据访问对象。
 type Store struct {
-	db *gorm.DB
+	db      *gorm.DB
+	workers workerHealth
 
 	// orderLocks serializes callbacks and replacement for one merchant order
 	// without blocking unrelated orders. The reference count lets idle entries

@@ -14,6 +14,7 @@ import (
 	"litepay/internal/amount"
 	"litepay/internal/binance"
 	"litepay/internal/config"
+	"litepay/internal/maintenance"
 	"litepay/internal/model"
 	"litepay/internal/okx"
 	"litepay/internal/settings"
@@ -22,23 +23,24 @@ import (
 
 // PollStats 到账确认运行状态快照（供后台展示）。
 type PollStats struct {
-	Enabled       bool      `json:"enabled"`
-	Provider      string    `json:"provider"`
-	LastRunAt     time.Time `json:"last_run_at"`
-	LastOKAt      time.Time `json:"last_ok_at"`
-	LastError     string    `json:"last_error"`
-	LastFetched   int       `json:"last_fetched"`
-	LastMatched   int       `json:"last_matched"`
-	SkipOutgoing  int       `json:"skip_outgoing"`
-	SkipType      int       `json:"skip_type"`
-	SkipReceiver  int       `json:"skip_receiver"`
-	SkipAmount    int       `json:"skip_amount"`
-	SkipDuplicate int       `json:"skip_duplicate"` // 已入账过的流水再次出现在历史窗口
-	SkipCurrency  int       `json:"skip_currency"`
-	SkipState     int       `json:"skip_state"`
-	TotalMatched  int64     `json:"total_matched"`
-	TotalRuns     int64     `json:"total_runs"`
-	LastIntervalS int       `json:"last_interval_s"`
+	ConsecutiveFailures int       `json:"consecutive_failures"`
+	Enabled             bool      `json:"enabled"`
+	Provider            string    `json:"provider"`
+	LastRunAt           time.Time `json:"last_run_at"`
+	LastOKAt            time.Time `json:"last_ok_at"`
+	LastError           string    `json:"last_error"`
+	LastFetched         int       `json:"last_fetched"`
+	LastMatched         int       `json:"last_matched"`
+	SkipOutgoing        int       `json:"skip_outgoing"`
+	SkipType            int       `json:"skip_type"`
+	SkipReceiver        int       `json:"skip_receiver"`
+	SkipAmount          int       `json:"skip_amount"`
+	SkipDuplicate       int       `json:"skip_duplicate"` // 已入账过的流水再次出现在历史窗口
+	SkipCurrency        int       `json:"skip_currency"`
+	SkipState           int       `json:"skip_state"`
+	TotalMatched        int64     `json:"total_matched"`
+	TotalRuns           int64     `json:"total_runs"`
+	LastIntervalS       int       `json:"last_interval_s"`
 }
 
 // PollerStats 两条通道各自的运行状态。
@@ -149,6 +151,9 @@ func (p *Poller) Run(ctx context.Context) {
 			slog.Info("到账确认已停止")
 			return
 		case now := <-ticker.C:
+			if maintenance.Blocked() {
+				continue
+			}
 			cfg := p.cfg.Get()
 			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX} {
 				if now.Before(p.retryAfter[provider]) {
@@ -287,7 +292,7 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 	grace := time.Duration(cfg.Order.SlotGraceSeconds) * time.Second
 	orders, err := p.store.MatchableOrders(ctx, provider, grace)
 	if err != nil {
-		slog.Error("查询待确认订单失败", "err", err)
+		p.failScan(ctx, provider, fmt.Errorf("读取待确认订单失败: %w", err))
 		return
 	}
 	// 只保留当前通道已选中的订单。收银台尚未选择的订单不参与任何通道。
@@ -338,6 +343,7 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 	p.failures[provider] = 0
 	delete(p.retryAfter, provider)
 	p.setStats(provider, func(s *PollStats) {
+		s.ConsecutiveFailures = 0
 		s.LastOKAt = time.Now()
 		s.LastError = ""
 		if plan.gap != nil || (cursor != nil && cursor.GapEnd != nil) {
@@ -372,7 +378,11 @@ func (p *Poller) failScan(ctx context.Context, provider string, err error) {
 		shift = 6
 	}
 	p.retryAfter[provider] = time.Now().Add(time.Duration(1<<shift) * 5 * time.Second)
-	p.setStats(provider, func(s *PollStats) { s.LastError = err.Error(); s.Provider = provider })
+	p.setStats(provider, func(s *PollStats) {
+		s.LastError = "交易所查询或本地持久化失败，请检查凭据、权限、限流与数据库"
+		s.Provider = provider
+		s.ConsecutiveFailures++
+	})
 	slog.Warn("查询到账记录失败", "provider", provider, "err", err)
 	if saveErr := p.store.SaveScanError(ctx, provider, err.Error()); saveErr != nil {
 		slog.Warn("记录扫描失败原因失败", "provider", provider, "err", saveErr)

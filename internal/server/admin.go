@@ -371,6 +371,11 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 	expireNotifyFail, _ := h.st.ExpiredNotifyFailureCount(ctx)
 	recent, _ := h.st.RecentOrders(ctx, 8)
 	volumes, _ := h.st.VolumeByCurrency(ctx, midnight)
+	ops, err := h.st.Operations(ctx)
+	if err != nil {
+		h.renderAdminError(c, err)
+		return
+	}
 	observations, _ := h.st.RecentTxObservations(ctx, 8)
 	observationCount, _ := h.st.CountOpenTxObservations(ctx)
 
@@ -385,6 +390,7 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 		"NotifyFail":       notifyFail,
 		"ExpireNotifyFail": expireNotifyFail,
 		"Recent":           recent,
+		"Operations":       ops,
 		"Observations":     observations,
 		"ObservationCount": observationCount,
 		"Poll":             h.poller.StatsFor(config.ProviderBinance),
@@ -484,10 +490,7 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 		return
 	}
 	logs, _ := h.st.NotifyLogs(c.Request.Context(), o.ID, 30)
-	grace := time.Duration(h.C().Order.SlotGraceSeconds) * time.Second
-	withinPaymentWindow := o.PayAmount > 0 && !time.Now().After(o.ExpiredAt.Add(grace))
-	canPay := withinPaymentWindow && !o.ExpireFinalized &&
-		o.Status == model.StatusReady
+	canPay := o.PayAmount > 0 && !o.ExpireFinalized && (o.Status == model.StatusReady || o.Status == model.StatusExpired)
 	canExpire := o.Status == model.StatusPending || o.Status == model.StatusReady
 
 	c.HTML(http.StatusOK, "admin_order.html", gin.H{
@@ -513,9 +516,7 @@ func (h *Handlers) AdminOrderAction(c *gin.Context) {
 
 	switch action {
 	case "pay":
-		grace := time.Duration(h.C().Order.SlotGraceSeconds) * time.Second
-		_, err = h.st.ManualPay(c.Request.Context(), tradeNo,
-			h.C().Order.AmountPrecision, grace)
+		_, err = h.st.ReconcileObservation(c.Request.Context(), tradeNo, strings.TrimSpace(c.PostForm("transaction_id")), h.C().Order.AmountPrecision)
 		msg = "已人工确认收款，支付结果通知即将发送"
 	case "notify":
 		err = h.st.ResetNotify(c.Request.Context(), tradeNo)

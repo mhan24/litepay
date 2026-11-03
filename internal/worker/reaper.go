@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"litepay/internal/maintenance"
 	"litepay/internal/settings"
 	"litepay/internal/store"
 )
@@ -35,19 +36,27 @@ func (r *Reaper) Run(ctx context.Context) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 
-	r.once(ctx)
+	if !maintenance.Blocked() {
+		r.once(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if maintenance.Blocked() {
+				continue
+			}
 			r.once(ctx)
 		}
 	}
 }
 
 func (r *Reaper) once(ctx context.Context) {
+	ok := true
+	defer func() { r.store.WorkerResult("reaper", ok) }()
 	if n, err := r.store.MarkExpired(ctx); err != nil {
+		ok = false
 		slog.Error("标记过期订单失败", "err", err)
 	} else if n > 0 {
 		slog.Info("已将超时订单标记为过期", "count", n)
@@ -55,6 +64,7 @@ func (r *Reaper) once(ctx context.Context) {
 
 	grace := time.Duration(r.cfg.Get().Order.SlotGraceSeconds) * time.Second
 	if n, err := r.store.FinalizeExpired(ctx, grace); err != nil {
+		ok = false
 		slog.Error("终结过期订单失败", "err", err)
 	} else if n > 0 {
 		slog.Info("已结束过期订单，停止确认到账并安排过期通知", "count", n)

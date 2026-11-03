@@ -14,6 +14,7 @@ import (
 
 	"litepay/internal/amount"
 	"litepay/internal/config"
+	"litepay/internal/maintenance"
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/sign"
@@ -48,6 +49,9 @@ func (n *Notifier) Run(ctx context.Context) {
 			slog.Info("结果通知 Worker 已停止")
 			return
 		case <-ticker.C:
+			if maintenance.Blocked() {
+				continue
+			}
 			n.tick(ctx)
 		}
 	}
@@ -57,9 +61,11 @@ func (n *Notifier) tick(ctx context.Context) {
 	cfg := n.cfg.Get()
 	orders, err := n.store.DueNotifications(ctx, cfg.Notify.MaxAttempts, 20)
 	if err != nil {
+		n.store.WorkerResult("notifier", false)
 		slog.Error("查询待回调订单失败", "err", err)
 		return
 	}
+	n.store.WorkerResult("notifier", true)
 	for i := range orders {
 		if err := n.store.WithCurrentNotification(ctx, &orders[i], func(current *model.Order) {
 			// 先领取任务再发送：领取失败说明另一个 worker 或上一轮仍在处理，

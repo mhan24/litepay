@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/dujiao-next/dujiao-next",
+  "commit": "5c2f06ad56b82d6a6d68886704bca0b7d04ceb06",
+  "adapter": "internal/modules/payment/infrastructure/gateway/bepusdt/bepusdt.go",
+  "callback_status_accepted": [2],
+  "callback_success_body": "success",
+  "callback_failure_body": "fail",
+  "merchant_fulfillment": "simulated idempotent merchant; real Dujiao database and goods delivery require separate acceptance"
+}

@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -42,6 +43,7 @@ func main() {
 	backup := flag.String("backup-db", "", "一致性备份源数据库路径")
 	output := flag.String("output", "", "备份目标（必须不存在）")
 	verify := flag.String("verify-db", "", "只读完整性校验数据库")
+	preflight := flag.Bool("preflight", false, "只读检查当前配置账户UID及最近历史（不转账、不启动worker）")
 	flag.Parse()
 	if *backup != "" || *verify != "" {
 		var err error
@@ -67,6 +69,35 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *preflight {
+		st, err := store.OpenReadOnly(cfg.Database.Path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "只读配置数据库无法打开")
+			os.Exit(1)
+		}
+		mgr := settings.New(cfg, st)
+		if err := mgr.LoadReadOnly(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "只读配置加载失败")
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		results := worker.Preflight(ctx, mgr.Get())
+		_ = json.NewEncoder(os.Stdout).Encode(results)
+		configured, failed := false, false
+		for _, r := range results {
+			if r.Enabled {
+				configured = true
+				if !r.AccountAndHistoryOK {
+					failed = true
+				}
+			}
+		}
+		if !configured || failed {
+			os.Exit(1)
+		}
+		return
+	}
 	setupLogger(cfg.LogLevel)
 
 	st, err := store.Open(cfg.Database.Path)
