@@ -64,7 +64,11 @@ func (n *Notifier) tick(ctx context.Context) {
 		if err := n.store.WithCurrentNotification(ctx, &orders[i], func(current *model.Order) {
 			// 先领取任务再发送：领取失败说明另一个 worker 或上一轮仍在处理，
 			// 不能重复投递同一笔回调。
-			claimed, err := n.store.ClaimNotify(ctx, current, notifyLease)
+			lease := notifyLease
+			if timeout := time.Duration(cfg.Notify.TimeoutSeconds)*time.Second + 15*time.Second; timeout > lease {
+				lease = timeout
+			}
+			claimed, err := n.store.ClaimNotify(ctx, current, lease)
 			if err != nil {
 				slog.Error("领取回调任务失败", "trade_no", current.TradeNo, "err", err)
 				return

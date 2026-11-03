@@ -3,6 +3,8 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -75,7 +77,7 @@ func Open(path string) (*Store, error) {
 		}
 		dbPath = (&url.URL{Scheme: "file", Path: absolute}).String()
 	}
-	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger:  logger.New(log.New(os.Stderr, "", log.LstdFlags), logger.Config{LogLevel: logger.Warn, ParameterizedQueries: true}),
 		NowFunc: func() time.Time { return time.Now().Local() },
@@ -788,6 +790,7 @@ func (s *Store) FinishNotify(ctx context.Context, o *model.Order, attempt int, s
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		updates := map[string]any{
 			"notify_attempts":  attempt,
+			"notify_lease_id":  "",
 			"last_notify_resp": truncate(respBody, 500),
 			"updated_at":       time.Now(),
 		}
@@ -806,6 +809,7 @@ func (s *Store) FinishNotify(ctx context.Context, o *model.Order, attempt int, s
 		res := tx.Model(&model.Order{}).
 			Where("id = ? AND status = ? AND notify_attempts = ?",
 				o.ID, o.Status, o.NotifyAttempts).
+			Where("notify_lease_id = ?", o.NotifyLeaseID).
 			Updates(updates)
 		if res.Error != nil {
 			return res.Error
@@ -823,7 +827,7 @@ func (s *Store) FinishNotify(ctx context.Context, o *model.Order, attempt int, s
 
 func createNotifyLog(tx *gorm.DB, o *model.Order, attempt int, success bool,
 	statusCode int, respBody, reqURL, errMsg string) error {
-	return tx.Create(&model.NotifyLog{
+	return tx.Create(&model.NotifyLog{LeaseID: o.NotifyLeaseID,
 		OrderID:         o.ID,
 		TradeNo:         o.TradeNo,
 		Attempt:         attempt,
@@ -1080,20 +1084,33 @@ func (s *Store) SaveScanError(ctx context.Context, provider, message string) err
 // 纯内存标记，重启后租约到期就能重新领取；同一订单不会被两个 worker
 // 同时发送（条件更新保证只有一方 RowsAffected = 1）。
 func (s *Store) ClaimNotify(ctx context.Context, o *model.Order, lease time.Duration) (bool, error) {
+	if lease <= 0 {
+		return false, errors.New("回调租约必须为正数")
+	}
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return false, err
+	}
+	leaseID := hex.EncodeToString(token[:])
 	now := time.Now()
 	res := s.db.WithContext(ctx).Model(&model.Order{}).
 		Where("id = ? AND status = ? AND notify_attempts = ?", o.ID, o.Status, o.NotifyAttempts).
 		Where("(notify_status IN ? OR (notify_status = ? AND (next_notify_at IS NULL OR next_notify_at <= ?)))",
 			[]string{model.NotifyPending, ""}, model.NotifySending, now).
 		Updates(map[string]any{
-			"notify_status":  model.NotifySending,
-			"next_notify_at": now.Add(lease),
-			"updated_at":     now,
+			"notify_status":   model.NotifySending,
+			"notify_lease_id": leaseID,
+			"next_notify_at":  now.Add(lease),
+			"updated_at":      now,
 		})
 	if res.Error != nil {
 		return false, res.Error
 	}
-	return res.RowsAffected == 1, nil
+	if res.RowsAffected == 1 {
+		o.NotifyLeaseID = leaseID
+		return true, nil
+	}
+	return false, nil
 }
 
 // RecordScanGap preserves the union of unrecoverable windows across restarts.

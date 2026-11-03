@@ -54,6 +54,7 @@ type Order struct {
 	NotifyURL      string     `gorm:"size:512" json:"notify_url"`
 	ReturnURL      string     `gorm:"size:512" json:"return_url"`
 	NotifyStatus   string     `gorm:"size:16;index" json:"notify_status"`
+	NotifyLeaseID  string     `gorm:"not null;default:''"`
 	NotifyAttempts int        `json:"notify_attempts"`
 	NotifyResets   int        `gorm:"not null;default:0" json:"notify_resets"`
 	NextNotifyAt   *time.Time `json:"next_notify_at"`
@@ -215,6 +216,7 @@ func (TxObservation) TableName() string { return "tx_observations" }
 
 // NotifyLog 回调尝试记录。
 type NotifyLog struct {
+	LeaseID         string
 	ID              uint   `gorm:"primaryKey"`
 	OrderID         uint   `gorm:"index"`
 	TradeNo         string `gorm:"size:64;index"`
