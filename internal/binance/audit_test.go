@@ -142,3 +142,13 @@ func TestUnknownSuccessEnvelopeIsNotEmptyHistory(t *testing.T) {
 		srv.Close()
 	}
 }
+
+func TestRequestBudgetWaitCanBeCanceled(t *testing.T) {
+	cli := New("key", "secret", "https://api.binance.com", 5000, 100)
+	cli.nextRequest = time.Now().Add(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := cli.fetchWindow(ctx, time.Now().Add(-time.Minute), time.Now()); err != context.Canceled {
+		t.Fatalf("canceled scan continued into API request: %v", err)
+	}
+}

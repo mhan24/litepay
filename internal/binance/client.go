@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	money "litepay/internal/amount"
@@ -25,12 +26,15 @@ const maxStoredRawBytes = 16 << 10
 
 // Client 币安 API 客户端。
 type Client struct {
-	apiKey     string
-	apiSecret  string
-	baseURL    string
-	recvWindow int
-	limit      int
-	http       *httpx.Client
+	apiKey          string
+	apiSecret       string
+	baseURL         string
+	recvWindow      int
+	limit           int
+	http            *httpx.Client
+	requestMu       sync.Mutex
+	nextRequest     time.Time
+	requestInterval time.Duration
 }
 
 // New 创建客户端。
@@ -39,18 +43,20 @@ func New(apiKey, apiSecret, baseURL string, recvWindow, limit int) *Client {
 		baseURL = "https://api.binance.com"
 	}
 	return &Client{
-		apiKey:     apiKey,
-		apiSecret:  apiSecret,
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		recvWindow: recvWindow,
-		limit:      limit,
-		http:       httpx.NewClient(15*time.Second, false),
+		apiKey:          apiKey,
+		apiSecret:       apiSecret,
+		baseURL:         strings.TrimRight(baseURL, "/"),
+		recvWindow:      recvWindow,
+		limit:           limit,
+		http:            httpx.NewClient(15*time.Second, false),
+		requestInterval: 2 * time.Second,
 	}
 }
 
 // UseTestTransport 仅供本包测试访问本地模拟服务；生产入口不会调用。
 func (c *Client) UseTestTransport() {
 	c.http = httpx.NewClient(15*time.Second, true)
+	c.requestInterval = 0
 }
 
 // Transaction 一条 Binance 站内转账记录（已解析）。
@@ -157,6 +163,18 @@ func (c *Client) PayTransactions(ctx context.Context, start, end time.Time) ([]T
 }
 
 func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Transaction, int, error) {
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+	if wait := time.Until(c.nextRequest); wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	c.nextRequest = time.Now().Add(c.requestInterval)
 	q := url.Values{}
 	q.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
 	q.Set("recvWindow", strconv.Itoa(c.recvWindow))
