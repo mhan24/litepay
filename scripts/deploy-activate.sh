@@ -38,7 +38,16 @@ rollback() {
         docker tag "$old_image" litepay:go
         docker rename "$old_name" litepay
         docker start litepay >/dev/null
-        echo "Previous version restored; backup retained: $backup_dir" >&2
+        restored=0
+        for ((attempt=0;attempt<30;attempt++)); do
+          if curl -fsS -m 3 http://127.0.0.1:3101/healthz >/dev/null; then restored=1; break; fi
+          sleep 2
+        done
+        if (( restored == 1 )); then
+          echo "Previous version restored; backup retained: $backup_dir" >&2
+        else
+          echo "Previous container restarted but health is unverified; preserve $backup_dir and investigate." >&2
+        fi
       else
         echo "RESTORE FAILED: service remains stopped; preserve $backup_dir and reconcile manually." >&2
       fi
