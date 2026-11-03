@@ -577,3 +577,41 @@ func TestDujiaoStatus3RejectionDoesNotAcknowledgeMerchant(t *testing.T) {
 		t.Fatalf("merchant expiry rejection hidden: hits=%d order=%+v", hits, got)
 	}
 }
+
+func TestStoredHistoryGapPreventsBusinessReadiness(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "gap-ready.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	ex := httptest.NewServer(http.HandlerFunc((&exchange{provider: "binance"}).serve))
+	defer ex.Close()
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Binance.BaseURL = ex.URL
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	poll := worker.NewPoller(mgr, st)
+	worker.AcceptanceScan(poll, ctx, cfg, "binance")
+	st.WorkerResult("notifier", true)
+	st.WorkerResult("reaper", true)
+	engine, err := server.New(mgr, st, poll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func() int {
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest("GET", "/readyz", nil))
+		return w.Code
+	}
+	if check() != 200 {
+		t.Fatal("successful worker scan did not become ready")
+	}
+	if err := st.RecordScanGap(ctx, "binance", time.Now().Add(-10*24*time.Hour), time.Now().Add(-7*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if check() != 503 {
+		t.Fatal("persistent gap hidden by in-memory success")
+	}
+}

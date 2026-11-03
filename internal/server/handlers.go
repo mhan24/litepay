@@ -533,6 +533,10 @@ func (h *Handlers) Ready(c *gin.Context) {
 		if stats.LastOKAt.IsZero() || time.Since(stats.LastOKAt) > age || stats.LastError != "" {
 			ready = false
 		}
+		cursor, err := h.st.ScanCursor(c.Request.Context(), provider)
+		if err != nil || cursor == nil || cursor.GapEnd != nil || time.Since(cursor.ScannedUntil) > age {
+			ready = false
+		}
 	}
 	if !enabled {
 		ready = false

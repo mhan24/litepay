@@ -76,6 +76,7 @@ func (n *Notifier) tick(ctx context.Context) {
 			}
 			claimed, err := n.store.ClaimNotify(ctx, current, lease)
 			if err != nil {
+				n.store.WorkerResult("notifier", false)
 				slog.Error("领取回调任务失败", "trade_no", current.TradeNo, "err", err)
 				return
 			}
@@ -84,6 +85,7 @@ func (n *Notifier) tick(ctx context.Context) {
 			}
 			n.notifyOne(ctx, cfg, current)
 		}); err != nil {
+			n.store.WorkerResult("notifier", false)
 			slog.Error("检查回调订单失败", "err", err)
 		}
 	}
@@ -174,6 +176,7 @@ func (n *Notifier) notifyOne(ctx context.Context, cfg *config.Config, o *model.O
 	}
 
 	if ferr := n.store.FinishNotify(ctx, o, attempt, success, body, statusCode, reqURL, errMsg, nextAt); ferr != nil {
+		n.store.WorkerResult("notifier", false)
 		slog.Error("保存回调结果失败", "trade_no", o.TradeNo, "err", ferr)
 	}
 
