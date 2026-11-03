@@ -96,9 +96,12 @@ func Open(path string) (*Store, error) {
 	sqlDB.SetMaxIdleConns(1)
 
 	if err := db.AutoMigrate(&model.Order{}, &model.AmountSlot{}, &model.IncomingTx{},
-		&model.TxObservation{}, &model.PaymentInquiry{}, &model.ScanCursor{}, &model.NotifyLog{}, &model.Setting{},
+		&model.EventClaim{}, &model.TxObservation{}, &model.PaymentInquiry{}, &model.ScanCursor{}, &model.NotifyLog{}, &model.Setting{},
 		&model.Credential{}); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
+	}
+	if err := migrateEventIdentity(db); err != nil {
+		return nil, eventIdentityError(err)
 	}
 	if err := migrateFixedAmounts(db); err != nil {
 		return nil, err
@@ -551,8 +554,12 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 	if strings.TrimSpace(tx.TransactionID) == "" {
 		return false, rejectClaim("收款流水号不能为空")
 	}
-	if tx.Type != "MANUAL" && !((tx.Provider == "binance" && (tx.Type == "PAY" || tx.Type == "C2C")) || (tx.Provider == "okx" && tx.Type == "3")) {
+	if !((tx.Provider == "binance" && (tx.Type == "PAY" || tx.Type == "C2C")) || (tx.Provider == "okx" && tx.Type == "3")) {
 		return false, rejectClaim("不支持的收款流水类型")
+	}
+
+	if err := normalizeClaimIdentity(&tx); err != nil {
+		return false, err
 	}
 
 	err := s.db.WithContext(ctx).Transaction(func(d *gorm.DB) error {
@@ -563,6 +570,16 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 		}
 		if consumed != 0 {
 			return nil
+		}
+		var usedEvent int64
+		if err := d.Model(&model.EventClaim{}).Where("provider = ? AND event_id = ?", tx.Provider, tx.EventID).Count(&usedEvent).Error; err != nil {
+			return err
+		}
+		if usedEvent != 0 {
+			return nil
+		}
+		if err := guardLegacyIdentity(d, &tx); err != nil {
+			return err
 		}
 		tx.OrderTradeNo = order.TradeNo
 		// 在幂等闸门前先重新读取订单。调用方传入的是查询快照，可能已被
@@ -631,6 +648,14 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 			return err
 		}
 
+		guard := model.EventClaim{Provider: tx.Provider, EventID: tx.EventID, CanonicalID: tx.CanonicalID, TradeNo: current.TradeNo, State: "claimed"}
+		eventRes := d.Clauses(clause.OnConflict{DoNothing: true}).Create(&guard)
+		if eventRes.Error != nil {
+			return eventRes.Error
+		}
+		if eventRes.RowsAffected == 0 {
+			return nil
+		}
 		// 1) 幂等闸门：incoming_txs 以 (provider, transactionId) 为主键
 		res := d.Clauses(clause.OnConflict{DoNothing: true}).Create(&tx)
 		if res.Error != nil {
@@ -970,6 +995,7 @@ func (s *Store) RecordTxObservation(ctx context.Context, obs model.TxObservation
 		return tx.Model(&model.TxObservation{}).
 			Where("provider = ? AND transaction_id = ?", obs.Provider, obs.TransactionID).
 			Updates(map[string]any{
+				"event_id": obs.EventID, "detail_id": obs.DetailID, "canonical_id": obs.CanonicalID, "reference_id": obs.ReferenceID, "identity_issue": obs.IdentityIssue,
 				"reason":           obs.Reason,
 				"reason_rank":      obs.ReasonRank,
 				"order_trade_no":   obs.OrderTradeNo,

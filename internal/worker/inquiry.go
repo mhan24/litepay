@@ -120,8 +120,11 @@ func (p *Poller) CheckPayment(ctx context.Context, tradeNo, reference string) (s
 				result = "needs_review"
 				continue
 			}
-			txs = append(txs, incomingTransaction{ID: "okx:" + row.DepositID, Type: row.Type, Amount: row.Amount, AmountText: row.AmountText, Currency: row.Currency, Time: row.Timestamp, ReceiverID: uid, ReceiverAddr: uid, Incoming: true, Raw: row.Raw})
+			txs = append(txs, incomingTransaction{ID: "okx:" + row.DepositID, EventID: row.DepositID, CanonicalID: "okx:" + row.DepositID, ReferenceID: row.FromWithdrawID, Type: row.Type, Amount: row.Amount, AmountText: row.AmountText, Currency: row.Currency, Time: row.Timestamp, ReceiverID: uid, ReceiverAddr: uid, Incoming: true, Raw: row.Raw})
 		}
+	}
+	if result == "needs_review" {
+		return result, nil
 	}
 	if len(txs) == 0 {
 		if result != "needs_review" {
@@ -137,13 +140,13 @@ func (p *Poller) CheckPayment(ctx context.Context, tradeNo, reference string) (s
 	if rejectTransaction(provider, cfg, &tx) != transactionAccepted || !strings.EqualFold(o.Currency, tx.Currency) || !orderMatchesTransaction(o, &tx, cfg.Order.AmountPrecision) || tx.Time.Before(*o.SelectedAt) || tx.Time.After(o.ExpiredAt) || tx.Time.After(time.Now().Add(scanClockSkew)) {
 		result = "needs_review"
 		if tx.Incoming {
-			if err := p.store.RecordTxObservation(ctx, model.TxObservation{Provider: provider, TransactionID: tx.ID, Type: tx.Type, Amount: tx.Amount, AmountText: tx.AmountText, Currency: tx.Currency, ReceiverID: tx.ReceiverID, TransactionTime: tx.Time, Raw: tx.Raw, Reason: model.ObservationReasonClaimFailed, OrderTradeNo: o.TradeNo}); err != nil {
+			if err := p.store.RecordTxObservation(ctx, model.TxObservation{Provider: provider, TransactionID: tx.ID, EventID: tx.EventID, DetailID: tx.DetailID, CanonicalID: tx.CanonicalID, ReferenceID: reference, IdentityIssue: tx.IdentityIssue, Type: tx.Type, Amount: tx.Amount, AmountText: tx.AmountText, Currency: tx.Currency, ReceiverID: tx.ReceiverID, TransactionTime: tx.Time, Raw: tx.Raw, Reason: model.ObservationReasonClaimFailed, OrderTradeNo: o.TradeNo}); err != nil {
 				return "", err
 			}
 		}
 		return result, nil
 	}
-	ok, err := p.store.ClaimAndPay(ctx, o, model.IncomingTx{Provider: provider, TransactionID: tx.ID, Type: tx.Type, Amount: tx.Amount, AmountText: tx.AmountText, Currency: tx.Currency, ReceiverID: tx.ReceiverID, ReceiverAddr: tx.ReceiverAddr, TransactionTime: tx.Time, Raw: tx.Raw}, cfg.Order.AmountPrecision)
+	ok, err := p.store.ClaimAndPay(ctx, o, model.IncomingTx{Provider: provider, TransactionID: tx.ID, EventID: tx.EventID, DetailID: tx.DetailID, CanonicalID: tx.CanonicalID, ReferenceID: reference, IdentityIssue: tx.IdentityIssue, Type: tx.Type, Amount: tx.Amount, AmountText: tx.AmountText, Currency: tx.Currency, ReceiverID: tx.ReceiverID, ReceiverAddr: tx.ReceiverAddr, TransactionTime: tx.Time, Raw: tx.Raw}, cfg.Order.AmountPrecision)
 	if err != nil {
 		if store.IsClaimRejection(err) {
 			result = "needs_review"

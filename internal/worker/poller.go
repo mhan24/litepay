@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"net"
@@ -50,24 +51,26 @@ type PollerStats struct {
 }
 
 type incomingTransaction struct {
-	OrderID      string
-	ReferenceID  string
-	AmountText   string
-	ID           string
-	Type         string
-	Amount       float64
-	Currency     string
-	Time         time.Time
-	ReceiverID   string
-	ReceiverAddr string
-	Incoming     bool
-	Raw          string
+	EventID, DetailID, CanonicalID, IdentityIssue string
+	OrderID                                       string
+	ReferenceID                                   string
+	AmountText                                    string
+	ID                                            string
+	Type                                          string
+	Amount                                        float64
+	Currency                                      string
+	Time                                          time.Time
+	ReceiverID                                    string
+	ReceiverAddr                                  string
+	Incoming                                      bool
+	Raw                                           string
 }
 
 type transactionRejectReason int
 
 const (
 	transactionAccepted transactionRejectReason = iota
+	transactionIdentity
 	transactionOutgoing
 	transactionType
 	transactionCurrency
@@ -456,7 +459,7 @@ func (p *Poller) scanWindow(ctx context.Context, cfg *config.Config, provider st
 			}
 
 			ok, err := p.store.ClaimAndPay(ctx, o, model.IncomingTx{
-				TransactionID:   tx.ID,
+				TransactionID: tx.ID, EventID: tx.EventID, DetailID: tx.DetailID, CanonicalID: tx.CanonicalID, ReferenceID: tx.ReferenceID, IdentityIssue: tx.IdentityIssue,
 				Provider:        provider,
 				Type:            tx.Type,
 				Amount:          tx.Amount,
@@ -517,6 +520,9 @@ func (p *Poller) scanWindow(ctx context.Context, cfg *config.Config, provider st
 // rejectTransaction 只放行订单所选平台可确认的站内收入。
 // 该函数不依赖数据库，便于覆盖退款、支出、链上充值和收款 UID 错误等边界。
 func rejectTransaction(provider string, cfg *config.Config, tx *incomingTransaction) transactionRejectReason {
+	if tx.IdentityIssue != "" {
+		return transactionIdentity
+	}
 	if !tx.Incoming || tx.Amount <= 0 {
 		return transactionOutgoing
 	}
@@ -548,6 +554,8 @@ func rejectTransaction(provider string, cfg *config.Config, tx *incomingTransact
 // observationReason 把拒绝原因映射为观察账本里的稳定标记。
 func observationReason(r transactionRejectReason) string {
 	switch r {
+	case transactionIdentity:
+		return model.ObservationReasonIdentity
 	case transactionOutgoing:
 		return model.ObservationReasonOutgoing
 	case transactionType:
@@ -582,7 +590,7 @@ func (b *txObservationBook) observe(tx *incomingTransaction, reason, orderTradeN
 		return
 	}
 	b.items[tx.ID] = model.TxObservation{
-		Provider: b.provider, TransactionID: tx.ID, Type: tx.Type,
+		Provider: b.provider, TransactionID: tx.ID, Type: tx.Type, EventID: tx.EventID, DetailID: tx.DetailID, CanonicalID: tx.CanonicalID, ReferenceID: tx.ReferenceID, IdentityIssue: tx.IdentityIssue,
 		Amount: tx.Amount, AmountText: tx.AmountText, Currency: tx.Currency, ReceiverID: tx.ReceiverID,
 		TransactionTime: tx.Time, Reason: reason, ReasonRank: rank,
 		OrderTradeNo: orderTradeNo, Raw: tx.Raw,
@@ -653,7 +661,7 @@ func (p *Poller) binanceTransactions(ctx context.Context, cfg *config.Config,
 	out := make([]incomingTransaction, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, incomingTransaction{
-			ID: row.TransactionID, ReferenceID: row.ReferenceID, OrderID: row.OrderID, Type: strings.ToUpper(row.OrderType),
+			EventID: row.EventID, DetailID: row.DetailID, CanonicalID: row.CanonicalID, IdentityIssue: row.IdentityIssue, ID: row.TransactionID, ReferenceID: row.ReferenceID, OrderID: row.OrderID, Type: strings.ToUpper(row.OrderType),
 			Amount: row.Amount, AmountText: row.AmountText, Currency: strings.ToUpper(row.Currency),
 			Time: row.TransactionTime, ReceiverID: row.ReceiverID,
 			ReceiverAddr: row.ReceiverID, Incoming: row.Incoming, Raw: row.Raw,
@@ -711,25 +719,35 @@ func (p *Poller) okxTransactions(ctx context.Context, cfg *config.Config, since,
 				continue
 			}
 			id := strings.TrimSpace(row.DepositID)
-			if id == "" {
-				id = strings.TrimSpace(row.FromWithdrawID)
-			}
-			if id == "" {
-				id = strings.TrimSpace(row.TransactionID)
-			}
-			if id == "" {
-				continue
-			}
 			key := "okx:" + id
+			issue := ""
+			if id == "" {
+				key = fmt.Sprintf("okx:unidentified:%x", sha256.Sum256([]byte(row.Raw)))
+				issue = "missing_id"
+			}
 			if _, exists := seen[key]; exists {
 				continue
 			}
 			seen[key] = struct{}{}
-			out = append(out, incomingTransaction{
-				ID: key, Type: "3", Amount: row.Amount, AmountText: row.AmountText,
-				Currency: row.Currency, Time: row.Timestamp,
-				ReceiverID: uid, ReceiverAddr: uid, Incoming: true, Raw: row.Raw,
-			})
+			out = append(out, incomingTransaction{ID: key, EventID: id, CanonicalID: func() string {
+				if id == "" {
+					return ""
+				}
+				return key
+			}(), ReferenceID: row.FromWithdrawID, IdentityIssue: issue, Type: "3", Amount: row.Amount, AmountText: row.AmountText, Currency: row.Currency, Time: row.Timestamp, ReceiverID: uid, ReceiverAddr: uid, Incoming: true, Raw: row.Raw})
+		}
+	}
+	refs := map[string]string{}
+	ambiguous := map[string]bool{}
+	for _, tx := range out {
+		if old, ok := refs[tx.ReferenceID]; ok && old != tx.EventID {
+			ambiguous[tx.ReferenceID] = true
+		}
+		refs[tx.ReferenceID] = tx.EventID
+	}
+	for i := range out {
+		if ambiguous[out[i].ReferenceID] {
+			out[i].IdentityIssue = "ambiguous"
 		}
 	}
 	return out, nil

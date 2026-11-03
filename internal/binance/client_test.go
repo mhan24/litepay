@@ -167,7 +167,7 @@ func TestPayTransactionsSplitsFundsDetailByCurrency(t *testing.T) {
 	}
 	if len(rows) != 2 || rows[0].Currency != "USDT" || rows[1].Currency != "USDC" ||
 		rows[0].Amount != 2.51 || rows[1].Amount != 3.25 ||
-		rows[0].TransactionID == rows[1].TransactionID {
+		rows[0].TransactionID == rows[1].TransactionID || rows[0].EventID != rows[1].EventID || rows[0].CanonicalID != rows[1].CanonicalID || rows[0].IdentityIssue != "ambiguous" || rows[1].IdentityIssue != "ambiguous" {
 		t.Fatalf("funds detail rows = %+v", rows)
 	}
 }

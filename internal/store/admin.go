@@ -260,50 +260,7 @@ func (s *Store) ForceExpire(ctx context.Context, tradeNo string) error {
 // ManualPay 后台补单：将订单标记为已支付并触发回调。
 func (s *Store) ManualPay(ctx context.Context, tradeNo string, amountPrecision int,
 	slotGrace time.Duration) (*model.Order, error) {
-	o, err := s.GetByTradeNo(ctx, tradeNo)
-	if err != nil {
-		return nil, err
-	}
-	if o == nil {
-		return nil, errors.New("订单不存在")
-	}
-	if o.Status == model.StatusPaid {
-		return o, nil
-	}
-	if o.PayAmount <= 0 {
-		return nil, errors.New("订单尚未选择收款方式")
-	}
-	if o.ExpireFinalized {
-		return nil, errors.New("订单支付窗口已终结")
-	}
-	if o.Status == model.StatusReady {
-		// READY 订单超过有效期与配置宽限后应等待 Reaper 标为 EXPIRED，
-		// 不再允许后台绕过状态直接补单。
-		if time.Now().After(o.ExpiredAt.Add(slotGrace)) {
-			return nil, errors.New("订单已超过支付宽限期")
-		}
-	} else if o.Status == model.StatusExpired {
-		if time.Now().After(o.ExpiredAt.Add(slotGrace)) {
-			return nil, errors.New("订单已超过支付宽限期")
-		}
-	} else {
-		return nil, errors.New("当前订单状态不允许补单")
-	}
-
-	tx := model.IncomingTx{
-		TransactionID:   "MANUAL-" + tradeNo,
-		Provider:        o.Collection,
-		Type:            "MANUAL",
-		Amount:          o.PayAmount,
-		Currency:        o.Currency,
-		ReceiverAddr:    o.PayAddress,
-		TransactionTime: time.Now(),
-		Raw:             `{"source":"admin-manual"}`,
-	}
-	if _, err := s.ClaimAndPay(ctx, o, tx, amountPrecision); err != nil {
-		return nil, err
-	}
-	return s.GetByTradeNo(ctx, tradeNo)
+	return nil, errors.New("不允许生成补单流水，请认领已验证的交易所收款记录")
 }
 
 // DatabaseSize 返回数据库文件大小（字节）。

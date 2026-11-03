@@ -766,8 +766,12 @@ func TestManualPayRequiresValidSelectionAndGrace(t *testing.T) {
 		t.Fatal(err)
 	}
 	paid, err := st.ManualPay(ctx, ready.TradeNo, 4, 2*time.Minute)
-	if err != nil || paid.Status != model.StatusPaid {
-		t.Fatalf("valid manual pay failed: status=%v err=%v", paid, err)
+	if err == nil || paid != nil {
+		t.Fatal("synthetic manual payment must be rejected")
+	}
+	current, _ := st.GetByTradeNo(ctx, ready.TradeNo)
+	if current.Status != model.StatusReady {
+		t.Fatal("manual refusal changed order")
 	}
 
 	expired := createTestOrder(t, st, "LP-MANUAL-EXPIRED", "MERCHANT-MANUAL-EXPIRED", 0)

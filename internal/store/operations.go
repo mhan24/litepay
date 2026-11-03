@@ -92,10 +92,10 @@ func (s *Store) ReconcileObservation(ctx context.Context, tradeNo, transactionID
 	if err := s.db.WithContext(ctx).Where("provider = ? AND transaction_id = ? AND status = ?", o.Collection, transactionID, model.ObservationOpen).First(&obs).Error; err != nil {
 		return nil, errors.New("未找到当前通道仍待处理的真实流水")
 	}
-	if transactionID == "" || obs.Type == "MANUAL" || obs.ReceiverID == "" {
+	if obs.IdentityIssue != "" || transactionID == "" || obs.Type == "MANUAL" || obs.ReceiverID == "" {
 		return nil, errors.New("流水证据不完整，保持人工对账状态")
 	}
-	ok, err := s.ClaimAndPay(ctx, o, model.IncomingTx{Provider: obs.Provider, TransactionID: obs.TransactionID, Type: obs.Type, Amount: obs.Amount, AmountText: obs.AmountText, Currency: obs.Currency, ReceiverID: obs.ReceiverID, ReceiverAddr: obs.ReceiverID, TransactionTime: obs.TransactionTime, Raw: obs.Raw}, precision)
+	ok, err := s.ClaimAndPay(ctx, o, model.IncomingTx{Provider: obs.Provider, TransactionID: obs.TransactionID, EventID: obs.EventID, DetailID: obs.DetailID, CanonicalID: obs.CanonicalID, ReferenceID: obs.ReferenceID, IdentityIssue: obs.IdentityIssue, Type: obs.Type, Amount: obs.Amount, AmountText: obs.AmountText, Currency: obs.Currency, ReceiverID: obs.ReceiverID, ReceiverAddr: obs.ReceiverID, TransactionTime: obs.TransactionTime, Raw: obs.Raw}, precision)
 	if err != nil {
 		return nil, err
 	}

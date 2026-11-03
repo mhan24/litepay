@@ -61,6 +61,10 @@ func (c *Client) UseTestTransport() {
 
 // Transaction 一条 Binance 站内转账记录（已解析）。
 type Transaction struct {
+	EventID          string
+	DetailID         string
+	CanonicalID      string
+	IdentityIssue    string
 	OrderID          string    `json:"orderId"` // Optional exchange-provided App reference, never inferred.
 	RawTransactionID string    `json:"raw_transaction_id"`
 	ReferenceID      string    `json:"reference_id"` // Exchange ID before canonical fundsDetail suffixes.
@@ -156,8 +160,8 @@ func (c *Client) PayTransactions(ctx context.Context, start, end time.Time) ([]T
 			continue
 		}
 		for _, tx := range batch {
-			if _, exists := seen[tx.TransactionID]; !exists {
-				seen[tx.TransactionID] = struct{}{}
+			if _, exists := seen[tx.TransactionID+"|"+tx.DetailID]; !exists {
+				seen[tx.TransactionID+"|"+tx.DetailID] = struct{}{}
 				all = append(all, tx)
 			}
 		}
@@ -273,6 +277,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			return nil, 0, fmt.Errorf("币安转账 %s 缺少有效时间", id)
 		}
 		base := Transaction{
+			EventID: id, CanonicalID: id,
 			OrderID:          strings.TrimSpace(string(d.OrderID)),
 			RawTransactionID: id,
 			OrderType:        strings.ToUpper(string(d.OrderType)),
@@ -311,12 +316,17 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 					item.Incoming = fundAmount > 0
 				}
 				item.Currency = fundCurrency
-				item.TransactionID = fmt.Sprintf("%s:%d", id, i)
+				item.DetailID = fmt.Sprintf("fundsDetail:%d", i)
+				item.CanonicalID = id
+				if len(d.FundsDetail) > 1 {
+					item.IdentityIssue = "ambiguous"
+					item.TransactionID = fmt.Sprintf("%s:%d", id, i)
+				}
 				out = append(out, item)
 			}
 			// Never reinterpret a malformed record as a smaller payment just
 			// because one detail happens to match an order.
-			if detailDirectionKnown && detailTotal.Cmp(amountRat) != 0 {
+			if len(d.FundsDetail) == 1 && detailDirectionKnown && detailTotal.Cmp(amountRat) != 0 {
 				return nil, 0, fmt.Errorf("币安转账 %s 的明细合计与顶层金额不一致", id)
 			}
 			continue

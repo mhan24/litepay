@@ -109,6 +109,12 @@ func (AmountSlot) TableName() string { return "amount_slots" }
 // IncomingTx 已处理过的收款流水（幂等表）。交易所流水号只在各自通道内唯一，
 // 因此使用 (provider, transaction_id) 复合主键，避免币安和 OKX 互相碰撞。
 type IncomingTx struct {
+	EventID       string `gorm:"size:128;index"`
+	DetailID      string `gorm:"size:128"`
+	ReferenceID   string `gorm:"size:128"`
+	CanonicalID   string `gorm:"size:128;index"`
+	IdentityIssue string `gorm:"size:32"`
+
 	Provider        string `gorm:"primaryKey;size:16"`
 	TransactionID   string `gorm:"primaryKey;size:128"`
 	Type            string `gorm:"size:16"`
@@ -140,6 +146,7 @@ const (
 	ObservationReasonCurrency    = "currency"     // 币种不在启用列表内
 	ObservationReasonType        = "type"         // 流水类型不可入账（链上充值、退款等）
 	ObservationReasonOutgoing    = "outgoing"     // 支出类流水
+	ObservationReasonIdentity    = "identity"
 	ObservationReasonUnknown     = "unknown"
 )
 
@@ -149,6 +156,7 @@ const (
 // 拒绝入账（claim_failed），订单终结后同一笔流水就只剩 no_match。优先级
 // 保证“钱已收到但没进订单”这类需要人工介入的原因不会被更弱的观察覆盖。
 var txObservationRank = map[string]int{
+	ObservationReasonIdentity:    70,
 	ObservationReasonClaimFailed: 60,
 	ObservationReasonNoMatch:     50,
 	ObservationReasonReceiver:    40,
@@ -161,7 +169,7 @@ var txObservationRank = map[string]int{
 // TxObservationReasons 返回全部已知的观察原因，用于迁移回填与校验。
 func TxObservationReasons() []string {
 	return []string{
-		ObservationReasonClaimFailed, ObservationReasonNoMatch, ObservationReasonReceiver,
+		ObservationReasonIdentity, ObservationReasonClaimFailed, ObservationReasonNoMatch, ObservationReasonReceiver,
 		ObservationReasonCurrency, ObservationReasonType, ObservationReasonOutgoing,
 	}
 }
@@ -190,6 +198,12 @@ func TxObservationRank(reason string) int {
 // resolved，后台不再展示；ReasonRank 保证多次观察之间只保留最严重的
 // 失败原因。
 type TxObservation struct {
+	EventID       string `gorm:"size:128;index"`
+	DetailID      string `gorm:"size:128"`
+	ReferenceID   string `gorm:"size:128"`
+	CanonicalID   string `gorm:"size:128;index"`
+	IdentityIssue string `gorm:"size:32"`
+
 	Provider        string `gorm:"primaryKey;size:16"`
 	TransactionID   string `gorm:"primaryKey;size:128"`
 	Type            string `gorm:"size:16"`
@@ -289,3 +303,12 @@ type ScanCursor struct {
 
 // TableName 指定表名。
 func (ScanCursor) TableName() string { return "scan_cursors" }
+
+// EventClaim is the event-level consumption guard. Legacy conflicts block new claims without rewriting history.
+type EventClaim struct {
+	Provider    string `gorm:"primaryKey;size:16"`
+	EventID     string `gorm:"primaryKey;size:128"`
+	CanonicalID string
+	TradeNo     string
+	State       string
+}
