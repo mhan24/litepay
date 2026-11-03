@@ -62,7 +62,9 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	return c.receiver, nil
 }
 
-// History uses overlapping timestamp pages. A stalled boundary fails closed.
+// History 按 ts 分页读取充值历史：文档规定 after 返回「早于该 ts」的记录，因此每页以
+// oldest+1 继续会重新覆盖同一毫秒内的整组记录（重叠分页），不会截断同毫秒的多笔充值；
+// 边界无法推进时直接失败，宁可整次查询失败也不返回可能缺记录的结果。
 func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Transaction, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -115,6 +117,8 @@ func (c *Client) Lookup(ctx context.Context, ref string, start, end time.Time) (
 	return out, nil
 }
 func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, error) {
+	// 文档只定义了 type 请求参数（3=站内转账，4=链上充值），响应里没有 type 字段，
+	// 因此「是否站内转账」只能由请求过滤 + fromWdId 回填共同确认。
 	body, e := c.get(ctx, "/api/v5/asset/deposit-history", url.Values{"type": {"3"}, "limit": {strconv.Itoa(c.limit)}, "after": {strconv.FormatInt(after, 10)}})
 	if e != nil {
 		return nil, e
@@ -125,7 +129,6 @@ func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, er
 		Currency  exchange.Text `json:"ccy"`
 		Amount    exchange.Text `json:"amt"`
 		State     exchange.Text `json:"state"`
-		Type      exchange.Text `json:"type"`
 		Time      exchange.Text `json:"ts"`
 	}
 	if json.Unmarshal(body, &rows) != nil || rows == nil {
@@ -135,19 +138,27 @@ func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, er
 	seen := map[string]bool{}
 	for _, r := range rows {
 		ms, e := r.Time.Millis()
-		n, ae := r.Amount.SignedUnits()
-		if e != nil || ae != nil || r.ID == "" || seen[string(r.ID)] {
+		if e != nil || r.ID == "" || seen[string(r.ID)] {
 			return nil, fmt.Errorf("OKX invalid deposit evidence")
 		}
 		seen[string(r.ID)] = true
+		n, amountErr := r.Amount.SignedUnits()
 		t := model.Transaction{Provider: "okx", EventID: string(r.ID), Reference: string(r.Reference), Receiver: c.receiver, Currency: strings.ToUpper(string(r.Currency)), Units: n, OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
-		// type is a documented request filter; fromWdId is additional internal-transfer evidence.
-		if (r.Type != "" && r.Type != "3") || r.Reference == "" || n <= 0 {
-			t.State = model.Rejected
-			t.Reason = "not_internal_deposit"
-		} else if r.State != "2" {
-			t.State = model.Unconfirmed
-			t.Reason = "deposit_not_completed"
+		switch {
+		case amountErr != nil:
+			// 充值金额可达 8 位小数，支付域只有 6 位：保留证据但拒绝核销，不能让一条
+			// 无法表示的记录让整次查询永远失败。
+			t.Units, t.State, t.Reason = 0, model.Rejected, "invalid_amount"
+		case n <= 0:
+			t.State, t.Reason = model.Rejected, "not_internal_deposit"
+		case r.Reference == "":
+			// fromWdId 只在站内转账时回填（链上充值恒为空）。缺失时无法确认这是一笔
+			// 站内收款：不核销、也不永久拒绝，后续补齐字段仍可结算。
+			t.State, t.Reason = model.Unconfirmed, "internal_transfer_unverified"
+		case r.State != "2":
+			// 只有 2（deposit successful）是最终成功；0/1 未完成，8/17 等待处理，
+			// 11/12/13/14 为黑名单、冻结、归集拦截与 KYC 限制，都不核销。
+			t.State, t.Reason = model.Unconfirmed, "deposit_not_completed"
 		}
 		out = append(out, t)
 	}

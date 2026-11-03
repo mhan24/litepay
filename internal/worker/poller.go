@@ -105,16 +105,17 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	end := time.Now()
+	coveredFrom := end
 	cli, err := p.client(ctx, cfg, provider)
 	if err == nil {
-		end, err = p.scanIncremental(ctx, cfg, provider, cli, end)
+		coveredFrom, end, err = p.scanIncremental(ctx, cfg, provider, cli, end)
 	}
 	// 未确认到账按各自原始创建时间单独补查：它只补充事实、不推进游标，因此旧记录既不会
 	// 把正常增量扫描拖回旧窗口，也不会被增量游标越过之后彻底丢失。
 	var pendingErr error
 	rechecked := err == nil
 	if rechecked {
-		pendingErr = p.recheckPending(ctx, cfg, provider, cli)
+		pendingErr = p.recheckPending(ctx, cfg, provider, cli, coveredFrom, end)
 	}
 	// Use the parent deadline-independent write to retain a safe diagnostic even after API timeout.
 	saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
@@ -134,12 +135,12 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	return pendingErr
 }
 
-// scanIncremental 正常增量扫描：从游标继续读到当前时刻，返回本次真正覆盖到的终点。
+// scanIncremental 正常增量扫描：从游标继续读到当前时刻，返回本次真正覆盖到的时间区间。
 // 只有完整成功的查询才推进游标；不完整响应返回错误，游标保持原位。
-func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provider string, cli source, end time.Time) (time.Time, error) {
+func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provider string, cli source, end time.Time) (time.Time, time.Time, error) {
 	cursor, err := p.st.Cursor(ctx, provider)
 	if err != nil {
-		return end, err
+		return end, end, err
 	}
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	first := cursor.ScannedUntil.IsZero()
@@ -161,15 +162,15 @@ func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provid
 	}
 	rows, err := cli.History(ctx, start, end)
 	if err != nil {
-		return end, err
+		return start, end, err
 	}
 	markAmbiguous(rows)
 	for _, t := range rows {
 		if _, err = p.st.Process(ctx, t, ""); err != nil {
-			return end, err
+			return start, end, err
 		}
 	}
-	return end, nil
+	return start, end, nil
 }
 
 // pendingRecheckLimit 限制单轮补查的未确认到账数量，避免历史堆积拖慢每一次扫描。
@@ -179,7 +180,8 @@ const pendingRecheckLimit = 10
 // 分页、状态变化不会移动记录，增量游标越过之后就再也读不到，所以这里按记录自身的时间
 // 单独查询：窗口固定在这条记录附近，不重扫整段历史，也不推进扫描游标。
 // 每轮只取 pendingRecheckLimit 条并轮转偏移量，超出的记录在后续轮次补上，不会被永久跳过。
-func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provider string, cli source) error {
+// 已经落在本轮增量窗口里的记录不再重复请求。
+func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provider string, cli source, from, to time.Time) error {
 	retention := cfg.ScanRetention()
 	offset := p.pendingOffset[provider]
 	times, err := p.st.PendingTimes(ctx, provider, retention, offset, pendingRecheckLimit)
@@ -197,6 +199,9 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	var covered time.Time
 	for _, at := range times {
+		if !at.Before(from) && !at.After(to) {
+			continue // 本轮增量扫描已经读过这条记录
+		}
 		start, stop := at.Add(-lookback), at.Add(lookback)
 		if !covered.IsZero() && !start.After(covered) {
 			continue // 与上一笔的补查窗口重叠，已在上一次查询中读到

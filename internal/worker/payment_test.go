@@ -232,9 +232,9 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 	if e = p.Scan(ctx, "binance"); e != nil {
 		t.Fatal(e)
 	}
-	// 增量扫描一次，另有一次按原始时间补查未确认到账。
-	if f.calls != 4 {
-		t.Fatal("unconfirmed deposit was not rechecked", f.calls)
+	// 只有增量扫描一次：这条刚发生的未确认到账已经落在增量窗口里，不重复补查。
+	if f.calls != 3 {
+		t.Fatal("fresh pending deposit caused a duplicate query", f.calls)
 	}
 	if e = st.DB().Where("event_id = ?", "confirming").Delete(&model.Transaction{}).Error; e != nil {
 		t.Fatal(e)
@@ -253,7 +253,7 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 	if e = p.Scan(ctx, "binance"); e != nil {
 		t.Fatal(e)
 	}
-	if f.calls != 5 {
+	if f.calls != 4 {
 		t.Fatal("ready order did not trigger a scan", f.calls)
 	}
 	if time.Since(f.from) > 10*time.Minute || f.to.Before(f.from) {
@@ -525,12 +525,16 @@ func TestPendingRecheckFailureIsRecorded(t *testing.T) {
 	if _, e = st.Select(ctx, "d", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e != nil {
 		t.Fatal(e)
 	}
-	selected := time.Now().Add(-3 * time.Minute)
-	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "d").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
+	selected := time.Now().Add(-10 * time.Minute)
+	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "d").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(12 * time.Minute)}).Error; e != nil {
 		t.Fatal(e)
 	}
-	deposit := model.Transaction{Provider: "binance", EventID: "late-event", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: selected.Add(30 * time.Second), State: model.Unconfirmed}
+	// 到账时间早于增量回看窗口，只能由补查读到。
+	deposit := model.Transaction{Provider: "binance", EventID: "late-event", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: selected.Add(2 * time.Minute), State: model.Unconfirmed}
 	if _, e = st.Process(ctx, deposit, ""); e != nil {
+		t.Fatal(e)
+	}
+	if e = st.ScanResult(ctx, "binance", time.Now().Add(-time.Minute), nil); e != nil {
 		t.Fatal(e)
 	}
 	f := &fixture{rows: []model.Transaction{deposit}, failAfter: 1}
