@@ -359,21 +359,25 @@ func (s *Store) ScanDue(ctx context.Context, provider string, retention time.Dur
 	return n > 0, nil
 }
 
-// PendingSince returns the earliest occurrence of an unconfirmed deposit still inside the
-// retention window. Exchange history pages by record creation time and a later status change
-// does not move the record, so the scanner has to reopen that original window; once the cursor
-// moved past it the deposit can no longer be seen. The zero time means nothing is pending, and
-// deposits older than retention are ignored: they are never attributed automatically, their
-// evidence stays available for manual review.
-func (s *Store) PendingSince(ctx context.Context, provider string, retention time.Duration) (time.Time, error) {
-	var row model.Transaction
+// PendingTimes returns the original occurrence time of unconfirmed deposits that are still
+// inside the retention window, oldest first and capped at limit. Exchange history pages by
+// record creation time and a later status change does not move the record, so the scanner has
+// to reopen exactly those moments; a regular incremental cursor that moved past them can no
+// longer see them. Deposits older than retention are excluded: they are never attributed
+// automatically, their evidence stays available for manual review.
+func (s *Store) PendingTimes(ctx context.Context, provider string, retention time.Duration, limit int) ([]time.Time, error) {
+	var rows []model.Transaction
 	err := s.db.WithContext(ctx).
 		Where("provider = ? AND state = ? AND occurred_at >= ?", provider, model.Unconfirmed, time.Now().Add(-retention)).
-		Order("occurred_at").First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return time.Time{}, nil
+		Order("occurred_at").Limit(limit).Find(&rows).Error
+	if err != nil {
+		return nil, err
 	}
-	return row.OccurredAt, err
+	times := make([]time.Time, 0, len(rows))
+	for _, row := range rows {
+		times = append(times, row.OccurredAt)
+	}
+	return times, nil
 }
 
 func (s *Store) ReserveInquiry(ctx context.Context, no, ref string) (*model.Order, error) {

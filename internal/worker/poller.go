@@ -105,27 +105,13 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	end := time.Now()
 	cli, err := p.client(ctx, cfg, provider)
 	if err == nil {
-		var cursor model.ScanCursor
-		cursor, err = p.st.Cursor(ctx, provider)
-		if err == nil {
-			var start time.Time
-			start, err = p.scanStart(ctx, cfg, provider, cursor, end)
-			if err == nil {
-				if end.Sub(start) > time.Hour {
-					end = start.Add(time.Hour)
-				}
-				var rows []model.Transaction
-				rows, err = cli.History(ctx, start, end)
-				if err == nil {
-					markAmbiguous(rows)
-					for _, t := range rows {
-						if _, err = p.st.Process(ctx, t, ""); err != nil {
-							break
-						}
-					}
-				}
-			}
-		}
+		end, err = p.scanIncremental(ctx, cfg, provider, cli, end)
+	}
+	// 未确认到账按各自原始创建时间单独补查：它只补充事实、不推进游标，因此旧记录既不会
+	// 把正常增量扫描拖回旧窗口，也不会被增量游标越过之后彻底丢失。
+	var pendingErr error
+	if err == nil {
+		pendingErr = p.recheckPending(ctx, cfg, provider, cli)
 	}
 	// Use the parent deadline-independent write to retain a safe diagnostic even after API timeout.
 	saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
@@ -133,22 +119,27 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	if e := p.st.ScanResult(saveCtx, provider, end, err); e != nil {
 		return e
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return pendingErr
 }
 
-// scanStart 计算本次历史查询的起点，保证所有需要自动核销的付款窗口都被覆盖：
-//   - 游标有覆盖时从游标处继续，跨过更早的空白历史；
-//   - 首次扫描没有任何覆盖，必须回溯到最早一张待付款订单的窗口，否则那张订单的
-//     付款可能永远读不到，而游标却已推进到它之后；
-//   - 未确认到账按记录创建时间分页，状态变化不会移动记录，所以只要它还在补查期
-//     内，起点就要回到它的原始时间，否则游标一越过就再也看不到它。
-func (p *Poller) scanStart(ctx context.Context, cfg *config.Config, provider string, cursor model.ScanCursor, end time.Time) (time.Time, error) {
+// scanIncremental 正常增量扫描：从游标继续读到当前时刻，返回本次真正覆盖到的终点。
+// 只有完整成功的查询才推进游标；不完整响应返回错误，游标保持原位。
+func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provider string, cli source, end time.Time) (time.Time, error) {
+	cursor, err := p.st.Cursor(ctx, provider)
+	if err != nil {
+		return end, err
+	}
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	first := cursor.ScannedUntil.IsZero()
 	start := cursor.ScannedUntil.Add(-lookback)
 	if first {
 		start = end.Add(-cfg.ScanRetention())
 	}
+	// 仍在等待付款的订单必须被完整覆盖：首次扫描没有任何覆盖，起点可能比最早一张订单的
+	// 窗口更晚，必须回溯；平时则跳过更早的空白历史，不重读已有覆盖的部分。
 	var earliest model.Order
 	if e := p.st.DB().WithContext(ctx).Where("status = ? AND provider = ?", model.Ready, provider).Order("selected_at").First(&earliest).Error; e == nil && earliest.SelectedAt != nil {
 		floor := earliest.SelectedAt.Add(-lookback)
@@ -156,16 +147,53 @@ func (p *Poller) scanStart(ctx context.Context, cfg *config.Config, provider str
 			start = floor
 		}
 	}
-	pending, err := p.st.PendingSince(ctx, provider, cfg.ScanRetention())
-	if err != nil {
-		return time.Time{}, err
+	if end.Sub(start) > time.Hour {
+		end = start.Add(time.Hour)
 	}
-	if !pending.IsZero() {
-		if floor := pending.Add(-lookback); floor.Before(start) {
-			start = floor
+	rows, err := cli.History(ctx, start, end)
+	if err != nil {
+		return end, err
+	}
+	markAmbiguous(rows)
+	for _, t := range rows {
+		if _, err = p.st.Process(ctx, t, ""); err != nil {
+			return end, err
 		}
 	}
-	return start, nil
+	return end, nil
+}
+
+// pendingRecheckLimit 限制单轮补查的未确认到账数量，避免历史堆积拖慢每一次扫描。
+const pendingRecheckLimit = 10
+
+// recheckPending 按原始创建时间重读仍处于补查期内的未确认到账。交易所历史按创建时间
+// 分页、状态变化不会移动记录，增量游标越过之后就再也读不到，所以这里按记录自身的时间
+// 单独查询：窗口固定在这条记录附近，不重扫整段历史，也不推进扫描游标。
+func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provider string, cli source) error {
+	times, err := p.st.PendingTimes(ctx, provider, cfg.ScanRetention(), pendingRecheckLimit)
+	if err != nil {
+		return err
+	}
+	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
+	var covered time.Time
+	for _, at := range times {
+		start, stop := at.Add(-lookback), at.Add(lookback)
+		if !covered.IsZero() && !start.After(covered) {
+			continue // 与上一笔的补查窗口重叠，已在上一次查询中读到
+		}
+		rows, err := cli.History(ctx, start, stop)
+		if err != nil {
+			return err
+		}
+		markAmbiguous(rows)
+		for _, t := range rows {
+			if _, err = p.st.Process(ctx, t, ""); err != nil {
+				return err
+			}
+		}
+		covered = stop
+	}
+	return nil
 }
 func (p *Poller) Inquiry(ctx context.Context, no, ref string) (string, error) {
 	if len(ref) < 1 || len(ref) > 128 {

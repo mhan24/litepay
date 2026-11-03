@@ -225,8 +225,12 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 	if e = p.Scan(ctx, "binance"); e != nil {
 		t.Fatal(e)
 	}
-	if f.calls != 3 {
+	// 增量扫描一次，另有一次按原始时间补查未确认到账。
+	if f.calls != 4 {
 		t.Fatal("unconfirmed deposit was not rechecked", f.calls)
+	}
+	if e = st.DB().Where("event_id = ?", "confirming").Delete(&model.Transaction{}).Error; e != nil {
+		t.Fatal(e)
 	}
 
 	// 空闲可能让游标落后数小时：补查从最早一张待付款订单的窗口开始，不重读空白历史。
@@ -242,7 +246,7 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 	if e = p.Scan(ctx, "binance"); e != nil {
 		t.Fatal(e)
 	}
-	if f.calls != 4 {
+	if f.calls != 5 {
 		t.Fatal("ready order did not trigger a scan", f.calls)
 	}
 	if time.Since(f.from) > 10*time.Minute || f.to.Before(f.from) {
@@ -359,5 +363,73 @@ func TestPendingDepositStaysReadableAfterCursorAdvances(t *testing.T) {
 	o, e := st.GetByTradeNo(ctx, "okx-order")
 	if e != nil || o.Status != model.Paid {
 		t.Fatal("confirmed deposit outside the lookback window was lost", o.Status, e)
+	}
+}
+
+// 一笔比游标早一小时以上、仍在补查期内的未确认充值，不能把正常增量扫描拖回旧窗口：
+// 新订单的到账必须继续推进，旧交易既不丢失也不阻塞。
+func TestOldPendingDepositDoesNotBlockNewPayment(t *testing.T) {
+	ctx := context.Background()
+	st, e := store.Open(":memory:")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	// 补查期限拉长到两小时以上，旧交易才会一直留在补查范围里。
+	cfg.Order.ExpireMinutes = 120
+	mgr := settings.New(cfg, st)
+	if e = mgr.Load(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Create(ctx, model.Order{TradeNo: "new", OutTradeNo: "new", OriginUnits: 10000000, NotifyURL: "https://merchant.example/callback", ExpiresAt: time.Now().Add(10 * time.Minute)}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Select(ctx, "new", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e != nil {
+		t.Fatal(e)
+	}
+	selected := time.Now().Add(-4 * time.Minute)
+	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "new").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
+		t.Fatal(e)
+	}
+	// 90 分钟前创建、至今仍未确认的充值：远早于当前游标，但仍在补查期内。
+	old := model.Transaction{Provider: "binance", EventID: "old-pending", Reference: "old", Receiver: "receiver", Currency: "USDT", Units: 5000000, OccurredAt: time.Now().Add(-90 * time.Minute), State: model.Unconfirmed}
+	if _, e = st.Process(ctx, old, ""); e != nil {
+		t.Fatal(e)
+	}
+	payment := model.Transaction{Provider: "binance", EventID: "new-paid", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: time.Now().Add(-3 * time.Minute), State: model.Confirmed}
+	f := &fixture{rows: []model.Transaction{old, payment}}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: f}
+
+	for tick := 0; tick < 4; tick++ {
+		if e = p.Scan(ctx, "binance"); e != nil {
+			t.Fatal(e)
+		}
+		if o, _ := st.GetByTradeNo(ctx, "new"); o.Status == model.Paid {
+			break
+		}
+	}
+	o, e := st.GetByTradeNo(ctx, "new")
+	if e != nil || o.Status != model.Paid {
+		t.Fatal("old pending deposit blocked the new payment", o.Status, e)
+	}
+	cursor, e := st.Cursor(ctx, "binance")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if cursor.ScannedUntil.Before(payment.OccurredAt) {
+		t.Fatal("incremental cursor did not reach the new payment", cursor.ScannedUntil, payment.OccurredAt)
+	}
+	// 旧证据仍然保留、未被核销。
+	var stored model.Transaction
+	if e = st.DB().First(&stored, "provider = ? AND event_id = ?", "binance", "old-pending").Error; e != nil {
+		t.Fatal(e)
+	}
+	if stored.State != model.Unconfirmed || stored.OrderID != nil {
+		t.Fatal("old evidence was lost or claimed", stored.State, stored.OrderID)
 	}
 }
