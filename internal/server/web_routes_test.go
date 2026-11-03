@@ -67,7 +67,7 @@ func TestStoreHomepageAndHiddenAdminLifecycle(t *testing.T) {
 		t.Fatal("hidden path bypassed CSRF")
 	}
 	logout := send("POST", root+"/logout", nil, cookie)
-	if logout.Header().Get("Location") != root+"/login" || logout.Result().Cookies()[0].Path != root {
+	if logout.Header().Get("Location") != root+"/login" || len(logout.Result().Cookies()) != 2 || logout.Result().Cookies()[0].Path != "/" || logout.Result().Cookies()[1].Path != root {
 		t.Fatal("incorrect logout destination/cookie deletion")
 	}
 }

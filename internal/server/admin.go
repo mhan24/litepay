@@ -347,6 +347,8 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 // AdminLogout POST /admin/logout
 func (h *Handlers) AdminLogout(c *gin.Context) {
 	c.SetSameSite(http.SameSiteStrictMode)
+	// Remove legacy root-scoped sessions as well as the current mount cookie.
+	c.SetCookie(adminCookieName, "", -1, "/", "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
 	c.SetCookie(adminCookieName, "", -1, h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
 	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login"))
 }
