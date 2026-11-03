@@ -312,3 +312,20 @@ type EventClaim struct {
 	TradeNo     string
 	State       string
 }
+
+// Auxiliary evidence cannot be consumed by ClaimAndPay or ReconcileObservation.
+type FundingBillEvidence struct {
+	BillID     string `gorm:"primaryKey;size:128"`
+	Currency   string
+	ChangeText string
+	Timestamp  time.Time
+	Result     string
+	Candidates string
+	UpdatedAt  time.Time
+}
+type AuxiliaryRun struct {
+	ID         uint `gorm:"primaryKey"`
+	CheckedAt  time.Time
+	Result     string
+	Diagnostic string
+}

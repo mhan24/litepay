@@ -96,7 +96,7 @@ func Open(path string) (*Store, error) {
 	sqlDB.SetMaxIdleConns(1)
 
 	if err := db.AutoMigrate(&model.Order{}, &model.AmountSlot{}, &model.IncomingTx{},
-		&model.EventClaim{}, &model.TxObservation{}, &model.PaymentInquiry{}, &model.ScanCursor{}, &model.NotifyLog{}, &model.Setting{},
+		&model.EventClaim{}, &model.FundingBillEvidence{}, &model.AuxiliaryRun{}, &model.TxObservation{}, &model.PaymentInquiry{}, &model.ScanCursor{}, &model.NotifyLog{}, &model.Setting{},
 		&model.Credential{}); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}

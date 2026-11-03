@@ -28,6 +28,7 @@
 {{template "admin_nav" .}}
 
 <div class="shell">
+  {{template "admin_flash" .}}
   <div class="pagehead">
     <div>
       <h1>接入信息</h1>
@@ -71,6 +72,16 @@
     </div>
   </div>
 
+  <section class="card" style="margin-bottom:16px">
+    <div class="card-h"><h2>OKX 辅助只读对账</h2><span class="hint">手动查询 · 至少间隔 5 分钟</span></div>
+    <div class="card-b"><p class="section-desc">对照最近 24 小时的资金增加账单与充值历史。金额和时间接近仅提供排查线索，不证明是同一笔付款，也不会自动入账或发货。</p>
+      <form method="post" action="{{adminPath}}/integration/okx-reconcile"><input type="hidden" name="csrf" value="{{.Base.CSRF}}"><button type="submit" class="btn btn-ghost">查询辅助账单</button></form>
+      {{with .AuxRun}}<p class="section-desc" style="margin-top:16px">最近检查 {{.CheckedAt.Format "01-02 15:04:05"}} · {{if eq .Result "checking"}}检查中或检查被中断{{else if eq .Result "incomplete"}}数据不完整，需人工对账{{else if eq .Result "inconsistent"}}返回信息不一致，需人工核对{{else}}需要人工对账{{end}}<br>{{.Diagnostic}}</p>{{end}}
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>账单 ID</th><th>币种 / 余额增加</th><th>时间</th><th>结果</th><th>候选充值 ID（未证明关联）</th></tr></thead><tbody>
+    {{range .AuxRows}}<tr><td class="mono">{{.BillID}}</td><td>{{.Currency}} {{.ChangeText}}</td><td>{{.Timestamp.Format "01-02 15:04:05"}}</td><td>{{if eq .Result "candidate_only"}}找到候选，需人工核对{{else if eq .Result "incomplete"}}数据不完整{{else}}资金增加，订单归属不明{{end}}</td><td class="mono">{{.Candidates}}</td></tr>{{else}}<tr><td colspan="5" class="empty">尚无辅助账单证据。默认不在后台自动查询。</td></tr>{{end}}
+    </tbody></table></div>
+  </section>
   <div class="grid-2">
     <div class="card">
       <div class="card-h"><h2>收款平台与币种</h2></div>

@@ -146,6 +146,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.GET("/orders/:trade_no", h.AdminOrderDetail)
 		adm.POST("/orders/:trade_no/action", h.AdminOrderAction)
 		adm.GET("/integration", h.AdminIntegration)
+		adm.POST("/integration/okx-reconcile", h.AdminOKXReconcile)
 		adm.GET("/settings", h.AdminSettings)
 		adm.POST("/settings", h.AdminSettingsSave)
 		adm.POST("/settings/token", h.AdminRotateToken)

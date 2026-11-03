@@ -28,15 +28,19 @@ const (
 
 // Client OKX API v5 客户端。
 type Client struct {
-	apiKey     string
-	apiSecret  string
-	passphrase string
-	baseURL    string
-	limit      int
-	http       *httpx.Client
-	now        func() time.Time
-	syncTime   bool
-	clockMu    sync.RWMutex
+	billsMu         sync.Mutex
+	rateMu          sync.Mutex
+	nextRequest     time.Time
+	requestInterval time.Duration
+	apiKey          string
+	apiSecret       string
+	passphrase      string
+	baseURL         string
+	limit           int
+	http            *httpx.Client
+	now             func() time.Time
+	syncTime        bool
+	clockMu         sync.RWMutex
 }
 
 // New 创建 OKX 客户端。
@@ -48,19 +52,21 @@ func New(apiKey, apiSecret, passphrase, baseURL string, limit int) *Client {
 		limit = 100
 	}
 	return &Client{
-		apiKey:     strings.TrimSpace(apiKey),
-		apiSecret:  strings.TrimSpace(apiSecret),
-		passphrase: strings.TrimSpace(passphrase),
-		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		limit:      limit,
-		http:       httpx.NewClient(15*time.Second, false),
-		now:        time.Now,
-		syncTime:   true,
+		requestInterval: 200 * time.Millisecond,
+		apiKey:          strings.TrimSpace(apiKey),
+		apiSecret:       strings.TrimSpace(apiSecret),
+		passphrase:      strings.TrimSpace(passphrase),
+		baseURL:         strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		limit:           limit,
+		http:            httpx.NewClient(15*time.Second, false),
+		now:             time.Now,
+		syncTime:        true,
 	}
 }
 
 // UseTestTransport 仅供本包测试访问本地模拟服务；生产入口不会调用。
 func (c *Client) UseTestTransport() {
+	c.requestInterval = 0
 	c.http = httpx.NewClient(15*time.Second, true)
 }
 
@@ -236,6 +242,19 @@ func (c *Client) depositHistoryQuery(ctx context.Context, q url.Values) ([]Depos
 }
 
 func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {
+	c.rateMu.Lock()
+	if delay := time.Until(c.nextRequest); delay > 0 {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			c.rateMu.Unlock()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	c.nextRequest = time.Now().Add(c.requestInterval)
+	c.rateMu.Unlock()
 	if c.apiKey == "" || c.apiSecret == "" || c.passphrase == "" {
 		return nil, fmt.Errorf("未配置 OKX API Key / Secret / Passphrase")
 	}

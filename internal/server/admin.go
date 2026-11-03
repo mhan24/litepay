@@ -793,6 +793,7 @@ func joinInts(v []int) string {
 
 // AdminIntegration GET /admin/integration
 func (h *Handlers) AdminIntegration(c *gin.Context) {
+	auxRun, auxRows, _ := h.st.AuxiliaryEvidence(c.Request.Context())
 	cfg := h.C()
 	base := cfg.Server.BaseURL
 	key := cfg.BEpusdt.APIToken
@@ -803,6 +804,7 @@ func (h *Handlers) AdminIntegration(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "admin_integration.html", gin.H{
+		"AuxRun": auxRun, "AuxRows": auxRows,
 		"Base":       h.adminBase(c, "integration", "接入信息"),
 		"BaseURL":    base,
 		"SubmitURL":  base + "/api/v1/order/create-order",
@@ -812,6 +814,16 @@ func (h *Handlers) AdminIntegration(c *gin.Context) {
 		"Currencies": currencies,
 		"Expire":     cfg.Order.ExpireMinutes,
 	})
+}
+
+func (h *Handlers) AdminOKXReconcile(c *gin.Context) {
+	msg := "辅助对账已完成，请查看结果；账单不会自动核销订单"
+	kind := "ok"
+	if err := h.poller.ReconcileOKXBills(c.Request.Context()); err != nil {
+		msg = "辅助对账未完成，可能未配置、查询繁忙或距离上次不足 5 分钟"
+		kind = "err"
+	}
+	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/integration?msg=")+url.QueryEscape(msg)+"&t="+kind)
 }
 
 // -----------------------------------------------------------------------------
