@@ -63,8 +63,8 @@ func TestDepositFieldParsing(t *testing.T) {
 	if r := rows[3]; r.State != model.Unconfirmed {
 		t.Fatal("frozen deposit", r)
 	}
-	// 8 位小数超出支付域精度：保留证据但拒绝核销，且不影响整次查询。
-	if r := rows[4]; r.State != model.Rejected || r.Reason != "invalid_amount" || r.Units != 0 {
+	// 8 位小数超出支付域精度：保留证据但拒绝核销，且不影响整次查询；原始金额必须保留。
+	if r := rows[4]; r.State != model.Rejected || r.Reason != "invalid_amount" || r.Units != 0 || r.RawAmount != "0.12345678" {
 		t.Fatal("8dp amount", r)
 	}
 	missing = true

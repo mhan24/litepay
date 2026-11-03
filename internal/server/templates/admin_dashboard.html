@@ -80,6 +80,7 @@
               <td>{{.Currency}} / {{.Amount}}</td>
               <td>
                 {{.State}} · {{.Reason}}
+                {{if .RawAmount}}<details><summary>原始金额</summary>{{.RawAmount}}</details>{{end}}
                 {{if .Assets}}<details><summary>资产明细</summary>{{.Assets}}</details>{{end}}
               </td>
             </tr>

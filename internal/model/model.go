@@ -56,6 +56,8 @@ type Slot struct {
 
 // Transaction is both the exchange evidence and its unique consumption record.
 // Assets holds all asset details for ambiguous events; those events never become claimable.
+// RawAmount keeps the exact original amount text of records rejected for amount reasons
+// (invalid_amount / conflicting_amount), so manual reconciliation never depends on rounding.
 type Transaction struct {
 	Provider   string `gorm:"primaryKey"`
 	EventID    string `gorm:"primaryKey"`
@@ -66,6 +68,7 @@ type Transaction struct {
 	OccurredAt time.Time `gorm:"index"`
 	State      string
 	Reason     string
+	RawAmount  string
 	Assets     string
 	OrderID    *uint `gorm:"uniqueIndex"`
 	UpdatedAt  time.Time

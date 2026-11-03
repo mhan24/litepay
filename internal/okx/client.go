@@ -118,7 +118,8 @@ func (c *Client) Lookup(ctx context.Context, ref string, start, end time.Time) (
 }
 func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, error) {
 	// 文档只定义了 type 请求参数（3=站内转账，4=链上充值），响应里没有 type 字段，
-	// 因此「是否站内转账」只能由请求过滤 + fromWdId 回填共同确认。
+	// 因此「是否站内转账」只能由请求过滤 + fromWdId 回填共同确认；fromWdId 是否存在
+	// 延迟回填、depId 是否稳定，需真实样本确认（见待验证清单）。
 	body, e := c.get(ctx, "/api/v5/asset/deposit-history", url.Values{"type": {"3"}, "limit": {strconv.Itoa(c.limit)}, "after": {strconv.FormatInt(after, 10)}})
 	if e != nil {
 		return nil, e
@@ -146,9 +147,10 @@ func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, er
 		t := model.Transaction{Provider: "okx", EventID: string(r.ID), Reference: string(r.Reference), Receiver: c.receiver, Currency: strings.ToUpper(string(r.Currency)), Units: n, OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
 		switch {
 		case amountErr != nil:
-			// 充值金额可达 8 位小数，支付域只有 6 位：保留证据但拒绝核销，不能让一条
-			// 无法表示的记录让整次查询永远失败。
+			// 充值金额可达 8 位小数，支付域只有 6 位：保留原始金额与原因供后台核对，
+			// 拒绝核销，也不能让一条无法表示的记录让整次查询永远失败。
 			t.Units, t.State, t.Reason = 0, model.Rejected, "invalid_amount"
+			t.RawAmount = string(r.Amount)
 		case n <= 0:
 			t.State, t.Reason = model.Rejected, "not_internal_deposit"
 		case r.Reference == "":
@@ -156,7 +158,8 @@ func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, er
 			// 站内收款：不核销、也不永久拒绝，后续补齐字段仍可结算。
 			t.State, t.Reason = model.Unconfirmed, "internal_transfer_unverified"
 		case r.State != "2":
-			// 只有 2（deposit successful）是最终成功；0/1 未完成，8/17 等待处理，
+			// 文档状态表：2（deposit successful）是最终成功；1 是 deposit credited（已入账
+			// 但未标记成功，站内转账何时从 1 变 2 需真实样本确认）；0/8/17 未完成或等待处理，
 			// 11/12/13/14 为黑名单、冻结、归集拦截与 KYC 限制，都不核销。
 			t.State, t.Reason = model.Unconfirmed, "deposit_not_completed"
 		}

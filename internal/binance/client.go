@@ -149,20 +149,30 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 		return nil, 0, err
 	}
 	var p struct {
-		Code    exchange.Text     `json:"code"`
-		Success bool              `json:"success"`
-		Data    []json.RawMessage `json:"data"`
+		Code    exchange.Text    `json:"code"`
+		Success bool             `json:"success"`
+		Data    *json.RawMessage `json:"data"`
 	}
-	// 空窗口可能返回 data:null，它与空数组同义；不能当成解析失败，否则游标永远推进不了。
 	if json.Unmarshal(body, &p) != nil {
 		return nil, 0, &APIError{Kind: ErrorParse}
 	}
 	if p.Code != "000000" || !p.Success {
 		return nil, 0, &APIError{Kind: ErrorBusiness}
 	}
+	// 官方 OpenAPI 契约（binance/binance-api-swagger）要求 data 必须存在且为数组。
+	// 缺失、null、非数组都不是文档化的空窗口形态：放行任何一种都可能把不完整响应
+	// 当成成功扫描而推进游标。宁可让本次扫描失败、游标停在原地，也不臆测语义；
+	// data:null 是否真的代表空窗口只能用真实样本确认（见待验证清单）。
+	if p.Data == nil || strings.TrimSpace(string(*p.Data)) == "null" {
+		return nil, 0, &APIError{Kind: ErrorParse}
+	}
+	items := []json.RawMessage{}
+	if json.Unmarshal(*p.Data, &items) != nil {
+		return nil, 0, &APIError{Kind: ErrorParse}
+	}
 	out := []model.Transaction{}
 	seen := map[string]bool{}
-	for _, raw := range p.Data {
+	for _, raw := range items {
 		var d struct {
 			ID       exchange.Text `json:"transactionId"`
 			Type     exchange.Text `json:"orderType"`
@@ -184,8 +194,9 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 		}
 		// 交易历史只提供 transactionId，文档没有商户订单号字段：归属与查询都只用它，
 		// 不把其他字段推断成订单号。
-		// 文档说明收款方向会回填 receiverInfo.binanceId（收款 UID），付款方向只给昵称；
-		// 该字段是否总是回填、是否脱敏 需要真实 API 响应验证：缺失时只会拒绝核销，不会误认。
+		// 官方 OpenAPI 规范把 receiverInfo.binanceId（收款 UID）列为必填；该字段在真实
+		// 响应中是否完整、是否脱敏仍需真实样本验证（见待验证清单）：缺失或对不上时只会
+		// 拒绝核销，不会误认。
 		t := model.Transaction{Provider: "binance", EventID: string(d.ID), Reference: string(d.ID), Receiver: string(d.Receiver.UID), Currency: strings.ToUpper(string(d.Currency)), OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
 		// One parent event is one consumable payment. Preserve every detail, never sum currencies.
 		if len(d.Details) > 1 {
@@ -206,21 +217,33 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 				t.Reason = "conflicting_currency"
 			}
 			t.Currency = detailCurrency
-			// amount 是订单总额、fundsDetail 是它的资产明细：两者都能解析且总额非零时必须相等。
+			// amount 是订单总额（官方文档允许 8 位小数），fundsDetail 是它的资产明细。
+			// 两者同时提供时，参与核销判断的金额必须全部可精确解析且一致：总额超精度、
+			// 格式错误都按 invalid_amount 拒绝，与明细不一致按 conflicting_amount 拒绝。
+			// 文档没有定义"总额为 0 而明细非 0"的含义，同样不能自动核销。
 			top, topErr := d.Amount.SignedUnits()
 			fundUnits, fundErr := fund.Amount.SignedUnits()
-			if topErr == nil && fundErr == nil && top != 0 && top != fundUnits {
+			switch {
+			case topErr != nil || fundErr != nil:
+				t.State = model.Rejected
+				t.Reason = "invalid_amount"
+				t.RawAmount = joinRawAmounts(string(d.Amount), string(fund.Amount))
+			case top != fundUnits:
 				t.State = model.Rejected
 				t.Reason = "conflicting_amount"
+				t.RawAmount = string(d.Amount)
 			}
 		}
 		n, e := rawAmount.SignedUnits()
 		if e != nil {
-			// 交易历史允许 8 位小数，支付域只有 6 位。保留证据但拒绝核销，不能让一条
-			// 无法表示的记录让整个窗口永远解析失败。
+			// 交易历史允许 8 位小数，支付域只有 6 位。保留原始金额与原因供后台核对；
+			// 单条记录被拒绝时照常入库，不阻塞整次扫描。
 			t.Units = 0
 			t.State = model.Rejected
 			t.Reason = "invalid_amount"
+			if t.RawAmount == "" {
+				t.RawAmount = joinRawAmounts(string(d.Amount))
+			}
 			out = append(out, t)
 			continue
 		}
@@ -232,5 +255,21 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 		}
 		out = append(out, t)
 	}
-	return out, len(p.Data), nil
+	return out, len(items), nil
+}
+
+// joinRawAmounts 拼接去重后的原始金额文本：被拒绝的资金记录把它留在 RawAmount，
+// 供后台用交易所原始证据核对超精度或冲突的金额。
+func joinRawAmounts(parts ...string) string {
+	seen := map[string]bool{}
+	kept := []string{}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		kept = append(kept, p)
+	}
+	return strings.Join(kept, ",")
 }
