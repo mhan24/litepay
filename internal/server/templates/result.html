@@ -40,10 +40,6 @@
     <div class="icon canceled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
     <h1>订单已取消</h1>
     <p>商户已取消该订单，请勿继续向此订单付款。<br>如已付款，请联系商户客服处理。</p>
-    {{else if eq .Status "SUPERSEDED"}}
-    <div class="icon canceled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
-    <h1>订单已失效</h1>
-    <p>该订单已被同一商户订单号的新订单替代。<br>请返回商户页面查看最新订单状态。</p>
     {{else}}
     <div class="icon exp"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
     <h1>订单已超时</h1>

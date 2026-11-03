@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"litepay/internal/sign"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"litepay/internal/sign"
 )
 
 type ErrorKind string

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex,nofollow">
-<title>{{.Title}} · {{.OriginAmount}} {{.OriginCurrency}}</title>
+<title>{{.Title}} · {{.OriginMoney}} USD</title>
 {{template "theme_head" .}}
 {{template "theme_css" .}}
 <style>
@@ -125,7 +125,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
       </svg>
-      <span>请转账<b>{{.Amount}} {{.Currency}}</b>。请保留全部小数位。到账金额按订单小数位四舍五入匹配。</span>
+      <span>请转账<b>{{.Amount}} {{.Currency}}</b>。请保留全部小数位。到账金额必须精确一致，不足额不会自动确认。</span>
     </div>
 
     {{if .HasPayee}}
@@ -324,7 +324,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   function onPaid(d) {
     if (finished || !showPayment) return;
     finished = true;
-    statusEl.textContent = '支付成功，正在返回商户页面…';
+    statusEl.textContent = d.merchant_confirmed ? '付款已确认，商户已接收通知' : '付款已确认，正在通知商户，请勿重复付款';
     document.getElementById('ov-title').textContent = '支付成功';
     document.getElementById('ov-desc').textContent = '正在跳转回商户页面…';
     overlay.classList.add('show');

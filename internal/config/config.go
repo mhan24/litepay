@@ -127,12 +127,12 @@ type ProviderDisplay struct {
 
 // OrderConfig 订单与浮动金额配置。
 type OrderConfig struct {
-	ExpireMinutes    int     `yaml:"expire_minutes"`     // 订单有效期（分钟）
-	AmountStep       float64 `yaml:"amount_step"`        // 浮动步长，默认 0.01
-	MaxOffset        int     `yaml:"max_offset"`         // 最大金额调整次数，默认 99
-	MinAmount        float64 `yaml:"min_amount"`         // 最小应付 USDT
-	SlotGraceSeconds int     `yaml:"slot_grace_seconds"` // 过期后继续确认到账的时间
-	AmountPrecision  int     `yaml:"amount_precision"`   // 应付金额小数位，2~6
+	ExpireMinutes    int    `yaml:"expire_minutes"`     // 订单有效期（分钟）
+	AmountStep       string `yaml:"amount_step"`        // 浮动步长，默认 0.01
+	MaxOffset        int    `yaml:"max_offset"`         // 最大金额调整次数，默认 99
+	MinAmount        string `yaml:"min_amount"`         // 最小应付 USDT
+	SlotGraceSeconds int    `yaml:"slot_grace_seconds"` // 过期后继续确认到账的时间
+	AmountPrecision  int    `yaml:"amount_precision"`   // 应付金额小数位，2~6
 }
 
 // NotifyConfig 回调配置。
@@ -160,7 +160,7 @@ func Default() *Config {
 		Server: ServerConfig{
 			Addr: "0.0.0.0:8080",
 		},
-		Database: DatabaseConfig{Path: "./data/litepay.db"},
+		Database: DatabaseConfig{Path: "./data/litepay-dev.db"},
 		BEpusdt:  BEpusdtConfig{Reselect: true},
 		Binance: BinanceConfig{
 			BaseURL:        "https://api.binance.com",
@@ -178,9 +178,9 @@ func Default() *Config {
 		Checkout: CheckoutConfig{Currencies: []string{"USDT", "USDC"}},
 		Order: OrderConfig{
 			ExpireMinutes:    10,
-			AmountStep:       0.01,
+			AmountStep:       "0.01",
 			MaxOffset:        99,
-			MinAmount:        0.01,
+			MinAmount:        "0.01",
 			SlotGraceSeconds: 120,
 			AmountPrecision:  2,
 		},
@@ -265,14 +265,14 @@ func (c *Config) normalize() error {
 	if c.Order.ExpireMinutes <= 0 {
 		c.Order.ExpireMinutes = 10
 	}
-	if c.Order.AmountStep <= 0 {
-		c.Order.AmountStep = 0.01
+	if c.Order.AmountStep == "" {
+		c.Order.AmountStep = "0.01"
 	}
 	if c.Order.MaxOffset <= 0 {
 		c.Order.MaxOffset = 99
 	}
-	if c.Order.MinAmount <= 0 {
-		c.Order.MinAmount = 0.01
+	if c.Order.MinAmount == "" {
+		c.Order.MinAmount = "0.01"
 	}
 	if c.Order.SlotGraceSeconds < 0 {
 		c.Order.SlotGraceSeconds = 120

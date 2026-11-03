@@ -1,14 +1,9 @@
-// Package okx 封装 OKX API v5 的站内转账入账查询。
-//
-// 只使用资金账户的充值历史接口：type=3 表示站内转账，type=4 表示链上充值。
-// API Key 只需要「读取」权限，并建议绑定服务器 IP 白名单。
 package okx
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -16,231 +11,148 @@ import (
 	"sync"
 	"time"
 
-	money "litepay/internal/amount"
+	"litepay/internal/exchange"
 	"litepay/internal/httpx"
+	"litepay/internal/model"
 	"litepay/internal/sign"
 )
 
-const (
-	defaultBaseURL    = "https://www.okx.com"
-	maxStoredRawBytes = 16 << 10
-)
+type flexString = exchange.Text
 
-// Client OKX API v5 客户端。
+const defaultBaseURL = "https://www.okx.com"
+
 type Client struct {
-	billsMu         sync.Mutex
-	rateMu          sync.Mutex
-	nextRequest     time.Time
-	requestInterval time.Duration
-	apiKey          string
-	apiSecret       string
-	passphrase      string
-	baseURL         string
-	limit           int
-	http            *httpx.Client
-	now             func() time.Time
-	syncTime        bool
-	clockMu         sync.RWMutex
+	rateMu                                 sync.Mutex
+	nextRequest                            time.Time
+	requestInterval                        time.Duration
+	apiKey, apiSecret, passphrase, baseURL string
+	limit                                  int
+	http                                   *httpx.Client
+	now                                    func() time.Time
+	syncTime                               bool
+	clockMu                                sync.RWMutex
+	receiver                               string
 }
 
-// New 创建 OKX 客户端。
-func New(apiKey, apiSecret, passphrase, baseURL string, limit int) *Client {
-	if strings.TrimSpace(baseURL) == "" {
-		baseURL = defaultBaseURL
+func New(key, secret, pass, base string, limit int) *Client {
+	if base == "" {
+		base = defaultBaseURL
 	}
-	if limit <= 0 || limit > 100 {
+	if limit < 1 || limit > 100 {
 		limit = 100
 	}
-	return &Client{
-		requestInterval: 200 * time.Millisecond,
-		apiKey:          strings.TrimSpace(apiKey),
-		apiSecret:       strings.TrimSpace(apiSecret),
-		passphrase:      strings.TrimSpace(passphrase),
-		baseURL:         strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		limit:           limit,
-		http:            httpx.NewClient(15*time.Second, false),
-		now:             time.Now,
-		syncTime:        true,
-	}
+	return &Client{apiKey: key, apiSecret: secret, passphrase: pass, baseURL: strings.TrimRight(base, "/"), limit: limit, http: httpx.NewClient(15*time.Second, false), now: time.Now, syncTime: true, requestInterval: 200 * time.Millisecond}
 }
-
-// UseTestTransport 仅供本包测试访问本地模拟服务；生产入口不会调用。
 func (c *Client) UseTestTransport() {
-	c.requestInterval = 0
 	c.http = httpx.NewClient(15*time.Second, true)
+	c.requestInterval = 0
 }
-
-// Deposit 一条 OKX 充值历史记录。
-type Deposit struct {
-	AmountText     string
-	DepositID      string
-	FromWithdrawID string
-	TransactionID  string
-	Currency       string
-	Amount         float64
-	State          string
-	Type           string
-	Timestamp      time.Time
-	From           string
-	Raw            string
-}
-
-// AccountUID 返回当前 API Key 所属的 OKX 账户 UID。
 func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	body, err := c.get(ctx, "/api/v5/account/config", nil)
 	if err != nil {
 		return "", err
 	}
 	var rows []struct {
-		UID flexString `json:"uid"`
+		UID exchange.Text `json:"uid"`
 	}
-	if err := json.Unmarshal(body, &rows); err != nil {
-		return "", fmt.Errorf("解析 OKX 账户信息失败: %w", err)
+	if json.Unmarshal(body, &rows) != nil || len(rows) != 1 || rows[0].UID == "" {
+		return "", fmt.Errorf("OKX missing account UID")
 	}
-	if len(rows) == 0 || strings.TrimSpace(string(rows[0].UID)) == "" {
-		return "", fmt.Errorf("OKX 未返回账户 UID")
-	}
-	return strings.TrimSpace(string(rows[0].UID)), nil
+	c.receiver = string(rows[0].UID)
+	return c.receiver, nil
 }
 
-// DepositHistorySince 查询 since 之后、指定币种的全部充值记录。
-//
-// OKX 按时间倒序返回；官方 after 参数用于继续请求更旧的一页。这里最多
-// 翻 20 页（2000 条），并始终保留时间重叠，避免同一毫秒的多条记录漏失。
-func (c *Client) DepositHistorySince(ctx context.Context, currency string, since time.Time) ([]Deposit, error) {
-	var all []Deposit
-	seen := make(map[string]struct{})
-	var after int64
+// History uses overlapping timestamp pages. A stalled boundary fails closed.
+func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Transaction, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if c.receiver == "" {
+		if _, err := c.AccountUID(ctx); err != nil {
+			return nil, err
+		}
+	}
+	out := []model.Transaction{}
+	seen := map[string]bool{}
+	after := end.UnixMilli() + 1
 	for page := 0; page < 20; page++ {
-		rows, err := c.depositHistoryPage(ctx, currency, after)
+		rows, err := c.page(ctx, after)
 		if err != nil {
 			return nil, err
 		}
-		if len(rows) == 0 {
-			break
-		}
-		oldest := int64(0)
-		for _, row := range rows {
-			ts := row.Timestamp.UnixMilli()
-			if oldest == 0 || ts < oldest {
-				oldest = ts
+		oldest := after
+		for _, t := range rows {
+			if t.OccurredAt.UnixMilli() < oldest {
+				oldest = t.OccurredAt.UnixMilli()
 			}
-			if row.Timestamp.Before(since) {
+			if t.OccurredAt.Before(start) || t.OccurredAt.After(end) || seen[t.EventID] {
 				continue
 			}
-			key := row.DepositID
-			if key == "" {
-				key = row.FromWithdrawID + "|" + row.TransactionID
-			}
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			all = append(all, row)
+			seen[t.EventID] = true
+			out = append(out, t)
 		}
-		if len(rows) < c.limit || oldest == 0 || oldest < since.UnixMilli() {
-			break
+		if len(rows) < c.limit || oldest < start.UnixMilli() {
+			return out, nil
 		}
 		next := oldest + 1
-		if after != 0 && next >= after {
-			return nil, fmt.Errorf("OKX 分页游标未前进")
+		if next >= after {
+			return nil, fmt.Errorf("OKX incomplete timestamp boundary")
 		}
 		after = next
-		if page == 19 {
-			return nil, fmt.Errorf("OKX 充值历史超过分页上限，未完整读取支付窗口")
-		}
 	}
-	return all, nil
+	return nil, fmt.Errorf("OKX incomplete history: page limit")
 }
-
-func (c *Client) depositHistoryPage(ctx context.Context, currency string, after int64) ([]Deposit, error) {
-	q := url.Values{}
-	if strings.TrimSpace(currency) != "" {
-		q.Set("ccy", strings.ToUpper(strings.TrimSpace(currency)))
+func (c *Client) Lookup(ctx context.Context, ref string, start, end time.Time) ([]model.Transaction, error) {
+	rows, e := c.History(ctx, start, end)
+	if e != nil {
+		return nil, e
 	}
-	q.Set("limit", strconv.Itoa(c.limit))
-	q.Set("type", "3")
-	if after > 0 {
-		q.Set("after", strconv.FormatInt(after, 10))
-	}
-	return c.depositHistoryQuery(ctx, q)
-}
-
-// DepositBySenderReference queries the receiving account using the sender's withdrawal ID.
-func (c *Client) DepositBySenderReference(ctx context.Context, currency, reference string) ([]Deposit, error) {
-	return c.depositHistoryQuery(ctx, url.Values{"ccy": {currency}, "type": {"3"}, "fromWdId": {reference}, "limit": {strconv.Itoa(c.limit)}})
-}
-
-func (c *Client) depositHistoryQuery(ctx context.Context, q url.Values) ([]Deposit, error) {
-	body, err := c.get(ctx, "/api/v5/asset/deposit-history", q)
-	if err != nil {
-		return nil, err
-	}
-
-	var rows []struct {
-		DepositID      flexString `json:"depId"`
-		FromWithdrawID flexString `json:"fromWdId"`
-		TransactionID  flexString `json:"txId"`
-		Currency       flexString `json:"ccy"`
-		Amount         flexString `json:"amt"`
-		State          flexString `json:"state"`
-		Type           flexString `json:"type"`
-		Timestamp      flexInt64  `json:"ts"`
-		From           flexString `json:"from"`
-	}
-	if err := json.Unmarshal(body, &rows); err != nil {
-		return nil, fmt.Errorf("解析 OKX 充值记录失败: %w", err)
-	}
-
-	out := make([]Deposit, 0, len(rows))
-	rawRows, err := rawRows(body)
-	if err != nil || len(rawRows) != len(rows) {
-		return nil, fmt.Errorf("解析 OKX 充值记录原文失败")
-	}
-	seen := make(map[string]struct{}, len(rows))
-	for i, row := range rows {
-		decimal, err := money.Decimal(string(row.Amount))
-		if err != nil {
-			return nil, fmt.Errorf("解析 OKX 充值金额失败: %w", err)
+	out := []model.Transaction{}
+	for _, t := range rows {
+		if t.EventID == ref || t.Reference == ref {
+			out = append(out, t)
 		}
-		amount, _ := decimal.Float64()
-		if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) {
-			return nil, fmt.Errorf("解析 OKX 充值金额失败: %w", err)
-		}
-		if row.Timestamp <= 0 {
-			return nil, fmt.Errorf("OKX 充值记录 %s 缺少有效时间", row.DepositID)
-		}
-		id := strings.TrimSpace(string(row.DepositID))
-		if id != "" {
-			if _, exists := seen[id]; exists {
-				return nil, fmt.Errorf("OKX 响应包含重复充值记录 %s", id)
-			}
-			seen[id] = struct{}{}
-		}
-		// OKX documents type as a request filter, not a response field.
-		// fromWdId is populated only for internal transfers. Keep an explicit
-		// conflicting type so the poller still rejects it.
-		depositType := strings.TrimSpace(string(row.Type))
-		if depositType == "" && strings.TrimSpace(string(row.FromWithdrawID)) != "" {
-			depositType = "3"
-		}
-		out = append(out, Deposit{
-			DepositID:      id,
-			FromWithdrawID: string(row.FromWithdrawID),
-			TransactionID:  string(row.TransactionID),
-			Currency:       strings.ToUpper(string(row.Currency)),
-			Amount:         amount,
-			AmountText:     string(row.Amount),
-			State:          strings.TrimSpace(string(row.State)),
-			Type:           depositType,
-			Timestamp:      time.UnixMilli(int64(row.Timestamp)),
-			From:           string(row.From),
-			Raw:            truncate(string(rawRows[i]), maxStoredRawBytes),
-		})
 	}
 	return out, nil
 }
-
+func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, error) {
+	body, e := c.get(ctx, "/api/v5/asset/deposit-history", url.Values{"type": {"3"}, "limit": {strconv.Itoa(c.limit)}, "after": {strconv.FormatInt(after, 10)}})
+	if e != nil {
+		return nil, e
+	}
+	var rows []struct {
+		ID        exchange.Text `json:"depId"`
+		Reference exchange.Text `json:"fromWdId"`
+		Currency  exchange.Text `json:"ccy"`
+		Amount    exchange.Text `json:"amt"`
+		State     exchange.Text `json:"state"`
+		Type      exchange.Text `json:"type"`
+		Time      exchange.Text `json:"ts"`
+	}
+	if json.Unmarshal(body, &rows) != nil || rows == nil {
+		return nil, fmt.Errorf("OKX invalid deposit response")
+	}
+	out := []model.Transaction{}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		ms, e := r.Time.Millis()
+		n, ae := r.Amount.SignedUnits()
+		if e != nil || ae != nil || r.ID == "" || seen[string(r.ID)] {
+			return nil, fmt.Errorf("OKX invalid deposit evidence")
+		}
+		seen[string(r.ID)] = true
+		t := model.Transaction{Provider: "okx", EventID: string(r.ID), Reference: string(r.Reference), Receiver: c.receiver, Currency: strings.ToUpper(string(r.Currency)), Units: n, OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
+		// type is a documented request filter; fromWdId is additional internal-transfer evidence.
+		if (r.Type != "" && r.Type != "3") || r.Reference == "" || n <= 0 {
+			t.State = model.Rejected
+			t.Reason = "not_internal_deposit"
+		} else if r.State != "2" {
+			t.State = model.Unconfirmed
+			t.Reason = "deposit_not_completed"
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
 func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {
 	c.rateMu.Lock()
 	if delay := time.Until(c.nextRequest); delay > 0 {
@@ -291,7 +203,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 
 	status, body, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求 OKX API 失败: %w", err)
+		return nil, fmt.Errorf("OKX network request failed")
 	}
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("OKX API 返回 HTTP %d", status)
@@ -306,7 +218,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 		return nil, fmt.Errorf("解析 OKX 响应失败: %w", err)
 	}
 	if string(envelope.Code) != "0" {
-		return nil, fmt.Errorf("OKX API 业务错误 code=%s", envelope.Code)
+		return nil, fmt.Errorf("OKX business rejection")
 	}
 	if len(envelope.Data) == 0 || strings.TrimSpace(string(envelope.Data)) == "null" {
 		return nil, fmt.Errorf("OKX 未返回明确的数据数组")
@@ -341,7 +253,7 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 	}
 	ms, err := strconv.ParseInt(string(payload.Data[0].TS), 10, 64)
 	if err != nil || ms <= 0 {
-		return err
+		return fmt.Errorf("OKX invalid server timestamp")
 	}
 	server := time.UnixMilli(ms)
 	syncedAt := time.Now()
@@ -349,64 +261,4 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 	c.now = func() time.Time { return server.Add(time.Since(syncedAt)) }
 	c.clockMu.Unlock()
 	return nil
-}
-
-func rawRows(data json.RawMessage) ([]json.RawMessage, error) {
-	var rows []json.RawMessage
-	if err := json.Unmarshal(data, &rows); err != nil {
-		return nil, err
-	}
-	return rows, nil
-}
-
-type flexString string
-
-func (f *flexString) UnmarshalJSON(b []byte) error {
-	s := strings.TrimSpace(string(b))
-	if s == "null" || s == "" {
-		*f = ""
-		return nil
-	}
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		var value string
-		if err := json.Unmarshal(b, &value); err != nil {
-			return fmt.Errorf("字符串字段格式无效: %w", err)
-		}
-		*f = flexString(value)
-		return nil
-	}
-	switch s[0] {
-	case '{', '[', 't', 'f':
-		return fmt.Errorf("字段必须是字符串或数字")
-	}
-	*f = flexString(s)
-	return nil
-}
-
-type flexInt64 int64
-
-func (f *flexInt64) UnmarshalJSON(b []byte) error {
-	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
-	if s == "" || s == "null" {
-		*f = 0
-		return nil
-	}
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		fv, err2 := strconv.ParseFloat(s, 64)
-		if err2 != nil || math.IsNaN(fv) || math.IsInf(fv, 0) || math.Trunc(fv) != fv ||
-			fv < math.MinInt64 || fv > math.MaxInt64 {
-			return fmt.Errorf("时间或整数字段格式无效")
-		}
-		v = int64(fv)
-	}
-	*f = flexInt64(v)
-	return nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

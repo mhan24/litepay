@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,20 +15,19 @@ import (
 	"litepay/internal/config"
 	"litepay/internal/model"
 	"litepay/internal/sign"
-	"litepay/internal/store"
 )
 
 type bepusdtCreateRequest struct {
-	OrderID     string  `json:"order_id"`
-	NotifyURL   string  `json:"notify_url"`
-	RedirectURL string  `json:"redirect_url"`
-	Signature   string  `json:"signature"`
-	Amount      float64 `json:"amount"`
-	Name        string  `json:"name"`
-	Fiat        string  `json:"fiat"`
-	Currencies  string  `json:"currencies"`
-	Timeout     int64   `json:"timeout"`
-	Reselect    *bool   `json:"reselect"`
+	OrderID     string      `json:"order_id"`
+	NotifyURL   string      `json:"notify_url"`
+	RedirectURL string      `json:"redirect_url"`
+	Signature   string      `json:"signature"`
+	Amount      json.Number `json:"amount"`
+	Name        string      `json:"name"`
+	Fiat        string      `json:"fiat"`
+	Currencies  string      `json:"currencies"`
+	Timeout     int64       `json:"timeout"`
+	Reselect    *bool       `json:"reselect"`
 }
 
 type bepusdtCancelRequest struct {
@@ -51,7 +48,7 @@ func (h *Handlers) BEpusdtCreateOrder(c *gin.Context) {
 }
 
 // BEpusdtCancelOrder 实现 /api/v1/order/cancel-transaction。
-// 与官方 BEpusdt 一致：停止确认待支付订单并释放占用金额。
+// 取消后停止认领付款；原金额档位继续保留到冷却期结束。
 func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 	if err != nil {
@@ -77,7 +74,7 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 		h.bepusdtFail(c, "trade_id is required")
 		return
 	}
-	if err := h.st.CancelOrder(c.Request.Context(), req.TradeID); err != nil {
+	if err := h.st.Cancel(c.Request.Context(), req.TradeID); err != nil {
 		h.bepusdtFail(c, err.Error())
 		return
 	}
@@ -113,14 +110,9 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		h.bepusdtFail(c, "amount must be a JSON number")
 		return
 	}
-	decimal, decimalErr := money.Decimal(amount)
-	if decimalErr != nil || decimal.Sign() <= 0 {
-		h.bepusdtFail(c, "amount must be a bounded positive decimal number")
-		return
-	}
-	amountValue, err := strconv.ParseFloat(amount, 64)
-	if err != nil || math.IsNaN(amountValue) || math.IsInf(amountValue, 0) || amountValue <= 0 || amountValue > 1e9 {
-		h.bepusdtFail(c, "amount must be greater than zero and at most 1000000000")
+	units, err := money.Parse(amount)
+	if err != nil || units <= 0 {
+		h.bepusdtFail(c, "amount must be a positive exact decimal with at most six significant fractional digits")
 		return
 	}
 
@@ -173,22 +165,7 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		ttl = time.Duration(req.Timeout) * time.Second
 	}
 	tradeNo := generateTradeNo()
-	order, err := h.st.CreateOrReuseCashierOrder(c.Request.Context(), store.CreateOrderInput{
-		Protocol:       "bepusdt",
-		Pid:            "bepusdt",
-		TradeNo:        tradeNo,
-		OutTradeNo:     req.OrderID,
-		Name:           strings.TrimSpace(req.Name),
-		OriginMoney:    amount,
-		OriginCurrency: fiat,
-		NotifyURL:      req.NotifyURL,
-		ReturnURL:      req.RedirectURL,
-		ClientIP:       c.ClientIP(),
-		ExpiredAt:      time.Now().Add(ttl),
-		CurrencyLimit:  req.Currencies,
-		Reselect:       reselect,
-		ReplaceReady:   true,
-	})
+	order, err := h.st.Create(c.Request.Context(), model.Order{TradeNo: tradeNo, OutTradeNo: req.OrderID, Name: strings.TrimSpace(req.Name), OriginUnits: units, NotifyURL: req.NotifyURL, ReturnURL: req.RedirectURL, ExpiresAt: time.Now().Add(ttl), CurrencyLimit: req.Currencies, Reselect: reselect})
 	if err != nil {
 		h.bepusdtFail(c, "order create failed: "+err.Error())
 		return
@@ -217,11 +194,11 @@ func bepusdtReselect(cfg *config.Config, requested *bool) bool {
 
 func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *model.Order, reselect bool) {
 	data := gin.H{
-		"fiat": order.OriginCurrency, "trade_id": order.TradeNo, "order_id": order.OutTradeNo,
-		"name": order.Name, "status": orderStatusNumber(order), "amount": order.OriginMoney,
-		"expiration_time": max(0, int(time.Until(order.ExpiredAt).Seconds())),
+		"fiat": "USD", "trade_id": order.TradeNo, "order_id": order.OutTradeNo,
+		"name": order.Name, "status": orderStatusNumber(order), "amount": order.Original(),
+		"expiration_time": max(0, int(time.Until(order.ExpiresAt).Seconds())),
 		"payment_url":     cfg.Server.BaseURL + "/pay/" + order.TradeNo,
-		"reselect":        reselect && order.Reselect && order.Status != model.StatusPaid,
+		"reselect":        reselect && order.Reselect && order.Status != model.Paid,
 		"network":         bepusdtPaymentMethods(cfg, order),
 	}
 	c.JSON(http.StatusOK, bepusdtResponse{StatusCode: 200, Message: "success", Data: data, RequestID: ""})
@@ -246,9 +223,9 @@ func bepusdtPaymentMethods(cfg *config.Config, order *model.Order) []gin.H {
 				continue
 			}
 			out = append(out, gin.H{
-				"amount":            order.OriginMoney,
-				"actual_amount":     order.OriginMoney,
-				"fiat":              order.OriginCurrency,
+				"amount":            order.Original(),
+				"actual_amount":     order.Original(),
+				"fiat":              "USD",
 				"exchange_rate":     "1",
 				"currency":          currency,
 				"network":           network,
@@ -263,11 +240,11 @@ func bepusdtPaymentMethods(cfg *config.Config, order *model.Order) []gin.H {
 
 func orderStatusNumber(order *model.Order) int {
 	switch order.Status {
-	case model.StatusPaid:
+	case model.Paid:
 		return 2
-	case model.StatusExpired:
+	case model.Expired:
 		return 3
-	case model.StatusCanceled:
+	case model.Canceled:
 		return 4
 	default:
 		return 1

@@ -10,9 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/crypto/bcrypt"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,12 +21,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 
 	"litepay/internal/amount"
 	"litepay/internal/config"
 	"litepay/internal/model"
 	"litepay/internal/settings"
-	"litepay/internal/store"
 )
 
 func (h *Handlers) currentAdmin() *adminAuth {
@@ -39,13 +37,6 @@ func (h *Handlers) currentAdmin() *adminAuth {
 		h.admin = newAdminAuth(cfg)
 	}
 	return h.admin
-}
-
-func formatOrderAmount(value float64, precision int) string {
-	if value <= 0 {
-		return "—"
-	}
-	return amount.FormatPrecision(value, precision)
 }
 
 // -----------------------------------------------------------------------------
@@ -347,201 +338,12 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 // AdminLogout POST /admin/logout
 func (h *Handlers) AdminLogout(c *gin.Context) {
 	c.SetSameSite(http.SameSiteStrictMode)
-	// Remove legacy root-scoped sessions as well as the current mount cookie.
-	c.SetCookie(adminCookieName, "", -1, "/", "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
 	c.SetCookie(adminCookieName, "", -1, h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
 	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login"))
 }
 
 // -----------------------------------------------------------------------------
 // 概览
-// -----------------------------------------------------------------------------
-
-// AdminDashboard GET /admin
-func (h *Handlers) AdminDashboard(c *gin.Context) {
-	ctx := c.Request.Context()
-	now := time.Now()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-
-	today, err := h.st.StatsSince(ctx, midnight)
-	if err != nil {
-		h.renderAdminError(c, err)
-		return
-	}
-	all, _ := h.st.StatsSince(ctx, time.Unix(0, 0))
-	counts, _ := h.st.CountByStatus(ctx)
-	notifyFail, _ := h.st.NotifyFailureCount(ctx)
-	expireNotifyFail, _ := h.st.ExpiredNotifyFailureCount(ctx)
-	recent, _ := h.st.RecentOrders(ctx, 8)
-	volumes, _ := h.st.VolumeByCurrency(ctx, midnight)
-	ops, err := h.st.Operations(ctx)
-	if err != nil {
-		h.renderAdminError(c, err)
-		return
-	}
-	observations, _ := h.st.RecentTxObservations(ctx, 8)
-	observationCount, _ := h.st.CountOpenTxObservations(ctx)
-
-	c.HTML(http.StatusOK, "admin_dashboard.html", gin.H{
-		"Base":             h.adminBase(c, "dashboard", "概览"),
-		"Today":            today,
-		"Volumes":          volumes,
-		"Currencies":       h.C().Checkout.Currencies,
-		"All":              all,
-		"Counts":           counts,
-		"PendingCount":     counts[model.StatusPending] + counts[model.StatusReady],
-		"NotifyFail":       notifyFail,
-		"ExpireNotifyFail": expireNotifyFail,
-		"Recent":           recent,
-		"Operations":       ops,
-		"Observations":     observations,
-		"ObservationCount": observationCount,
-		"Poll":             h.poller.StatsFor(config.ProviderBinance),
-		"OKXPoll":          h.poller.StatsFor(config.ProviderOKX),
-		"BinanceOn":        h.C().BinanceEnabled(),
-		"OKXOn":            h.C().OKXEnabled(),
-		"Currency":         h.C().DefaultCurrency(),
-		"DBSize":           humanSize(h.st.DatabaseSize()),
-		"Now":              now.Format("2006-01-02 15:04:05"),
-		"ExpireMin":        h.C().Order.ExpireMinutes,
-		"PollSec":          h.C().Binance.PollInterval,
-		"AmountPrecision":  h.C().Order.AmountPrecision,
-		"BaseURL":          h.C().Server.BaseURL,
-		"PayeeReady":       h.C().BinanceEnabled() || h.C().OKXEnabled(),
-	})
-}
-
-// -----------------------------------------------------------------------------
-// 订单列表
-// -----------------------------------------------------------------------------
-
-// AdminOrders GET /admin/orders
-func (h *Handlers) AdminOrders(c *gin.Context) {
-	page := adminOrdersPage(c.Query("page"))
-	status := adminOrderStatus(c.Query("status"))
-	keyword := strings.TrimSpace(c.Query("q"))
-	if len(keyword) > adminOrdersMaxKeyword {
-		keyword = keyword[:adminOrdersMaxKeyword]
-	}
-	f := store.OrderFilter{
-		Status:   status,
-		Keyword:  keyword,
-		Page:     page,
-		PageSize: 20,
-	}
-
-	orders, total, err := h.st.ListOrders(c.Request.Context(), f)
-	if err != nil {
-		h.renderAdminError(c, err)
-		return
-	}
-
-	totalPages := int((total + int64(f.PageSize) - 1) / int64(f.PageSize))
-	if totalPages < 1 {
-		totalPages = 1
-	}
-
-	c.HTML(http.StatusOK, "admin_orders.html", gin.H{
-		"Base":            h.adminBase(c, "orders", "订单"),
-		"Orders":          orders,
-		"Total":           total,
-		"Page":            f.Page,
-		"TotalPages":      totalPages,
-		"Status":          f.Status,
-		"Keyword":         f.Keyword,
-		"Currency":        h.C().DefaultCurrency(),
-		"HasPrev":         f.Page > 1,
-		"HasNext":         f.Page < totalPages,
-		"PrevPage":        f.Page - 1,
-		"NextPage":        f.Page + 1,
-		"AmountPrecision": h.C().Order.AmountPrecision,
-	})
-}
-
-func adminOrdersPage(raw string) int {
-	page, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || page < 1 {
-		return 1
-	}
-	if page > adminOrdersMaxPage {
-		return adminOrdersMaxPage
-	}
-	return page
-}
-
-func adminOrderStatus(raw string) string {
-	status := strings.ToUpper(strings.TrimSpace(raw))
-	switch status {
-	case model.StatusPending, model.StatusReady, model.StatusPaid, model.StatusExpired,
-		model.StatusCanceled, model.StatusSuperseded:
-		return status
-	default:
-		return ""
-	}
-}
-
-// -----------------------------------------------------------------------------
-// 订单详情
-// -----------------------------------------------------------------------------
-
-// AdminOrderDetail GET /admin/orders/:trade_no
-func (h *Handlers) AdminOrderDetail(c *gin.Context) {
-	tradeNo := c.Param("trade_no")
-	o, err := h.st.GetByTradeNo(c.Request.Context(), tradeNo)
-	if err != nil || o == nil {
-		h.renderAdminError(c, fmt.Errorf("订单 %s 不存在", tradeNo))
-		return
-	}
-	logs, _ := h.st.NotifyLogs(c.Request.Context(), o.ID, 30)
-	inquiry, _ := h.st.PaymentInquiry(c.Request.Context(), o.TradeNo)
-	canPay := o.PayAmount > 0 && !o.ExpireFinalized && (o.Status == model.StatusReady || o.Status == model.StatusExpired)
-	canExpire := o.Status == model.StatusPending || o.Status == model.StatusReady
-
-	c.HTML(http.StatusOK, "admin_order.html", gin.H{
-		"Base":    h.adminBase(c, "orders", "订单详情"),
-		"Order":   o,
-		"Logs":    logs,
-		"Inquiry": inquiry,
-		"Amount":  amount.FormatPrecision(o.PayAmount, o.AmountPrecision),
-		"CanPay":  canPay,
-		"CanRetry": o.Status == model.StatusPaid ||
-			(o.Status == model.StatusExpired && o.ExpireFinalized),
-		"CanExpire": canExpire,
-	})
-}
-
-// AdminOrderAction POST /admin/orders/:trade_no/action
-func (h *Handlers) AdminOrderAction(c *gin.Context) {
-	tradeNo := c.Param("trade_no")
-	action := c.PostForm("action")
-	back := h.adminURL("/admin/orders/") + tradeNo
-
-	var err error
-	var msg string
-
-	switch action {
-	case "pay":
-		_, err = h.st.ReconcileObservation(c.Request.Context(), tradeNo, strings.TrimSpace(c.PostForm("transaction_id")), h.C().Order.AmountPrecision)
-		msg = "已人工确认收款，支付结果通知即将发送"
-	case "notify":
-		err = h.st.ResetNotify(c.Request.Context(), tradeNo)
-		msg = "已重置结果通知，系统稍后会自动重发"
-	case "expire":
-		err = h.st.ForceExpire(c.Request.Context(), tradeNo)
-		msg = "收银台已立即结束；宽限期内仍会确认已发生的付款，随后发送过期通知"
-	default:
-		err = fmt.Errorf("无法识别该操作，请刷新页面后重试")
-	}
-
-	if err != nil {
-		c.Redirect(http.StatusSeeOther, back+"?msg="+url.QueryEscape(err.Error())+"&t=err")
-		return
-	}
-	c.Redirect(http.StatusSeeOther, back+"?msg="+url.QueryEscape(msg))
-}
-
-// -----------------------------------------------------------------------------
-// 设置
 // -----------------------------------------------------------------------------
 
 // AdminSettings GET /admin/settings
@@ -565,8 +367,8 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 		"Provider":        "multi",
 		"OKXKey":          maskSecret(cfg.OKX.APIKey),
 		"DBPath":          cfg.Database.Path,
-		"DBSize":          humanSize(h.st.DatabaseSize()),
-		"BaseURL":         cfg.Server.BaseURL,
+
+		"BaseURL": cfg.Server.BaseURL,
 	})
 }
 
@@ -715,17 +517,16 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		}
 		return &v
 	}
-	optFloat := func(key, label string, min, max float64) *float64 {
+	optAmount := func(key string) *string {
 		raw := strings.TrimSpace(c.PostForm(key))
 		if raw == "" {
 			return nil
 		}
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < min || v > max {
-			errs = append(errs, fmt.Sprintf("%s需为 %g~%g 之间的数字", label, min, max))
+		if _, err := amount.Parse(raw); err != nil {
+			errs = append(errs, key+" 金额无效")
 			return nil
 		}
-		return &v
+		return &raw
 	}
 	reselect := c.PostForm("bepusdt_reselect") == "on"
 	p.BEpusdtReselect = &reselect
@@ -738,9 +539,9 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 	p.CheckoutNote = editableString("checkout_note")
 
 	p.OrderExpireMinutes = optInt("order_expire_minutes", 1, 1440)
-	p.OrderAmountStep = optFloat("order_amount_step", "金额步长", 0.000001, 1)
+	p.OrderAmountStep = optAmount("order_amount_step")
 	p.OrderMaxOffset = optInt("order_max_offset", 1, 900)
-	p.OrderMinAmount = optFloat("order_min_amount", "最低金额", 0.0001, 1000)
+	p.OrderMinAmount = optAmount("order_min_amount")
 	p.OrderSlotGrace = optInt("order_slot_grace", 0, 3600)
 	p.OrderAmountPrecision = optInt("order_amount_precision", 2, 6)
 
@@ -791,41 +592,6 @@ func joinInts(v []int) string {
 // 接入信息
 // -----------------------------------------------------------------------------
 
-// AdminIntegration GET /admin/integration
-func (h *Handlers) AdminIntegration(c *gin.Context) {
-	auxRun, auxRows, _ := h.st.AuxiliaryEvidence(c.Request.Context())
-	cfg := h.C()
-	base := cfg.Server.BaseURL
-	key := cfg.BEpusdt.APIToken
-
-	currencies := cfg.Checkout.Currencies
-	if len(currencies) == 0 {
-		currencies = []string{cfg.DefaultCurrency()}
-	}
-
-	c.HTML(http.StatusOK, "admin_integration.html", gin.H{
-		"AuxRun": auxRun, "AuxRows": auxRows,
-		"Base":       h.adminBase(c, "integration", "接入信息"),
-		"BaseURL":    base,
-		"SubmitURL":  base + "/api/v1/order/create-order",
-		"Key":        key,
-		"KeyMask":    maskSecret(cfg.BEpusdt.APIToken),
-		"TokenFresh": c.Query("token_rotated") == "1",
-		"Currencies": currencies,
-		"Expire":     cfg.Order.ExpireMinutes,
-	})
-}
-
-func (h *Handlers) AdminOKXReconcile(c *gin.Context) {
-	msg := "辅助对账已完成，请查看结果；账单不会自动核销订单"
-	kind := "ok"
-	if err := h.poller.ReconcileOKXBills(c.Request.Context()); err != nil {
-		msg = "辅助对账未完成，可能未配置、查询繁忙或距离上次不足 5 分钟"
-		kind = "err"
-	}
-	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/integration?msg=")+url.QueryEscape(msg)+"&t="+kind)
-}
-
 // -----------------------------------------------------------------------------
 // 工具
 // -----------------------------------------------------------------------------
@@ -835,18 +601,6 @@ func (h *Handlers) renderAdminError(c *gin.Context, err error) {
 		"Base":  h.adminBase(c, "orders", "操作失败"),
 		"Error": err.Error(),
 	})
-}
-
-func humanSize(n int64) string {
-	switch {
-	case n >= 1<<30:
-		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
-	}
-	return fmt.Sprintf("%d B", n)
 }
 
 func maskSecret(s string) string {
@@ -870,4 +624,60 @@ func safeAdminNext(raw, root string) bool {
 		return false
 	}
 	return u.Path == root || strings.HasPrefix(u.Path, root+"/")
+}
+
+func (h *Handlers) AdminDashboard(c *gin.Context) {
+	var orders []model.Order
+	var evidence []model.Transaction
+	var cursors []model.ScanCursor
+	var callbacks []model.Callback
+	db := h.st.DB().WithContext(c.Request.Context())
+	for _, err := range []error{db.Order("id DESC").Limit(8).Find(&orders).Error, db.Where("order_id IS NULL").Order("updated_at DESC").Limit(20).Find(&evidence).Error, db.Find(&cursors).Error, db.Where("delivered_at IS NULL").Order("next_at").Limit(20).Find(&callbacks).Error} {
+		if err != nil {
+			h.renderAdminError(c, err)
+			return
+		}
+	}
+	c.HTML(200, "admin_dashboard.html", gin.H{"Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks})
+}
+func (h *Handlers) AdminOrders(c *gin.Context) {
+	page, _ := strconv.Atoi(c.Query("page"))
+	if page < 1 {
+		page = 1
+	}
+	if page > 100000 {
+		page = 100000
+	}
+	var orders []model.Order
+	db := h.st.DB().WithContext(c.Request.Context()).Order("id DESC")
+	if q := strings.TrimSpace(c.Query("q")); q != "" {
+		db = db.Where("trade_no = ? OR out_trade_no = ?", q, q)
+	}
+	if err := db.Offset((page - 1) * 50).Limit(50).Find(&orders).Error; err != nil {
+		h.renderAdminError(c, err)
+		return
+	}
+	c.HTML(200, "admin_orders.html", gin.H{"Base": h.adminBase(c, "orders", "订单"), "Orders": orders, "Page": page, "Prev": max(1, page-1), "Next": page + 1, "Query": c.Query("q")})
+}
+func (h *Handlers) AdminOrderDetail(c *gin.Context) {
+	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Param("trade_no"))
+	if err != nil {
+		h.renderAdminError(c, err)
+		return
+	}
+	db := h.st.DB().WithContext(c.Request.Context())
+	var tx []model.Transaction
+	var logs []model.NotifyLog
+	var tasks []model.Callback
+	var inquiry []model.PaymentInquiry
+	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error, db.Where("trade_no = ?", o.TradeNo).Find(&inquiry).Error} {
+		if err != nil {
+			h.renderAdminError(c, err)
+			return
+		}
+	}
+	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Inquiries": inquiry})
+}
+func (h *Handlers) AdminIntegration(c *gin.Context) {
+	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken})
 }

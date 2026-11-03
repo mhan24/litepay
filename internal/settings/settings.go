@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"reflect"
 	"strings"
 	"sync"
@@ -21,11 +20,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"litepay/internal/amount"
 	"litepay/internal/binance"
-	"litepay/internal/okx"
-
 	"litepay/internal/config"
 	"litepay/internal/model"
+	"litepay/internal/okx"
 	"litepay/internal/store"
 )
 
@@ -45,12 +44,12 @@ type Patch struct {
 	OKXUID             *string   `json:"okx_uid,omitempty"`
 
 	// 订单
-	OrderExpireMinutes   *int     `json:"order_expire_minutes,omitempty"`
-	OrderAmountStep      *float64 `json:"order_amount_step,omitempty"`
-	OrderMaxOffset       *int     `json:"order_max_offset,omitempty"`
-	OrderMinAmount       *float64 `json:"order_min_amount,omitempty"`
-	OrderSlotGrace       *int     `json:"order_slot_grace,omitempty"`
-	OrderAmountPrecision *int     `json:"order_amount_precision,omitempty"`
+	OrderExpireMinutes   *int    `json:"order_expire_minutes,omitempty"`
+	OrderAmountStep      *string `json:"order_amount_step,omitempty"`
+	OrderMaxOffset       *int    `json:"order_max_offset,omitempty"`
+	OrderMinAmount       *string `json:"order_min_amount,omitempty"`
+	OrderSlotGrace       *int    `json:"order_slot_grace,omitempty"`
+	OrderAmountPrecision *int    `json:"order_amount_precision,omitempty"`
 
 	// 币安
 	BinancePollInterval *int    `json:"binance_poll_interval,omitempty"`
@@ -163,7 +162,7 @@ func (p Patch) Apply(c *config.Config) {
 func Snapshot(c *config.Config) Patch {
 	s := func(v string) *string { return &v }
 	i := func(v int) *int { return &v }
-	f := func(v float64) *float64 { return &v }
+
 	b := func(v bool) *bool { return &v }
 
 	return Patch{
@@ -177,9 +176,9 @@ func Snapshot(c *config.Config) Patch {
 		OKXUID:             s(c.Checkout.OKX.UID),
 
 		OrderExpireMinutes:   i(c.Order.ExpireMinutes),
-		OrderAmountStep:      f(c.Order.AmountStep),
+		OrderAmountStep:      s(c.Order.AmountStep),
 		OrderMaxOffset:       i(c.Order.MaxOffset),
-		OrderMinAmount:       f(c.Order.MinAmount),
+		OrderMinAmount:       s(c.Order.MinAmount),
 		OrderSlotGrace:       i(c.Order.SlotGraceSeconds),
 		OrderAmountPrecision: i(c.Order.AmountPrecision),
 
@@ -408,14 +407,16 @@ func Validate(c *config.Config) error {
 	if c.Order.ExpireMinutes < 1 || c.Order.ExpireMinutes > 1440 {
 		return fmt.Errorf("订单有效期需在 1~1440 分钟之间")
 	}
-	if math.IsNaN(c.Order.AmountStep) || math.IsInf(c.Order.AmountStep, 0) || c.Order.AmountStep <= 0 || c.Order.AmountStep > 1 {
-		return fmt.Errorf("浮动步长需在 0~1 之间（推荐 0.01）")
+	step, err := amount.Parse(c.Order.AmountStep)
+	if err != nil || step <= 0 || step > amount.Scale {
+		return fmt.Errorf("金额步长必须大于零且不超过 1")
 	}
 	if c.Order.MaxOffset < 1 || c.Order.MaxOffset > 900 {
 		return fmt.Errorf("最大金额调整次数需在 1~900 之间")
 	}
-	if math.IsNaN(c.Order.MinAmount) || math.IsInf(c.Order.MinAmount, 0) || c.Order.MinAmount <= 0 {
-		return fmt.Errorf("最小金额必须大于 0")
+	minUnits, err := amount.Parse(c.Order.MinAmount)
+	if err != nil || minUnits <= 0 {
+		return fmt.Errorf("最小金额必须大于零")
 	}
 	if c.Order.SlotGraceSeconds < 0 || c.Order.SlotGraceSeconds > 3600 {
 		return fmt.Errorf("过期宽限需在 0~3600 秒之间")
@@ -423,10 +424,8 @@ func Validate(c *config.Config) error {
 	if c.Order.AmountPrecision < 2 || c.Order.AmountPrecision > 6 {
 		return fmt.Errorf("金额精度需在 2~6 位之间")
 	}
-	minimumStep := math.Pow10(-c.Order.AmountPrecision)
-	if c.Order.AmountStep < minimumStep {
-		return fmt.Errorf("金额步长不能小于 %.6g（当前精度为 %d 位小数）",
-			minimumStep, c.Order.AmountPrecision)
+	if step%amount.Quantum(c.Order.AmountPrecision) != 0 {
+		return fmt.Errorf("金额步长必须符合显示精度")
 	}
 	if c.Binance.PollInterval < 2 || c.Binance.PollInterval > 60 {
 		return fmt.Errorf("查询间隔需在 2~60 秒之间")
@@ -475,33 +474,4 @@ func (m *Manager) WithPaymentConfig(fn func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fn()
-}
-
-// LoadReadOnly loads exchange settings without generating or rotating any credentials.
-func (m *Manager) LoadReadOnly(ctx context.Context) error {
-	payload, err := m.st.LoadSettingPayload(ctx)
-	if err != nil {
-		return err
-	}
-	next := clone(m.cur.Load())
-	if payload != "" {
-		var patch Patch
-		if err := json.Unmarshal([]byte(payload), &patch); err != nil {
-			return fmt.Errorf("配置无法解析")
-		}
-		patch.Apply(next)
-	}
-	stored, err := m.st.LoadCredential(ctx, "bepusdt_api_token")
-	if err != nil {
-		return fmt.Errorf("无法只读加载现有凭据")
-	}
-	if stored != nil {
-		next.BEpusdt.APIToken = stored.Value
-	}
-	normalize(next)
-	if err := Validate(next); err != nil {
-		return fmt.Errorf("只读预检配置无效")
-	}
-	m.cur.Store(next)
-	return nil
 }

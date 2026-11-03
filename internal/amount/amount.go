@@ -1,107 +1,75 @@
-// Package amount 提供金额精度处理工具。
-//
-// 说明：到账确认采用 BEpusdt 的修约匹配（四舍五入），按订单展示金额的
-// 小数位修约实际到账金额后比较，同时保留 2~6 位精度支持。
+// Package amount uses exact integer micro-units throughout the payment domain.
 package amount
 
 import (
-	"math"
-	"math/big"
+	"errors"
 	"strconv"
 	"strings"
 )
 
-// Round 四舍五入到指定小数位（2~6）。
-func Round(v float64, precision int) float64 {
-	u, err := FloatUnits(v, normalizePrecision(precision))
-	if err != nil {
-		return math.NaN()
-	}
-	return Float(u)
-}
+const Scale int64 = 1_000_000
+const Max int64 = 9_000_000_000_000_000
 
-// FormatPrecision 按指定小数位格式化，不做多余尾零截断。
-func FormatPrecision(v float64, precision int) string {
-	precision = normalizePrecision(precision)
-	return strconv.FormatFloat(Round(v, precision), 'f', precision, 64)
-}
-
-// FormatDecimal 仅用于非支付展示，不得用于支付金额匹配。保留实际需要的
-// 小数位。例如 2.51 在精度 4 下仍输出 2.51，避免无意义的尾零改变修约规则。
-func FormatDecimal(v float64, precision int) string {
-	precision = normalizePrecision(precision)
-	raw := strconv.FormatFloat(v, 'f', precision, 64)
-	raw = strings.TrimRight(raw, "0")
-	raw = strings.TrimRight(raw, ".")
-	if raw == "" || raw == "-0" {
-		return "0"
-	}
-	return raw
-}
-
-// MatchRounded 使用 BEpusdt 修约匹配（四舍五入）比较订单金额和实际到账金额。
-// 精度由订单金额字符串的小数位决定，实际到账金额修约后再比较。全程按
-// 十进制字符串处理，避免浮点容差把 100.005 错误地当成 100.00。
-func MatchRounded(orderAmount string, actualAmount float64) bool {
-	expected := parseAmount(orderAmount)
-	if expected <= 0 || actualAmount <= 0 || math.IsNaN(expected) || math.IsNaN(actualAmount) || math.IsInf(expected, 0) || math.IsInf(actualAmount, 0) {
-		return false
-	}
-	precision := DecimalPlaces(orderAmount)
-	return roundedUnits(expected, precision) ==
-		roundedUnits(actualAmount, precision)
-}
-
-// DecimalPlaces 返回金额字符串的小数位（0~6），尾随零同样计入精度。
-func DecimalPlaces(raw string) int {
+// Parse rejects any nonzero precision beyond micro-units. It never rounds a payment.
+func Parse(raw string) (int64, error) {
 	raw = strings.TrimSpace(raw)
-	_, frac, ok := strings.Cut(raw, ".")
-	if !ok || frac == "" {
-		return 0
+	if len(raw) == 0 || len(raw) > 64 {
+		return 0, errors.New("金额长度无效")
+	}
+	whole, frac, _ := strings.Cut(raw, ".")
+	if whole == "" {
+		return 0, errors.New("金额格式无效")
+	}
+	for _, r := range whole + frac {
+		if r < '0' || r > '9' {
+			return 0, errors.New("金额必须为非负十进制数")
+		}
+	}
+	if strings.Contains(raw, ".") && frac == "" {
+		return 0, errors.New("金额格式无效")
 	}
 	if len(frac) > 6 {
-		return 6
+		if strings.Trim(frac[6:], "0") != "" {
+			return 0, errors.New("金额超过六位精度，不能修约核销")
+		}
+		frac = frac[:6]
 	}
-	return len(frac)
+	n, err := strconv.ParseInt(whole, 10, 64)
+	if err != nil || n > Max/Scale {
+		return 0, errors.New("金额超出范围")
+	}
+	frac += strings.Repeat("0", 6-len(frac))
+	f, err := strconv.ParseInt(frac, 10, 64)
+	if err != nil || n*Scale+f > Max {
+		return 0, errors.New("金额超出范围")
+	}
+	return n*Scale + f, nil
 }
-
-func normalizePrecision(p int) int {
-	if p < 2 {
-		return 2
+func Text(units int64, precision int) string {
+	if units < 0 {
+		return "-" + Text(-units, precision)
 	}
-	if p > 6 {
-		return 6
+	if precision < 0 || precision > 6 {
+		precision = 6
 	}
-	return p
+	whole := strconv.FormatInt(units/Scale, 10)
+	if precision == 0 {
+		return whole
+	}
+	frac := strconv.FormatInt(Scale+units%Scale, 10)[1:]
+	return whole + "." + frac[:precision]
 }
-
-// roundedUnits 把金额转成“修约后最小单位的整数”，全程按十进制字符串
-// 处理，不依赖二进制浮点的四舍五入行为。
-func roundedUnits(v float64, precision int) string {
-	raw := strconv.FormatFloat(math.Abs(v), 'f', -1, 64)
-	whole, frac, _ := strings.Cut(raw, ".")
-	if frac == "" {
-		frac = "0"
+func String(units int64) string {
+	s := strings.TrimRight(strings.TrimRight(Text(units, 6), "0"), ".")
+	if s == "" {
+		return "0"
 	}
-	if len(frac) <= precision {
-		frac += strings.Repeat("0", precision-len(frac))
-	}
-	kept := frac[:precision]
-	roundUp := len(frac) > precision && frac[precision] >= '5'
-	n, ok := new(big.Int).SetString(whole+kept, 10)
-	if !ok {
-		return whole + kept
-	}
-	if roundUp {
-		n.Add(n, big.NewInt(1))
-	}
-	return n.String()
+	return s
 }
-
-func parseAmount(raw string) float64 {
-	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-	if err != nil {
-		return 0
+func Quantum(precision int) int64 {
+	q := Scale
+	for range precision {
+		q /= 10
 	}
-	return v
+	return q
 }

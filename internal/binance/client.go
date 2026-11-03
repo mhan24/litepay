@@ -1,28 +1,21 @@
-// Package binance 封装 Binance 只读 API（站内转账记录查询）。
-//
-// 安全提示：该 API Key 只应勾选 "Enable Reading"，并建议配置 IP 白名单，
-// 绝对不要开启现货交易 / 提现权限。
 package binance
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
-	"math/big"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	money "litepay/internal/amount"
+	"litepay/internal/exchange"
 	"litepay/internal/httpx"
+	"litepay/internal/model"
 )
 
-const maxStoredRawBytes = 16 << 10
-
-// Client 币安 API 客户端。
+type flexString = exchange.Text
 type Client struct {
 	clockOffset      int64
 	lastRequestStart time.Time
@@ -63,29 +56,6 @@ func (c *Client) UseTestTransport() {
 	c.requestInterval = 0
 }
 
-// Transaction 一条 Binance 站内转账记录（已解析）。
-type Transaction struct {
-	EventID          string    `json:"event_id"`
-	DetailID         string    `json:"detail_id"`
-	CanonicalID      string    `json:"canonical_id"`
-	IdentityIssue    string    `json:"identity_issue"`
-	EvidenceID       string    `json:"evidence_id"`
-	OrderID          string    `json:"orderId"` // Optional exchange-provided App reference, never inferred.
-	RawTransactionID string    `json:"raw_transaction_id"`
-	ReferenceID      string    `json:"reference_id"` // Preferred exchange-provided lookup reference; not a consumption key.
-	OrderType        string    `json:"orderType"`
-	TransactionID    string    `json:"transactionId"`
-	TransactionTime  time.Time `json:"transactionTime"`
-	AmountText       string    `json:"amount_text"`
-	Amount           float64   `json:"amount"` // 绝对值；收支方向由 Incoming 表示
-	Incoming         bool      `json:"incoming"`
-	Currency         string    `json:"currency"`
-	ReceiverID       string    `json:"receiverId"` // 收款方 binanceId
-	Raw              string    `json:"raw"`
-}
-
-// AccountUID 返回当前 API Key 所属账户的 Binance UID。
-// 它与用户填写的收款 UID 必须一致，避免展示一个账户却监听另一个账户。
 func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	if c.apiKey == "" || c.apiSecret == "" {
 		return "", fmt.Errorf("未配置币安 API Key/Secret")
@@ -110,283 +80,139 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	return uid, nil
 }
 
-// PayTransactions 查询 [start, end] 区间内的 Binance 站内转账记录。
-//
-// 端点：GET /sapi/v1/pay/transactions
-// 鉴权：X-MBX-APIKEY 头 + HMAC-SHA256 的 signature 查询参数
-func (c *Client) PayTransactions(ctx context.Context, start, end time.Time) ([]Transaction, error) {
+// History splits saturated windows because the Pay endpoint has no page cursor.
+func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Transaction, error) {
 	ctx, cancel := context.WithTimeout(budgeted(ctx, 64), 30*time.Second)
 	defer cancel()
-	if c.apiKey == "" || c.apiSecret == "" {
-		return nil, fmt.Errorf("未配置币安 API Key/Secret")
+	if start.IsZero() || end.Before(start) {
+		return nil, &APIError{Kind: ErrorBusiness}
 	}
-
-	if end.IsZero() {
-		end = time.Now()
-	}
-	if start.IsZero() {
-		start = end.Add(-89 * 24 * time.Hour)
-	}
-	if start.After(end) {
-		return nil, fmt.Errorf("币安查询时间范围无效")
-	}
-	// The Pay API has no page parameter. Split saturated time windows until
-	// each response is complete, without assuming the response sort order.
-	type window struct{ start, end int64 }
+	type window struct{ a, b int64 }
 	pending := []window{{start.UnixMilli(), end.UnixMilli()}}
-	var all []Transaction
-	seen := make(map[string]struct{})
+	out := []model.Transaction{}
+	seen := map[string]bool{}
 	for requests := 0; len(pending) > 0; requests++ {
 		if requests >= 63 {
 			return nil, &APIError{Kind: ErrorIncomplete}
 		}
 		w := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
-		batch, rawCount, err := c.fetchWindow(ctx, time.UnixMilli(w.start), time.UnixMilli(w.end))
+		rows, n, err := c.fetchWindow(ctx, w.a, w.b)
 		if err != nil {
 			return nil, err
 		}
-		if rawCount >= c.limit {
-			if w.start >= w.end {
+		if n >= c.limit {
+			if w.a >= w.b {
 				return nil, &APIError{Kind: ErrorIncomplete}
 			}
-			mid := w.start + (w.end-w.start)/2
-			pending = append(pending, window{mid + 1, w.end}, window{w.start, mid})
+			mid := w.a + (w.b-w.a)/2
+			pending = append(pending, window{mid + 1, w.b}, window{w.a, mid})
 			continue
 		}
-		for _, tx := range batch {
-			if _, exists := seen[tx.TransactionID+"|"+tx.DetailID]; !exists {
-				seen[tx.TransactionID+"|"+tx.DetailID] = struct{}{}
-				all = append(all, tx)
+		for _, t := range rows {
+			if !seen[t.EventID] {
+				seen[t.EventID] = true
+				out = append(out, t)
 			}
 		}
 	}
-	return all, nil
+	return out, nil
+}
+func (c *Client) Lookup(ctx context.Context, ref string, start, end time.Time) ([]model.Transaction, error) {
+	rows, err := c.History(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+	out := []model.Transaction{}
+	for _, t := range rows {
+		if t.EventID == ref || t.Reference == ref {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
 
-func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Transaction, int, error) {
-	q := url.Values{}
-	q.Set("limit", strconv.Itoa(c.limit))
-	if !start.IsZero() {
-		q.Set("startTime", strconv.FormatInt(start.UnixMilli(), 10))
-	}
-	if !end.IsZero() {
-		q.Set("endTime", strconv.FormatInt(end.UnixMilli(), 10))
-	}
+type asset struct {
+	Currency exchange.Text `json:"currency"`
+	Amount   exchange.Text `json:"amount"`
+}
 
-	body, err := c.signedGet(ctx, "/sapi/v1/pay/transactions", q)
+func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Transaction, int, error) {
+	body, err := c.signedGet(ctx, "/sapi/v1/pay/transactions", url.Values{"limit": {strconv.Itoa(c.limit)}, "startTime": {strconv.FormatInt(start, 10)}, "endTime": {strconv.FormatInt(end, 10)}})
 	if err != nil {
 		return nil, 0, err
 	}
-
-	var payload struct {
-		Code    flexString        `json:"code"`
-		Message flexString        `json:"message"`
+	var p struct {
+		Code    exchange.Text     `json:"code"`
 		Success bool              `json:"success"`
 		Data    []json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if json.Unmarshal(body, &p) != nil || p.Data == nil {
 		return nil, 0, &APIError{Kind: ErrorParse}
 	}
-
-	// 币安业务码：000000 表示成功
-	if string(payload.Code) != "000000" || !payload.Success {
-		code, _ := strconv.Atoi(string(payload.Code))
-		return nil, 0, &APIError{Kind: ErrorBusiness, Code: code}
+	if p.Code != "000000" || !p.Success {
+		return nil, 0, &APIError{Kind: ErrorBusiness}
 	}
-
-	if payload.Data == nil {
-		return nil, 0, &APIError{Kind: ErrorParse}
-	}
-	out := make([]Transaction, 0, len(payload.Data))
-	seenRecords := make(map[string]struct{}, len(payload.Data))
-	for _, raw := range payload.Data {
+	out := []model.Transaction{}
+	seen := map[string]bool{}
+	for _, raw := range p.Data {
 		var d struct {
-			OrderID         flexString `json:"orderId"`
-			OrderType       flexString `json:"orderType"`
-			TransactionID   flexString `json:"transactionId"`
-			TransactionTime flexInt64  `json:"transactionTime"`
-			Amount          flexString `json:"amount"` // 正数收入、负数支出
-			Currency        flexString `json:"currency"`
-			FundsDetail     []struct {
-				Amount   flexString `json:"amount"`
-				Currency flexString `json:"currency"`
-			} `json:"fundsDetail"`
-			ReceiverInfo struct {
-				BinanceID flexString `json:"binanceId"`
+			OrderID  exchange.Text `json:"orderId"`
+			ID       exchange.Text `json:"transactionId"`
+			Type     exchange.Text `json:"orderType"`
+			Time     exchange.Text `json:"transactionTime"`
+			Amount   exchange.Text `json:"amount"`
+			Currency exchange.Text `json:"currency"`
+			Details  []asset       `json:"fundsDetail"`
+			Receiver struct {
+				UID exchange.Text `json:"binanceId"`
 			} `json:"receiverInfo"`
 		}
-		if err := json.Unmarshal(raw, &d); err != nil {
+		if json.Unmarshal(raw, &d) != nil || d.ID == "" || seen[string(d.ID)] {
 			return nil, 0, &APIError{Kind: ErrorParse}
 		}
-		id := strings.TrimSpace(string(d.TransactionID))
-		if id == "" {
+		seen[string(d.ID)] = true
+		ms, e := d.Time.Millis()
+		if e != nil || ms < start || ms > end {
 			return nil, 0, &APIError{Kind: ErrorParse}
 		}
-		if _, exists := seenRecords[id]; exists {
-			return nil, 0, &APIError{Kind: ErrorParse}
+		t := model.Transaction{Provider: "binance", EventID: string(d.ID), Reference: string(d.OrderID), Receiver: string(d.Receiver.UID), Currency: strings.ToUpper(string(d.Currency)), OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
+		if t.Reference == "" {
+			t.Reference = t.EventID
 		}
-		seenRecords[id] = struct{}{}
-		rawAmount := string(d.Amount)
-		if rawAmount == "" && len(d.FundsDetail) > 0 {
-			rawAmount = "0"
-		}
-		amountRat, err := money.Decimal(rawAmount)
-		if err != nil {
-			return nil, 0, &APIError{Kind: ErrorParse}
-		}
-		amount, _ := amountRat.Float64()
-		if math.IsNaN(amount) || math.IsInf(amount, 0) {
-			return nil, 0, &APIError{Kind: ErrorParse}
-		}
-		if d.TransactionTime <= 0 {
-			return nil, 0, &APIError{Kind: ErrorParse}
-		}
-		base := Transaction{
-			EventID: id, CanonicalID: id, EvidenceID: id,
-			OrderID:          strings.TrimSpace(string(d.OrderID)),
-			RawTransactionID: id,
-			OrderType:        strings.ToUpper(string(d.OrderType)),
-			TransactionID:    id,
-			ReferenceID:      id,
-			TransactionTime:  time.UnixMilli(int64(d.TransactionTime)),
-			ReceiverID:       strings.TrimSpace(string(d.ReceiverInfo.BinanceID)),
-			Raw:              truncate(string(raw), maxStoredRawBytes),
-		}
-		if base.OrderID != "" {
-			base.ReferenceID = base.OrderID
-		}
-		if len(d.FundsDetail) > 0 {
-			// A non-zero top-level amount is authoritative. Only when it is
-			// absent/zero do we infer direction from each detail, because a
-			// positive detail under a missing top-level amount is still income.
-			detailDirectionKnown := amount != 0
-			detailTotal := new(big.Rat)
-			for i, fund := range d.FundsDetail {
-				fundRat, err := money.Decimal(string(fund.Amount))
-				if err != nil {
-					return nil, 0, &APIError{Kind: ErrorParse}
-				}
-				fundAmount, _ := fundRat.Float64()
-				fundCurrency := strings.ToUpper(strings.TrimSpace(string(fund.Currency)))
-				if math.IsNaN(fundAmount) || math.IsInf(fundAmount, 0) {
-					return nil, 0, &APIError{Kind: ErrorParse}
-				}
-				if fundAmount == 0 || fundCurrency == "" {
-					continue
-				}
-				detailTotal.Add(detailTotal, fundRat)
-				item := base
-				item.Amount = abs(fundAmount)
-				item.AmountText = strings.TrimPrefix(string(fund.Amount), "-")
-				if detailDirectionKnown {
-					item.Incoming = amount > 0 && fundAmount > 0
-				} else {
-					item.Incoming = fundAmount > 0
-				}
-				item.Currency = fundCurrency
-				item.DetailID = fmt.Sprintf("fundsDetail:%d", i)
-				item.CanonicalID = id
-				if len(d.FundsDetail) > 1 {
-					item.IdentityIssue = "ambiguous"
-					item.EvidenceID = fmt.Sprintf("%s#%s", id, item.DetailID)
-				}
-				out = append(out, item)
-			}
-			// Never reinterpret a malformed record as a smaller payment just
-			// because one detail happens to match an order.
-			if len(d.FundsDetail) == 1 && detailDirectionKnown && detailTotal.Cmp(amountRat) != 0 {
-				return nil, 0, &APIError{Kind: ErrorParse}
-			}
+		// One parent event is one consumable payment. Preserve every detail, never sum currencies.
+		if len(d.Details) > 1 {
+			b, _ := json.Marshal(d.Details)
+			t.Assets = string(b)
+			t.State = model.Ambiguous
+			t.Reason = "multiple_assets"
+			out = append(out, t)
 			continue
 		}
-		if amount == 0 {
+		rawAmount := d.Amount
+		if len(d.Details) == 1 {
+			fund := d.Details[0]
+			rawAmount = fund.Amount
+			t.Currency = strings.ToUpper(string(fund.Currency))
+			if d.Amount != "" && d.Amount != "0" {
+				top, e := d.Amount.SignedUnits()
+				n, fe := fund.Amount.SignedUnits()
+				if e != nil || fe != nil || top != n || (d.Currency != "" && !strings.EqualFold(string(d.Currency), t.Currency)) {
+					t.State = model.Rejected
+					t.Reason = "conflicting_amount"
+				}
+			}
+		}
+		n, e := rawAmount.SignedUnits()
+		if e != nil {
 			return nil, 0, &APIError{Kind: ErrorParse}
 		}
-		base.Amount = abs(amount)
-		base.AmountText = strings.TrimPrefix(string(d.Amount), "-")
-		base.Incoming = amount > 0
-		base.Currency = strings.ToUpper(strings.TrimSpace(string(d.Currency)))
-		out = append(out, base)
-	}
-	return out, len(payload.Data), nil
-}
-
-// -----------------------------------------------------------------------------
-// 交易所响应字段可能使用字符串或数字，统一解析后再进入业务层。
-// -----------------------------------------------------------------------------
-
-type flexString string
-
-func (f *flexString) UnmarshalJSON(b []byte) error {
-	s := strings.TrimSpace(string(b))
-	if s == "null" || s == "" {
-		*f = ""
-		return nil
-	}
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		var value string
-		if err := json.Unmarshal(b, &value); err != nil {
-			return fmt.Errorf("字符串字段格式无效: %w", err)
+		t.Units = n
+		if n <= 0 || (d.Type != "PAY" && d.Type != "C2C") || t.Receiver == "" {
+			t.State = model.Rejected
+			t.Reason = "not_incoming_payment"
 		}
-		*f = flexString(value)
-		return nil
+		out = append(out, t)
 	}
-	switch s[0] {
-	case '{', '[', 't', 'f':
-		return fmt.Errorf("字段必须是字符串或数字")
-	}
-	*f = flexString(s)
-	return nil
-}
-
-type flexInt64 int64
-
-func (f *flexInt64) UnmarshalJSON(b []byte) error {
-	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
-	if s == "" || s == "null" {
-		*f = 0
-		return nil
-	}
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		fv, err2 := strconv.ParseFloat(s, 64)
-		if err2 != nil || math.IsNaN(fv) || math.IsInf(fv, 0) || math.Trunc(fv) != fv ||
-			fv < math.MinInt64 || fv > math.MaxInt64 {
-			return fmt.Errorf("时间或整数字段格式无效")
-		}
-		v = int64(fv)
-	}
-	*f = flexInt64(v)
-	return nil
-}
-
-type flexFloat float64
-
-func (f *flexFloat) UnmarshalJSON(b []byte) error {
-	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
-	if s == "" || s == "null" {
-		*f = 0
-		return nil
-	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
-		return fmt.Errorf("金额必须是有限数字")
-	}
-	*f = flexFloat(v)
-	return nil
-}
-
-func abs(v float64) float64 {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
+	return out, len(p.Data), nil
 }

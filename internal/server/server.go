@@ -5,7 +5,6 @@ import (
 	"embed"
 	"html/template"
 	"io/fs"
-	"litepay/internal/maintenance"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -43,7 +42,6 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 			}
 			return false
 		},
-		"fmtOrderAmount": formatOrderAmount,
 	}).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, err
@@ -76,13 +74,6 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	if err != nil {
 		return nil, err
 	}
-	r.Use(func(c *gin.Context) {
-		if c.Request.URL.Path != "/healthz" && c.Request.URL.Path != "/readyz" && maintenance.Blocked() {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "正在维护，请稍后重试"})
-			return
-		}
-		c.Next()
-	})
 	r.GET("/assets/brand/:file", func(c *gin.Context) {
 		name := c.Param("file")
 		if strings.Contains(name, "..") || !strings.HasSuffix(name, ".svg") {
@@ -144,9 +135,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.GET("", h.AdminDashboard)
 		adm.GET("/orders", h.AdminOrders)
 		adm.GET("/orders/:trade_no", h.AdminOrderDetail)
-		adm.POST("/orders/:trade_no/action", h.AdminOrderAction)
 		adm.GET("/integration", h.AdminIntegration)
-		adm.POST("/integration/okx-reconcile", h.AdminOKXReconcile)
 		adm.GET("/settings", h.AdminSettings)
 		adm.POST("/settings", h.AdminSettingsSave)
 		adm.POST("/settings/token", h.AdminRotateToken)
@@ -198,9 +187,5 @@ func redactedPath(c *gin.Context) string {
 	if pattern := c.FullPath(); pattern != "" {
 		return pattern
 	}
-	parts := strings.Split(strings.Trim(c.Request.URL.Path, "/"), "/")
-	if len(parts) == 1 && parts[0] != "" {
-		return "/" + parts[0]
-	}
-	return "/" + parts[0] + "/*"
+	return "/[unmatched]"
 }

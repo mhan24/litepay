@@ -13,10 +13,10 @@ server:
   trusted_proxies: []
 
 database:
-  path: "./data/litepay.db"
+  path: "./data/litepay-dev.db"
 
 admin:
-  # 后台入口前缀，可改为不易猜到的单层路径；修改后重启。
+  # 后台入口前缀，可改为不易猜到的单层路径；也可在后台修改。
   path: "/admin"
   username: "admin"
   password: ""
