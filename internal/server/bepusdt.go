@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	money "litepay/internal/amount"
 	"litepay/internal/config"
 	"litepay/internal/model"
 	"litepay/internal/sign"
@@ -110,6 +111,11 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 	amount, err := jsonNumberString(generic["amount"])
 	if err != nil {
 		h.bepusdtFail(c, "amount must be a JSON number")
+		return
+	}
+	decimal, decimalErr := money.Decimal(amount)
+	if decimalErr != nil || decimal.Sign() <= 0 {
+		h.bepusdtFail(c, "amount must be a bounded positive decimal number")
 		return
 	}
 	amountValue, err := strconv.ParseFloat(amount, 64)

@@ -29,3 +29,23 @@ func TestChangedMerchantRequestCannotDestroyDisplayedPayment(t *testing.T) {
 		t.Fatal("payment contract mutated")
 	}
 }
+
+func TestMerchantRetryCannotRetireOrderWaitingForBackscan(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	o := createTestOrder(t, st, "BACKSCAN-RETRY", "BACKSCAN-RETRY", 0)
+	o, err := st.SelectPayment(ctx, o.TradeNo, "okx", "USDT", "uid", 1, .01, 99, .01, 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB().Model(o).Updates(map[string]any{"status": model.StatusExpired, "expired_at": time.Now().Add(-time.Hour)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateOrReuseCashierOrder(ctx, CreateOrderInput{Pid: o.Pid, TradeNo: "BACKSCAN-NEW", OutTradeNo: o.OutTradeNo, OriginMoney: "3.00", OriginCurrency: "USD", ExpiredAt: time.Now().Add(time.Hour)}); err == nil {
+		t.Fatal("retired payment while scan unresolved")
+	}
+	got, _ := st.GetByTradeNo(ctx, o.TradeNo)
+	if got.Status != model.StatusExpired || got.ExpireFinalized {
+		t.Fatal("unresolved payment lost")
+	}
+}

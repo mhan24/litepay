@@ -200,7 +200,7 @@ func (s *Store) CreateOrReuseCashierOrder(ctx context.Context, in CreateOrderInp
 				return nil
 			}
 			// An already displayed payment is immutable to merchant request changes.
-			if existing.Status == model.StatusReady && !existing.ExpireFinalized {
+			if (existing.Status == model.StatusReady || (existing.Status == model.StatusExpired && existing.Collection != "")) && !existing.ExpireFinalized {
 				if !paymentContractUnchanged(&existing, in) {
 					return errors.New("商户订单已有有效支付约定；参数冲突，请使用新的商户订单号")
 				}
@@ -317,7 +317,7 @@ func (s *Store) MatchableOrders(ctx context.Context, provider string, grace time
 	err := s.db.WithContext(ctx).Model(&model.Order{}).
 		Joins("JOIN amount_slots ON amount_slots.order_id = orders.id").
 		Where("orders.collection = ? AND amount_slots.provider = ?", provider, provider).
-		Where("amount_slots.currency = orders.currency AND amount_slots.amount = orders.pay_amount").
+		Where("amount_slots.currency = orders.currency AND ((orders.pay_units > 0 AND amount_slots.amount_units = orders.pay_units) OR (orders.pay_units = 0 AND amount_slots.amount = orders.pay_amount))").
 		Where("orders.origin_currency = ?", "USD").
 		Where("amount_slots.order_id <> 0").
 		Distinct("orders.*").
@@ -613,8 +613,16 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 			return rejectClaim("收款时间不在订单锁定后的支付窗口内")
 		}
 		var slot model.AmountSlot
-		if err := d.Where("order_id = ? AND provider = ? AND currency = ? AND amount = ? ",
-			current.ID, current.Collection, current.Currency, current.PayAmount).
+		units := current.PayUnits
+		if units == 0 {
+			var err error
+			units, err = amount.FloatUnits(current.PayAmount, current.AmountPrecision)
+			if err != nil {
+				return rejectClaim("订单金额无效")
+			}
+		}
+		if err := d.Where("order_id = ? AND provider = ? AND currency = ? AND amount_units = ?",
+			current.ID, current.Collection, current.Currency, units).
 			First(&slot).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return rejectClaim("订单金额占用已失效")
