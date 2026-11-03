@@ -526,6 +526,10 @@ func TestCancelOrderCannotOverwriteScheduledExpiredCallback(t *testing.T) {
 	if n, err := st.MarkExpired(ctx); err != nil || n != 1 {
 		t.Fatalf("mark expired: n=%d err=%v", n, err)
 	}
+	// This test concerns finalization effects after a successful exchange scan.
+	if err := st.SaveScanCursor(ctx, "binance", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := st.FinalizeExpired(ctx, time.Minute); err != nil || n != 1 {
 		t.Fatalf("finalize expired: n=%d err=%v", n, err)
 	}
@@ -595,6 +599,10 @@ func TestFinalizeExpiredStopsListeningAndSchedulesExpiredCallback(t *testing.T) 
 	}
 	if n, err := st.MarkExpired(ctx); err != nil || n != 1 {
 		t.Fatalf("mark expired: n=%d err=%v", n, err)
+	}
+	// This test concerns finalization effects after a successful exchange scan.
+	if err := st.SaveScanCursor(ctx, "binance", time.Now()); err != nil {
+		t.Fatal(err)
 	}
 	if n, err := st.FinalizeExpired(ctx, time.Minute); err != nil || n != 1 {
 		t.Fatalf("finalize expired: n=%d err=%v", n, err)
@@ -691,6 +699,10 @@ func TestForceExpireFinalizesOrderDuringGrace(t *testing.T) {
 	if got := slotCount(t, st); got != 1 {
 		t.Fatalf("slots = %d during force-expire grace, want 1", got)
 	}
+	// This test concerns finalization effects after a successful exchange scan.
+	if err := st.SaveScanCursor(ctx, "binance", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := st.FinalizeExpired(ctx, time.Hour); err != nil || n != 0 {
 		t.Fatalf("finalized before force-expire grace: n=%d err=%v", n, err)
 	}
@@ -725,6 +737,10 @@ func TestForceExpireCannotDuplicateScheduledCallback(t *testing.T) {
 	}
 	if n, err := st.MarkExpired(ctx); err != nil || n != 1 {
 		t.Fatalf("mark expired: n=%d err=%v", n, err)
+	}
+	// This test concerns finalization effects after a successful exchange scan.
+	if err := st.SaveScanCursor(ctx, "binance", time.Now()); err != nil {
+		t.Fatal(err)
 	}
 	if n, err := st.FinalizeExpired(ctx, time.Minute); err != nil || n != 1 {
 		t.Fatalf("finalize expired: n=%d err=%v", n, err)

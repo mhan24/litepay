@@ -273,6 +273,9 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 	if string(envelope.Code) != "0" {
 		return nil, fmt.Errorf("OKX API 业务错误 code=%s message=%s", envelope.Code, envelope.Msg)
 	}
+	if len(envelope.Data) == 0 || strings.TrimSpace(string(envelope.Data)) == "null" {
+		return nil, fmt.Errorf("OKX 未返回明确的数据数组")
+	}
 	return envelope.Data, nil
 }
 

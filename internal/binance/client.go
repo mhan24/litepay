@@ -201,6 +201,9 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 		return nil, 0, fmt.Errorf("币安 API 业务错误 code=%s message=%s", payload.Code, payload.Message)
 	}
 
+	if payload.Data == nil {
+		return nil, 0, fmt.Errorf("币安未返回明确的历史记录数组")
+	}
 	out := make([]Transaction, 0, len(payload.Data))
 	seenRecords := make(map[string]struct{}, len(payload.Data))
 	for _, raw := range payload.Data {
@@ -223,7 +226,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 		}
 		id := strings.TrimSpace(string(d.TransactionID))
 		if id == "" {
-			continue
+			return nil, 0, fmt.Errorf("币安历史记录缺少流水号")
 		}
 		if _, exists := seenRecords[id]; exists {
 			return nil, 0, fmt.Errorf("币安响应包含重复流水 %s", id)

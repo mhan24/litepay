@@ -212,3 +212,16 @@ func TestObservationFailureKeepsScanCursorForRetry(t *testing.T) {
 		t.Fatalf("evidence not recovered: %+v", got)
 	}
 }
+
+func TestLongOutageHasExplicitGapAndBoundedWindows(t *testing.T) {
+	now := time.Now()
+	plan := newScanPlan([]model.Order{{CreatedAt: now.Add(-30 * 24 * time.Hour)}}, &model.ScanCursor{ScannedUntil: now.Add(-31 * 24 * time.Hour)}, time.Minute, now)
+	if plan.gap == nil {
+		t.Fatal("silently discarded old history")
+	}
+	for _, w := range plan.windows() {
+		if w.end.Sub(w.start) > maxScanWindow {
+			t.Fatalf("unbounded API work: %+v", w)
+		}
+	}
+}

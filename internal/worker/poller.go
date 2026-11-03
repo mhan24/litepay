@@ -203,6 +203,7 @@ type scanWindow struct{ start, end time.Time }
 type scanPlan struct {
 	recent  scanWindow
 	backlog *scanWindow
+	gap     *scanWindow
 }
 
 // newScanPlan 依据待确认订单和持久化游标计算本轮扫描窗口。
@@ -214,16 +215,22 @@ func newScanPlan(orders []model.Order, cursor *model.ScanCursor, lookback time.D
 	if len(orders) > 0 {
 		recentStart = orders[0].CreatedAt.Add(-lookback)
 	}
-	start := recentStart
+	// Bound realtime API work even when an unresolved order is very old.
+	oldestNeeded := recentStart
+	if floor := now.Add(-maxScanWindow); recentStart.Before(floor) {
+		recentStart = floor
+	}
+	start := oldestNeeded
 	if cursor != nil && !cursor.ScannedUntil.IsZero() {
 		if from := cursor.ScannedUntil.Add(-scanOverlap); from.Before(start) {
 			start = from
 		}
 	}
+	plan := scanPlan{recent: scanWindow{start: recentStart, end: now}}
 	if floor := now.Add(-maxScanBackfill); start.Before(floor) {
+		plan.gap = &scanWindow{start: start, end: floor}
 		start = floor
 	}
-	plan := scanPlan{recent: scanWindow{start: recentStart, end: now}}
 	if end := start.Add(maxScanWindow); end.Before(recentStart) {
 		// 落后超过一个窗口的跨度：先补最老的一段，剩下的交给后续轮次。
 		plan.backlog = &scanWindow{start: start, end: end}
@@ -295,6 +302,12 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	plan := newScanPlan(orders, cursor, lookback, time.Now())
 
+	if plan.gap != nil {
+		if err := p.store.RecordScanGap(ctx, provider, plan.gap.start, plan.gap.end); err != nil {
+			p.failScan(ctx, provider, err)
+			return
+		}
+	}
 	book := newTxObservationBook(provider)
 	var totals scanTotals
 	for _, w := range plan.windows() {
@@ -319,6 +332,9 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 	p.setStats(provider, func(s *PollStats) {
 		s.LastOKAt = time.Now()
 		s.LastError = ""
+		if plan.gap != nil || (cursor != nil && cursor.GapEnd != nil) {
+			s.LastError = "存在超出自动回溯范围的历史缺口，需人工对账"
+		}
 		s.Provider = provider
 		s.LastFetched = totals.fetched
 		s.LastMatched = totals.matched
@@ -421,6 +437,9 @@ func (p *Poller) scanWindow(ctx context.Context, cfg *config.Config, provider st
 				Raw:             tx.Raw,
 			}, cfg.Order.AmountPrecision)
 			if err != nil {
+				if !store.IsClaimRejection(err) {
+					return fmt.Errorf("核销事务失败: %w", err)
+				}
 				book.observe(&tx, model.ObservationReasonClaimFailed, o.TradeNo)
 				slog.Error("订单入账失败", "trade_no", o.TradeNo, "tx", tx.ID, "err", err)
 				continue

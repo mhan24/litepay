@@ -304,7 +304,7 @@ func TestOKXInternalTransferRejectsWrongUIDAmountCurrencyAndDuplicate(t *testing
 	if dup {
 		t.Fatalf("duplicate transfer was claimed again")
 	}
-	if err == nil {
-		t.Fatal("duplicate transfer should be rejected because the order is already paid")
+	if err != nil {
+		t.Fatalf("consumed transfer must be distinguished from technical failure: %v", err)
 	}
 }

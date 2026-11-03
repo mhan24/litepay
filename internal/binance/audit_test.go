@@ -130,3 +130,15 @@ func TestAuditRejectsMalformedOrDuplicateTransactions(t *testing.T) {
 		})
 	}
 }
+
+func TestUnknownSuccessEnvelopeIsNotEmptyHistory(t *testing.T) {
+	for _, data := range []string{`{"code":"000000","success":true}`, `{"code":"000000","success":true,"data":null}`} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, data) }))
+		cli := New("key", "secret", srv.URL, 5000, 100)
+		cli.UseTestTransport()
+		if _, err := cli.PayTransactions(context.Background(), time.Now().Add(-time.Minute), time.Now()); err == nil {
+			t.Error("unknown history treated as empty success")
+		}
+		srv.Close()
+	}
+}

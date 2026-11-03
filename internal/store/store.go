@@ -319,18 +319,17 @@ func (s *Store) GetByTradeNo(ctx context.Context, tradeNo string) (*model.Order,
 // 因此订单被取消、替换或重选后，旧档位也不会被新订单复用。
 func (s *Store) MatchableOrders(ctx context.Context, provider string, grace time.Duration) ([]model.Order, error) {
 	var out []model.Order
-	now := time.Now()
 	err := s.db.WithContext(ctx).Model(&model.Order{}).
 		Joins("JOIN amount_slots ON amount_slots.order_id = orders.id").
 		Where("orders.collection = ? AND amount_slots.provider = ?", provider, provider).
 		Where("amount_slots.currency = orders.currency AND amount_slots.amount = orders.pay_amount").
 		Where("orders.origin_currency = ?", "USD").
-		Where("amount_slots.expires_at > ?", now).
+		Where("amount_slots.order_id <> 0").
 		Distinct("orders.*").
 		// EXPIRED 在宽限期内仍可入账，覆盖付款已发出但交易所记录稍晚的情况。
 		// CANCELED/SUPERSEDED 永不进入这里。
-		Where("(orders.status = ? OR (orders.status = ? AND orders.expire_finalized = ? AND orders.expired_at > ?))",
-			model.StatusReady, model.StatusExpired, false, now.Add(-grace)).
+		Where("(orders.status = ? OR (orders.status = ? AND orders.expire_finalized = ? ))",
+			model.StatusReady, model.StatusExpired, false).
 		Order("orders.created_at ASC").
 		Find(&out).Error
 	return out, err
@@ -366,7 +365,7 @@ func (s *Store) SelectPayment(ctx context.Context, tradeNo, provider, currency s
 			return errors.New("订单已锁定收款 UID，请重新创建订单")
 		}
 
-		if err := tx.Where("expires_at < ?", time.Now()).Delete(&model.AmountSlot{}).Error; err != nil {
+		if err := tx.Where("order_id = 0 AND expires_at < ?", time.Now()).Delete(&model.AmountSlot{}).Error; err != nil {
 			return err
 		}
 
@@ -528,13 +527,21 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 	tx.ReceiverAddr = strings.TrimSpace(tx.ReceiverAddr)
 	tx.Raw = truncate(tx.Raw, 16<<10)
 	if strings.TrimSpace(tx.TransactionID) == "" {
-		return false, errors.New("收款流水号不能为空")
+		return false, rejectClaim("收款流水号不能为空")
 	}
 	if tx.Type != "MANUAL" && !((tx.Provider == "binance" && (tx.Type == "PAY" || tx.Type == "C2C")) || (tx.Provider == "okx" && tx.Type == "3")) {
-		return false, errors.New("不支持的收款流水类型")
+		return false, rejectClaim("不支持的收款流水类型")
 	}
 
 	err := s.db.WithContext(ctx).Transaction(func(d *gorm.DB) error {
+		// Check consumption before validating a stale order snapshot.
+		var consumed int64
+		if err := d.Model(&model.IncomingTx{}).Where("provider = ? AND transaction_id = ?", tx.Provider, tx.TransactionID).Count(&consumed).Error; err != nil {
+			return err
+		}
+		if consumed != 0 {
+			return nil
+		}
 		tx.OrderTradeNo = order.TradeNo
 		// 在幂等闸门前先重新读取订单。调用方传入的是查询快照，可能已被
 		// 后台取消/过期/另一通道入账；不能仅凭旧快照放行。
@@ -547,25 +554,25 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 		if current.Status == model.StatusPaid ||
 			current.Status == model.StatusCanceled ||
 			(current.Status == model.StatusExpired && current.ExpireFinalized) {
-			return errors.New("当前订单状态不允许入账")
+			return rejectClaim("当前订单状态不允许入账")
 		}
 		if !strings.EqualFold(current.Collection, tx.Provider) {
-			return errors.New("收款平台与订单所选平台不一致")
+			return rejectClaim("收款平台与订单所选平台不一致")
 		}
 		if !strings.EqualFold(current.Currency, tx.Currency) {
-			return errors.New("收款币种与订单所选币种不一致")
+			return rejectClaim("收款币种与订单所选币种不一致")
 		}
 		if strings.TrimSpace(current.PayAddress) == "" ||
 			!strings.EqualFold(strings.TrimSpace(current.PayAddress),
 				strings.TrimSpace(tx.ReceiverAddr)) {
-			return errors.New("收款 UID 与订单不一致")
+			return rejectClaim("收款 UID 与订单不一致")
 		}
 		if !amount.MatchRounded(amount.FormatPrecision(current.PayAmount, current.AmountPrecision), tx.Amount) {
-			return errors.New("收款金额与订单应付金额不一致")
+			return rejectClaim("收款金额与订单应付金额不一致")
 		}
 		if current.Status != model.StatusReady &&
 			(current.Status != model.StatusExpired || current.ExpireFinalized) {
-			return errors.New("当前订单状态不允许入账")
+			return rejectClaim("当前订单状态不允许入账")
 		}
 
 		selectedAt := current.CreatedAt
@@ -573,13 +580,16 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 			selectedAt = *current.SelectedAt
 		}
 		if tx.Type != "MANUAL" && (tx.TransactionTime.Before(selectedAt) || tx.TransactionTime.After(current.ExpiredAt)) {
-			return errors.New("收款时间不在订单锁定后的支付窗口内")
+			return rejectClaim("收款时间不在订单锁定后的支付窗口内")
 		}
 		var slot model.AmountSlot
-		if err := d.Where("order_id = ? AND provider = ? AND currency = ? AND amount = ? AND expires_at > ?",
-			current.ID, current.Collection, current.Currency, current.PayAmount, time.Now()).
+		if err := d.Where("order_id = ? AND provider = ? AND currency = ? AND amount = ? ",
+			current.ID, current.Collection, current.Currency, current.PayAmount).
 			First(&slot).Error; err != nil {
-			return errors.New("订单金额占用已失效")
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return rejectClaim("订单金额占用已失效")
+			}
+			return err
 		}
 
 		// 1) 幂等闸门：incoming_txs 以 (provider, transactionId) 为主键
@@ -612,7 +622,7 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 			return upd.Error
 		}
 		if upd.RowsAffected == 0 {
-			return errors.New("订单状态已变化，撤销本次流水认领")
+			return rejectClaim("订单状态已变化，撤销本次流水认领")
 		}
 
 		// 3) 释放唯一应付金额的占用。档位行保留至原支付窗口结束（冷却期），
@@ -669,17 +679,37 @@ func (s *Store) FinalizeExpired(ctx context.Context, grace time.Duration) (int64
 
 		ids := make([]uint, 0, len(orders))
 		for i := range orders {
+			if orders[i].Collection != "" {
+				var cursor model.ScanCursor
+				if err := tx.Where("provider = ?", orders[i].Collection).First(&cursor).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						if err := tx.Model(&orders[i]).Update("reconciliation_reason", "等待交易所成功补扫；超过24小时请人工对账").Error; err != nil {
+							return err
+						}
+						continue
+					}
+					return err
+				}
+				if cursor.LastError != "" || cursor.ScannedUntil.Before(orders[i].ExpiredAt.Add(grace)) ||
+					(cursor.GapEnd != nil && cursor.GapEnd.After(orders[i].CreatedAt)) {
+					if err := tx.Model(&orders[i]).Update("reconciliation_reason", "扫描未覆盖付款窗口或存在历史缺口；超过24小时请人工对账").Error; err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			ids = append(ids, orders[i].ID)
 			res := tx.Model(&model.Order{}).
 				Where("id = ? AND status = ? AND expire_finalized = ?",
 					orders[i].ID, model.StatusExpired, false).
 				Where("notify_status NOT IN ?", []string{model.NotifySuccess, model.NotifyCanceled}).
 				Updates(map[string]any{
-					"expire_finalized": true,
-					"notify_status":    model.NotifyPending,
-					"notify_attempts":  0,
-					"next_notify_at":   now,
-					"updated_at":       now,
+					"expire_finalized":      true,
+					"reconciliation_reason": "",
+					"notify_status":         model.NotifyPending,
+					"notify_attempts":       0,
+					"next_notify_at":        now,
+					"updated_at":            now,
 				})
 			if res.Error != nil {
 				return res.Error
@@ -994,8 +1024,9 @@ func (s *Store) SaveScanCursor(ctx context.Context, provider string, until time.
 	now := time.Now()
 	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "provider"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"scanned_until", "last_run_at", "last_error", "updated_at",
+		DoUpdates: clause.Assignments(map[string]any{
+			"scanned_until": gorm.Expr("MAX(scan_cursors.scanned_until, excluded.scanned_until)"),
+			"last_run_at":   now, "last_error": "", "updated_at": now,
 		}),
 	}).Create(&model.ScanCursor{
 		Provider: provider, ScannedUntil: until, LastRunAt: now, UpdatedAt: now,
@@ -1035,4 +1066,12 @@ func (s *Store) ClaimNotify(ctx context.Context, o *model.Order, lease time.Dura
 		return false, res.Error
 	}
 	return res.RowsAffected == 1, nil
+}
+
+// RecordScanGap preserves the union of unrecoverable windows across restarts.
+func (s *Store) RecordScanGap(ctx context.Context, provider string, start, end time.Time) error {
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}}, DoUpdates: clause.Assignments(map[string]any{
+		"gap_start": gorm.Expr("CASE WHEN scan_cursors.gap_start IS NULL OR excluded.gap_start < scan_cursors.gap_start THEN excluded.gap_start ELSE scan_cursors.gap_start END"),
+		"gap_end":   gorm.Expr("CASE WHEN scan_cursors.gap_end IS NULL OR excluded.gap_end > scan_cursors.gap_end THEN excluded.gap_end ELSE scan_cursors.gap_end END"),
+	})}).Create(&model.ScanCursor{Provider: provider, GapStart: &start, GapEnd: &end}).Error
 }

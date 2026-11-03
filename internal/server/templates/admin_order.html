@@ -20,6 +20,7 @@
 
   <div class="detail-head">
     <h1 class="mono" style="font-size:17px">{{.Order.TradeNo}}</h1>
+    {{if .Order.ReconciliationReason}}<p class="hint">{{.Order.ReconciliationReason}}</p>{{end}}
     {{if eq .Order.Status "PAID"}}<span class="badge b-ok">已支付</span>
     {{else if eq .Order.Status "READY"}}<span class="badge b-wait">待支付</span>
     {{else if eq .Order.Status "PENDING"}}<span class="badge b-blue">待选收款方式</span>

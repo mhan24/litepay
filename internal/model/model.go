@@ -75,9 +75,10 @@ type Order struct {
 	// ExpireFinalized 表示支付宽限期已经结束。
 	// 自动过期后的宽限期内仍允许晚到记录入账；一旦结束就永久停止确认到账，
 	// 并在同一事务中安排 status=3 过期通知。
-	ExpireFinalized bool      `gorm:"not null;default:false;index" json:"expire_finalized"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ReconciliationReason string
+	ExpireFinalized      bool      `gorm:"not null;default:false;index" json:"expire_finalized"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // TableName 指定表名。
@@ -256,8 +257,12 @@ func (Credential) TableName() string { return "credentials" }
 // 故障后，窗口之外的流水永远不会被读到，到账资金也就没有任何证据。游标把
 // 扫描进度落库，重启后可以从上次的位置继续补扫。
 type ScanCursor struct {
+	// Persistent loss-of-coverage marker; ordinary successful scans cannot clear it.
+	GapStart *time.Time
+	GapEnd   *time.Time
+
 	Provider string `gorm:"primaryKey;size:16"`
-	// ScannedUntil 表示 (…, ScannedUntil] 区间已被完整扫描。
+	// ScannedUntil 是已请求并处理的连续查询窗口末端；不保证交易所不再迟报。
 	ScannedUntil time.Time `gorm:"index"`
 	// LastRunAt 最近一次成功扫描的时间。
 	LastRunAt time.Time

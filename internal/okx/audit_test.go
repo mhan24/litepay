@@ -91,3 +91,14 @@ func TestFullPageAtSinceBoundaryCannotSilentlyTruncate(t *testing.T) {
 		t.Fatal("full boundary page was not checked")
 	}
 }
+
+func TestMissingDepositDataIsNotEmptyHistory(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"code":"0","data":null}`) }))
+	defer srv.Close()
+	cli := New("key", "secret", "pass", srv.URL, 100)
+	cli.UseTestTransport()
+	cli.syncTime = false
+	if _, err := cli.DepositHistorySince(context.Background(), "USDT", time.Now().Add(-time.Minute)); err == nil {
+		t.Fatal("null response treated as complete scan")
+	}
+}
