@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 FAKE = r'''#!/usr/bin/env python3
-import json,os,sys,tarfile,shutil
+import json,os,sys,tarfile,shutil,re
 from pathlib import Path
 root=Path(os.environ['FAKE_ROOT']);statefile=root/'state.json';s=json.loads(statefile.read_text());args=sys.argv[1:];name=Path(sys.argv[0]).name
 with (root/'commands').open('a') as f:f.write(json.dumps([name]+args)+'\n')
@@ -27,6 +27,7 @@ elif args[0]=='rm':
  else:s['old']=False
  save()
 elif args[0]=='compose':
+ if '-p' in args and not re.fullmatch('[a-z0-9][a-z0-9_-]*',args[args.index('-p')+1]):sys.exit(1)
  if 'create' in args or 'up' in args:
   if s.get('old') and '-p' not in args:sys.exit(1)
   s.update(main=True,generation='new');save()

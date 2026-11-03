@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 077
 : "${DEPLOY_PATH:?}" "${ARCHIVE:?}"
-stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$
+stamp=$(date -u +%Y%m%dt%H%M%Sz)-$$
 backup_dir="${DEPLOY_PATH}-backups/$stamp"
 stage_dir=$(mktemp -d)
 old_name="litepay-rollback-$stamp"
