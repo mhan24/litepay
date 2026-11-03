@@ -442,6 +442,7 @@ func TestEndToEndBinancePaymentLoop(t *testing.T) {
 	const (
 		accountUID  = "354937868"
 		transaction = "M_P_71505104267788288"
+		orderID     = "463524995526164480" // 纯数字订单号，用户在 App 中可复制
 	)
 	token := ""
 	merchant := &merchantMock{t: t, token: &token, eventID: transaction, amount: "10.01", receiver: accountUID, seen: map[string]bool{}}
@@ -497,7 +498,7 @@ func TestEndToEndBinancePaymentLoop(t *testing.T) {
 	// 随后等待 60ms 再扫描，记录时间因此必然落在扫描窗口 [start, end] 之内。
 	payTime := o.SelectedAt.Add(50 * time.Millisecond)
 	payPayload = `{"code":"000000","message":"success","success":true,"data":[` +
-		`{"orderType":"PAY","transactionId":"` + transaction + `","transactionTime":` + fmt.Sprint(payTime.UnixMilli()) + `,"amount":"10.01","currency":"USDT","walletTypes":[1],"fundsDetail":[{"currency":"USDT","amount":"10.01"}],"payerInfo":{"name":"Payer"},"receiverInfo":{"name":"Shop","type":"MERCHANT","binanceId":"` + accountUID + `"}}]}`
+		`{"orderType":"PAY","transactionId":"` + transaction + `","orderId":"` + orderID + `","transactionTime":` + fmt.Sprint(payTime.UnixMilli()) + `,"amount":"10.01","currency":"USDT","walletTypes":[1],"fundsDetail":[{"currency":"USDT","amount":"10.01"}],"payerInfo":{"name":"Payer"},"receiverInfo":{"name":"Shop","type":"MERCHANT","binanceId":"` + accountUID + `"}}]}`
 	time.Sleep(60 * time.Millisecond)
 
 	// 自动扫描唯一核销：transactionId 同时是事件身份与外部查询编号。
@@ -508,7 +509,7 @@ func TestEndToEndBinancePaymentLoop(t *testing.T) {
 	if e = st.DB().First(&tx, "provider = ? AND event_id = ?", "binance", transaction).Error; e != nil {
 		t.Fatal(e)
 	}
-	if tx.Reference != transaction || tx.Receiver != accountUID || tx.Units != 10010000 || tx.OrderID == nil {
+	if tx.Reference != orderID || tx.Receiver != accountUID || tx.Units != 10010000 || tx.OrderID == nil {
 		t.Fatal("PAY record not claimed as evidence", tx)
 	}
 	if fresh, _ := st.GetByTradeNo(ctx, no); fresh.Status != model.Paid {
@@ -531,7 +532,7 @@ func TestEndToEndBinancePaymentLoop(t *testing.T) {
 
 	// 查款不能重复核销：已支付订单不能再查款，且不会触发任何交易所查询。
 	payCalls := exchange.count("/sapi/v1/pay/transactions")
-	w := postForm(engine, "/api/order/inquiry", url.Values{"trade_no": {no}, "reference": {transaction}})
+	w := postForm(engine, "/api/order/inquiry", url.Values{"trade_no": {no}, "reference": {orderID}})
 	if w.Code == 200 {
 		t.Fatal("inquiry accepted for a paid order", w.Body.String())
 	}

@@ -11,18 +11,18 @@ import (
 	"litepay/internal/model"
 )
 
-// 样本按官方 Get Pay Trade History 文档字段构造：orderType / transactionId /
-// transactionTime / amount / currency / walletType / walletTypes / fundsDetail
+// 样本按官方 Get Pay Trade History 文档字段构造，并按真实响应校准：orderId 为纯数字
+// 订单号（用户在 App 中可复制的编号）、出账记录顶层金额为负而 fundsDetail 为正幅度。
+// transactionId / transactionTime / amount / currency / walletTypes / fundsDetail
 // {currency, amount, walletAssetCost} / payerInfo / receiverInfo {name, type, binanceId}。
-// 文档没有商户订单号字段，样本故意带上 orderId 以确认它不会被当成订单号。
 const payHistorySample = `{"code":"000000","message":"success","success":true,"data":[` +
-	`{"orderType":"PAY","transactionId":"M_P_71505104267788288","orderId":"shop-order-1","transactionTime":100000,"amount":"10.01","currency":"USDT","walletType":1,"walletTypes":[1],"fundsDetail":[{"currency":"USDT","amount":"10.01","walletAssetCost":{"1":"10.01"}}],"payerInfo":{"name":"Payer"},"receiverInfo":{"name":"Shop","type":"MERCHANT","binanceId":"uid"}},` +
-	`{"orderType":"C2C","transactionId":"M_C_71505104267788289","transactionTime":100001,"amount":"5.5","currency":"USDC","fundsDetail":[{"currency":"USDC","amount":"5.5"}],"payerInfo":{"name":"Payer"},"receiverInfo":{"name":"Shop","binanceId":"uid"}},` +
-	`{"orderType":"PAY","transactionId":"M_P_OUT_1","transactionTime":100002,"amount":"-3","currency":"USDT","fundsDetail":[{"currency":"USDT","amount":"-3"}],"payerInfo":{"binanceId":"uid"},"receiverInfo":{"name":"Other"}},` +
-	`{"orderType":"PAY","transactionId":"M_P_8DP_1","transactionTime":100003,"amount":"23.72469206","currency":"BTC","fundsDetail":[{"currency":"BTC","amount":"23.72469206"}],"receiverInfo":{"binanceId":"uid"}},` +
-	`{"orderType":"PAY","transactionId":"M_P_MULTI_1","transactionTime":100004,"amount":"0","fundsDetail":[{"currency":"USDT","amount":"10.01"},{"currency":"USDC","amount":"10.02"}],"receiverInfo":{"binanceId":"uid"}},` +
-	`{"orderType":"PAY","transactionId":"M_P_TOPBAD_1","transactionTime":100005,"amount":"10.01000001","currency":"USDT","fundsDetail":[{"currency":"USDT","amount":"10.01"}],"receiverInfo":{"binanceId":"uid"}},` +
-	`{"orderType":"PAY","transactionId":"M_P_ZERO_1","transactionTime":100006,"amount":"0","currency":"USDT","fundsDetail":[{"currency":"USDT","amount":"7.5"}],"receiverInfo":{"binanceId":"uid"}}]}`
+	`{"orderType":"PAY","transactionId":"M_P_71505104267788288","orderId":"463524995526164480","transactionTime":100000,"amount":"10.01","currency":"USDT","walletType":1,"walletTypes":[1],"fundsDetail":[{"currency":"USDT","amount":"10.01","walletAssetCost":{"1":"10.01"}}],"payerInfo":{"name":"Payer"},"receiverInfo":{"name":"Shop","type":"MERCHANT","binanceId":"uid"}},` +
+	`{"orderType":"C2C","transactionId":"M_C_71505104267788289","orderId":"463524995526164481","transactionTime":100001,"amount":"5.5","currency":"USDC","fundsDetail":[{"currency":"USDC","amount":"5.5"}],"payerInfo":{"name":"Payer"},"receiverInfo":{"name":"Shop","binanceId":"uid"}},` +
+	`{"orderType":"PAY","transactionId":"M_P_OUT_1","orderId":"463524995526164482","transactionTime":100002,"amount":"-3","currency":"USDT","fundsDetail":[{"currency":"USDT","amount":"3"}],"payerInfo":{"binanceId":"uid"},"receiverInfo":{"name":"Other"}},` +
+	`{"orderType":"PAY","transactionId":"M_P_8DP_1","orderId":"463524995526164483","transactionTime":100003,"amount":"23.72469206","currency":"BTC","fundsDetail":[{"currency":"BTC","amount":"23.72469206"}],"receiverInfo":{"binanceId":"uid"}},` +
+	`{"orderType":"PAY","transactionId":"M_P_MULTI_1","orderId":"463524995526164484","transactionTime":100004,"amount":"0","fundsDetail":[{"currency":"USDT","amount":"10.01"},{"currency":"USDC","amount":"10.02"}],"receiverInfo":{"binanceId":"uid"}},` +
+	`{"orderType":"PAY","transactionId":"M_P_TOPBAD_1","orderId":"463524995526164485","transactionTime":100005,"amount":"10.01000001","currency":"USDT","fundsDetail":[{"currency":"USDT","amount":"10.01"}],"receiverInfo":{"binanceId":"uid"}},` +
+	`{"orderType":"PAY","transactionId":"M_P_ZERO_1","orderId":"463524995526164486","transactionTime":100006,"amount":"0","currency":"USDT","fundsDetail":[{"currency":"USDT","amount":"7.5"}],"receiverInfo":{"binanceId":"uid"}}]}`
 
 func TestPayHistoryFieldParsing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,15 +41,16 @@ func TestPayHistoryFieldParsing(t *testing.T) {
 	if e != nil || len(rows) != 7 {
 		t.Fatal(rows, e)
 	}
-	// 收款方 PAY：transactionId 既是事件 ID 也是查询编号，binanceId 是收款 UID。
-	if r := rows[0]; r.EventID != "M_P_71505104267788288" || r.Reference != r.EventID || r.Receiver != "uid" || r.Currency != "USDT" || r.Units != 10010000 || r.State != model.Confirmed || !r.OccurredAt.Equal(time.UnixMilli(100000)) {
+	// 收款方 PAY：transactionId 是事件身份，orderId（纯数字）是查款编号，
+	// binanceId 是收款 UID。
+	if r := rows[0]; r.EventID != "M_P_71505104267788288" || r.Reference != "463524995526164480" || r.Receiver != "uid" || r.Currency != "USDT" || r.Units != 10010000 || r.State != model.Confirmed || !r.OccurredAt.Equal(time.UnixMilli(100000)) {
 		t.Fatal("pay receiver", r)
 	}
-	if r := rows[1]; r.State != model.Confirmed || r.Units != 5500000 || r.Currency != "USDC" || r.Reference != r.EventID {
+	if r := rows[1]; r.State != model.Confirmed || r.Units != 5500000 || r.Currency != "USDC" || r.Reference != "463524995526164481" {
 		t.Fatal("c2c receiver", r)
 	}
-	// 付款方向金额为负，receiverInfo 只有昵称：不是收款，拒绝自动核销。
-	if r := rows[2]; r.State != model.Rejected || r.Reason != "not_incoming_payment" || r.Reference != r.EventID {
+	// 出账转账（真实语义：顶层带负号、明细为正幅度）：方向拒绝，不是金额冲突。
+	if r := rows[2]; r.State != model.Rejected || r.Reason != "not_incoming_payment" || r.Reference != "463524995526164482" {
 		t.Fatal("outgoing pay", r)
 	}
 	// 文档允许 8 位小数，支付域只有 6 位：保留证据但拒绝核销，且不影响整次查询。
@@ -70,6 +71,11 @@ func TestPayHistoryFieldParsing(t *testing.T) {
 	found, e := c.Lookup(context.Background(), "M_P_71505104267788288", time.UnixMilli(90000), time.UnixMilli(110000))
 	if e != nil || len(found) != 1 || found[0].EventID != "M_P_71505104267788288" {
 		t.Fatal("transaction id lookup", found, e)
+	}
+	// 用户贴纯数字订单号同样能查到。
+	found, e = c.Lookup(context.Background(), "463524995526164480", time.UnixMilli(90000), time.UnixMilli(110000))
+	if e != nil || len(found) != 1 || found[0].EventID != "M_P_71505104267788288" {
+		t.Fatal("numeric order id lookup", found, e)
 	}
 }
 

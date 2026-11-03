@@ -175,6 +175,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 	for _, raw := range items {
 		var d struct {
 			ID       exchange.Text `json:"transactionId"`
+			OrderID  exchange.Text `json:"orderId"`
 			Type     exchange.Text `json:"orderType"`
 			Time     exchange.Text `json:"transactionTime"`
 			Amount   exchange.Text `json:"amount"`
@@ -192,12 +193,16 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 		if e != nil || ms < start || ms > end {
 			return nil, 0, &APIError{Kind: ErrorParse}
 		}
-		// 交易历史只提供 transactionId，文档没有商户订单号字段：归属与查询都只用它，
-		// 不把其他字段推断成订单号。
+		// 交易历史的商户订单号是 orderId（实测为纯数字，如 463524995526164480，即用户在
+		// App 账单里可复制的编号）；transactionId 是带字母前缀的事件身份。事件归属只用
+		// transactionId；orderId 作为外部查询编号，查款时两者都接受。
+		reference := string(d.ID)
+		if d.OrderID != "" {
+			reference = string(d.OrderID)
+		}
 		// 官方 OpenAPI 规范把 receiverInfo.binanceId（收款 UID）列为必填；该字段在真实
-		// 响应中是否完整、是否脱敏仍需真实样本验证（见待验证清单）：缺失或对不上时只会
-		// 拒绝核销，不会误认。
-		t := model.Transaction{Provider: "binance", EventID: string(d.ID), Reference: string(d.ID), Receiver: string(d.Receiver.UID), Currency: strings.ToUpper(string(d.Currency)), OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
+		// 响应中已验证完整未脱敏（数字形态）。缺失或对不上时只会拒绝核销，不会误认。
+		t := model.Transaction{Provider: "binance", EventID: string(d.ID), Reference: reference, Receiver: string(d.Receiver.UID), Currency: strings.ToUpper(string(d.Currency)), OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
 		// One parent event is one consumable payment. Preserve every detail, never sum currencies.
 		if len(d.Details) > 1 {
 			b, _ := json.Marshal(d.Details)
@@ -217,10 +222,11 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 				t.Reason = "conflicting_currency"
 			}
 			t.Currency = detailCurrency
-			// amount 是订单总额（官方文档允许 8 位小数），fundsDetail 是它的资产明细。
-			// 两者同时提供时，参与核销判断的金额必须全部可精确解析且一致：总额超精度、
-			// 格式错误都按 invalid_amount 拒绝，与明细不一致按 conflicting_amount 拒绝。
-			// 文档没有定义"总额为 0 而明细非 0"的含义，同样不能自动核销。
+			// amount 是订单总额（官方文档允许 8 位小数，实测带方向符号），fundsDetail 是
+			// 资产明细（实测恒为正数幅度，出账记录顶层为负）。两者同时提供时：幅度一致
+			// 但符号相反是出账（方向拒绝）；幅度不一致——包括文档未定义含义的
+			// "总额为 0 而明细非 0"——按 conflicting_amount 拒绝；任一无法精确解析按
+			// invalid_amount 拒绝。真实出账样本：amount=-8.02，fundsDetail=8.02。
 			top, topErr := d.Amount.SignedUnits()
 			fundUnits, fundErr := fund.Amount.SignedUnits()
 			switch {
@@ -228,6 +234,10 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 				t.State = model.Rejected
 				t.Reason = "invalid_amount"
 				t.RawAmount = joinRawAmounts(string(d.Amount), string(fund.Amount))
+			case top == -fundUnits && top != 0:
+				// 出账转账：顶层带负号、明细为正幅度。方向拒绝，不是金额冲突。
+				t.State = model.Rejected
+				t.Reason = "not_incoming_payment"
 			case top != fundUnits:
 				t.State = model.Rejected
 				t.Reason = "conflicting_amount"
