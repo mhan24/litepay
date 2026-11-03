@@ -75,7 +75,9 @@ type Poller struct {
 	cfg   *settings.Manager
 	store *store.Store
 
-	lastRuns map[string]time.Time
+	lastRuns   map[string]time.Time
+	retryAfter map[string]time.Time
+	failures   map[string]int
 
 	binanceClient      *binance.Client
 	binanceKey         string
@@ -103,7 +105,7 @@ type Poller struct {
 func NewPoller(cfg *settings.Manager, st *store.Store) *Poller {
 	return &Poller{
 		cfg: cfg, store: st,
-		lastRuns: make(map[string]time.Time),
+		lastRuns: make(map[string]time.Time), retryAfter: make(map[string]time.Time), failures: make(map[string]int),
 	}
 }
 
@@ -149,6 +151,9 @@ func (p *Poller) Run(ctx context.Context) {
 		case now := <-ticker.C:
 			cfg := p.cfg.Get()
 			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX} {
+				if now.Before(p.retryAfter[provider]) {
+					continue
+				}
 				if !cfg.ProviderEnabled(provider) {
 					continue
 				}
@@ -330,6 +335,8 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 		return
 	}
 
+	p.failures[provider] = 0
+	delete(p.retryAfter, provider)
 	p.setStats(provider, func(s *PollStats) {
 		s.LastOKAt = time.Now()
 		s.LastError = ""
@@ -359,6 +366,12 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 
 // failScan 记录一次失败的扫描：游标不推进，失败原因落库供后台排查。
 func (p *Poller) failScan(ctx context.Context, provider string, err error) {
+	p.failures[provider]++
+	shift := p.failures[provider]
+	if shift > 6 {
+		shift = 6
+	}
+	p.retryAfter[provider] = time.Now().Add(time.Duration(1<<shift) * 5 * time.Second)
 	p.setStats(provider, func(s *PollStats) { s.LastError = err.Error(); s.Provider = provider })
 	slog.Warn("查询到账记录失败", "provider", provider, "err", err)
 	if saveErr := p.store.SaveScanError(ctx, provider, err.Error()); saveErr != nil {

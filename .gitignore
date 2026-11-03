@@ -22,3 +22,5 @@ dist/
 !.env.example
 .workbuddy-ai/
 *.db-journal
+
+__pycache__/

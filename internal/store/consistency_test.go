@@ -97,3 +97,38 @@ func TestHistoryGapSurvivesSuccessfulScan(t *testing.T) {
 		t.Fatalf("gap erased: %+v %v", cur, err)
 	}
 }
+
+func TestConcurrentClaimsConsumeTransactionOnce(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	o := createTestOrder(t, st, "RACE-CLAIM", "RACE-CLAIM", 0)
+	o, err := st.SelectPayment(ctx, o.TradeNo, "okx", "USDT", "uid", 1, .01, 99, .01, 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := model.IncomingTx{Provider: "okx", TransactionID: "one", Type: "3", Currency: "USDT", Amount: o.PayAmount, ReceiverAddr: "uid", TransactionTime: time.Now()}
+	results := make(chan bool, 12)
+	for i := 0; i < 12; i++ {
+		go func() {
+			ok, err := st.ClaimAndPay(ctx, o, tx, 2)
+			if err != nil {
+				t.Error(err)
+			}
+			results <- ok
+		}()
+	}
+	successes := 0
+	for i := 0; i < 12; i++ {
+		if <-results {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("credited %d times", successes)
+	}
+	var n int64
+	st.DB().Model(&model.IncomingTx{}).Count(&n)
+	if n != 1 {
+		t.Fatal("consumption ledger inconsistent")
+	}
+}

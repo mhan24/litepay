@@ -5,6 +5,7 @@ import (
 	"embed"
 	"html/template"
 	"io/fs"
+	"litepay/internal/maintenance"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -68,6 +69,13 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	if err != nil {
 		return nil, err
 	}
+	r.Use(func(c *gin.Context) {
+		if c.Request.URL.Path != "/healthz" && maintenance.Blocked() {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "正在维护，请稍后重试"})
+			return
+		}
+		c.Next()
+	})
 	r.GET("/assets/brand/:file", func(c *gin.Context) {
 		name := c.Param("file")
 		if strings.Contains(name, "..") || !strings.HasSuffix(name, ".svg") {

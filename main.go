@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"litepay/internal/config"
+	"litepay/internal/maintenance"
+	"litepay/internal/recovery"
 	"litepay/internal/server"
 	"litepay/internal/settings"
 	"litepay/internal/store"
@@ -37,7 +39,27 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "配置文件路径（yaml）")
+	backup := flag.String("backup-db", "", "一致性备份源数据库路径")
+	output := flag.String("output", "", "备份目标（必须不存在）")
+	verify := flag.String("verify-db", "", "只读完整性校验数据库")
 	flag.Parse()
+	if *backup != "" || *verify != "" {
+		var err error
+		if *backup != "" {
+			if *output == "" {
+				fmt.Fprintln(os.Stderr, "缺少 -output")
+				os.Exit(1)
+			}
+			err = recovery.Snapshot(context.Background(), *backup, *output)
+		} else {
+			err = recovery.Verify(context.Background(), *verify)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "数据库恢复工具失败:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -73,9 +95,14 @@ func main() {
 	notifier := worker.NewNotifier(mgr, st)
 	reaper := worker.NewReaper(st, mgr)
 
-	go poller.Run(ctx)   // Binance / OKX 到账确认
-	go notifier.Run(ctx) // BEpusdt 支付结果通知（含退避重试）
-	go reaper.Run(ctx)   // 过期订单与金额占用清理
+	go func() {
+		if !maintenance.Wait(ctx) {
+			return
+		}
+		go poller.Run(ctx)
+		go notifier.Run(ctx)
+		go reaper.Run(ctx)
+	}()
 
 	engine, err := server.New(mgr, st, poller)
 	if err != nil {

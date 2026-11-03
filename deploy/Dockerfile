@@ -1,6 +1,6 @@
 # 运行镜像：只拷贝已交叉编译好的静态二进制（CGO_ENABLED=0）
 # 服务器为 linux/arm64，构建机上用 GOOS=linux GOARCH=arm64 编译后上传
-FROM alpine:3.20
+FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S -g 10001 litepay \

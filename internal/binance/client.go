@@ -89,7 +89,7 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("请求币安账户信息失败: %w", err)
 	}
 	if status != http.StatusOK {
-		return "", fmt.Errorf("币安账户接口返回 HTTP %d: %s", status, truncate(string(body), 300))
+		return "", fmt.Errorf("币安账户接口返回 HTTP %d", status)
 	}
 	var payload struct {
 		UID flexString `json:"uid"`
@@ -186,7 +186,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 		return nil, 0, fmt.Errorf("请求币安 API 失败: %w", err)
 	}
 	if status != http.StatusOK {
-		return nil, 0, fmt.Errorf("币安 API 返回 HTTP %d: %s", status, truncate(string(body), 300))
+		return nil, 0, fmt.Errorf("币安 API 返回 HTTP %d", status)
 	}
 
 	var payload struct {
@@ -196,12 +196,12 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 		Data    []json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, 0, fmt.Errorf("解析币安响应失败: %w (body=%s)", err, truncate(string(body), 200))
+		return nil, 0, fmt.Errorf("解析币安响应失败: %w", err)
 	}
 
 	// 币安业务码：000000 表示成功
 	if string(payload.Code) != "000000" || !payload.Success {
-		return nil, 0, fmt.Errorf("币安 API 业务错误 code=%s message=%s", payload.Code, payload.Message)
+		return nil, 0, fmt.Errorf("币安 API 业务错误 code=%s", payload.Code)
 	}
 
 	if payload.Data == nil {
@@ -225,7 +225,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			} `json:"receiverInfo"`
 		}
 		if err := json.Unmarshal(raw, &d); err != nil {
-			return nil, 0, fmt.Errorf("解析币安转账记录失败: %w (record=%s)", err, truncate(string(raw), 200))
+			return nil, 0, fmt.Errorf("解析币安转账记录失败: %w", err)
 		}
 		id := strings.TrimSpace(string(d.TransactionID))
 		if id == "" {

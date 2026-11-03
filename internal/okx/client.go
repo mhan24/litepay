@@ -266,7 +266,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 		return nil, fmt.Errorf("请求 OKX API 失败: %w", err)
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("OKX API 返回 HTTP %d: %s", status, truncate(string(body), 300))
+		return nil, fmt.Errorf("OKX API 返回 HTTP %d", status)
 	}
 
 	var envelope struct {
@@ -275,10 +275,10 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("解析 OKX 响应失败: %w (body=%s)", err, truncate(string(body), 200))
+		return nil, fmt.Errorf("解析 OKX 响应失败: %w", err)
 	}
 	if string(envelope.Code) != "0" {
-		return nil, fmt.Errorf("OKX API 业务错误 code=%s message=%s", envelope.Code, envelope.Msg)
+		return nil, fmt.Errorf("OKX API 业务错误 code=%s", envelope.Code)
 	}
 	if len(envelope.Data) == 0 || strings.TrimSpace(string(envelope.Data)) == "null" {
 		return nil, fmt.Errorf("OKX 未返回明确的数据数组")
