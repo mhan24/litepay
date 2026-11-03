@@ -9,7 +9,7 @@ fi
 root=$(mktemp -d)
 cleanup() {
  docker rm -f litepay >/dev/null 2>&1 || true
- docker volume rm litepay-ci_litepay-data >/dev/null 2>&1 || true
+ for volume in $(docker volume ls -q --filter name=litepay-release-); do docker volume rm "$volume" >/dev/null 2>&1 || true; done
  rm -rf "$root"
 }
 trap cleanup EXIT

@@ -90,8 +90,15 @@ chmod 755 "$DEPLOY_PATH/litepay"
 chmod 440 "$DEPLOY_PATH/config.yaml"
 chown 0:10001 "$DEPLOY_PATH/config.yaml"
 docker tag "$new_image" litepay:go
+# Use a fresh Compose project: otherwise Compose may discover/reuse the renamed
+# rollback container by its old service labels instead of creating a new one.
+compose_args=(-p "litepay-release-$stamp" -f "$DEPLOY_PATH/docker-compose.yml")
+if [[ ${#volumes[@]} == 1 ]]; then
+  printf 'volumes:\n  litepay-data:\n    external: true\n    name: %s\n' "${volumes[0]}" > "$stage_dir/volume.yml"
+  compose_args+=(-f "$stage_dir/volume.yml")
+fi
 # Create without starting, so the gate exists before the first application instruction.
-(cd "$DEPLOY_PATH" && docker compose create --no-build)
+(cd "$DEPLOY_PATH" && docker compose "${compose_args[@]}" create --no-build)
 if [[ ${#volumes[@]} == 0 ]]; then
   while IFS= read -r volume; do
     [[ -z "$volume" ]] || volumes+=("$volume")
@@ -105,7 +112,7 @@ for volume in "${volumes[@]}"; do
   docker run --rm --read-only --user 10001:10001 --entrypoint /bin/sh -v "$volume:/app/data" "$new_image" \
     -c 'if [ -f /app/data/litepay.db ]; then exec /app/litepay -verify-db /app/data/litepay.db; fi'
 done
-(cd "$DEPLOY_PATH" && docker compose up -d --no-build)
+(cd "$DEPLOY_PATH" && docker compose "${compose_args[@]}" up -d --no-build)
 healthy=0
 for ((i=0;i<${LP_HEALTH_ATTEMPTS:-30};i++)); do
   if curl -fsS -m 3 http://127.0.0.1:3101/healthz >/dev/null; then

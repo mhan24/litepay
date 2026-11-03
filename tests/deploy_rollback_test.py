@@ -27,7 +27,9 @@ elif args[0]=='rm':
  else:s['old']=False
  save()
 elif args[0]=='compose':
- if 'create' in args or 'up' in args:s.update(main=True,generation='new');save()
+ if 'create' in args or 'up' in args:
+  if s.get('old') and '-p' not in args:sys.exit(1)
+  s.update(main=True,generation='new');save()
 elif args[0]=='run':
  cmd=' '.join(args);volume=root/'volume'
  if 'tar czf' in cmd:
