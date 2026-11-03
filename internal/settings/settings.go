@@ -337,7 +337,9 @@ func (m *Manager) Update(ctx context.Context, p Patch, operator string) error {
 			cli := binance.New(next.Binance.APIKey, next.Binance.APISecret, next.Binance.BaseURL, next.Binance.RecvWindow, next.Binance.Limit)
 			uid, err := cli.AccountUID(ctx)
 			if err != nil {
-				return fmt.Errorf("Binance 账户核验失败，请检查 API 凭据、读取权限、IP 白名单和网络")
+				// APIError 只携带有界分类与数字码，可以安全透出：没有它无法区分
+				// 网络不可达、IP 白名单和凭据错误（真实验收时靠它定位到 fake-ip DNS）。
+				return fmt.Errorf("Binance 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
 			}
 			if uid != next.Checkout.Binance.UID {
 				return fmt.Errorf("Binance API Key 所属账户与收款 UID 不一致")
@@ -349,7 +351,7 @@ func (m *Manager) Update(ctx context.Context, p Patch, operator string) error {
 			cli := okx.New(next.OKX.APIKey, next.OKX.APISecret, next.OKX.Passphrase, next.OKX.BaseURL, next.OKX.Limit)
 			uid, err := cli.AccountUID(ctx)
 			if err != nil {
-				return fmt.Errorf("OKX 账户核验失败，请检查 API 凭据、读取权限、IP 白名单和网络")
+				return fmt.Errorf("OKX 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
 			}
 			if uid != next.Checkout.OKX.UID {
 				return fmt.Errorf("OKX API Key 所属账户与收款 UID 不一致")
