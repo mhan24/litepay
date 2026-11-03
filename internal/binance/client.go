@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -19,26 +18,31 @@ import (
 
 	money "litepay/internal/amount"
 	"litepay/internal/httpx"
-	"litepay/internal/sign"
 )
 
 const maxStoredRawBytes = 16 << 10
 
 // Client 币安 API 客户端。
 type Client struct {
-	apiKey          string
-	apiSecret       string
-	baseURL         string
-	recvWindow      int
-	limit           int
-	http            *httpx.Client
-	requestMu       sync.Mutex
-	nextRequest     time.Time
-	requestInterval time.Duration
+	clockOffset      int64
+	lastRequestStart time.Time
+	backoffUntil     time.Time
+	apiKey           string
+	apiSecret        string
+	baseURL          string
+	recvWindow       int
+	limit            int
+	http             *httpx.Client
+	requestMu        sync.Mutex
+	nextRequest      time.Time
+	requestInterval  time.Duration
 }
 
 // New 创建客户端。
 func New(apiKey, apiSecret, baseURL string, recvWindow, limit int) *Client {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
 	if baseURL == "" {
 		baseURL = "https://api.binance.com"
 	}
@@ -85,34 +89,22 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	if c.apiKey == "" || c.apiSecret == "" {
 		return "", fmt.Errorf("未配置币安 API Key/Secret")
 	}
-	q := url.Values{}
-	q.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
-	q.Set("recvWindow", strconv.Itoa(c.recvWindow))
-	rawQuery := q.Encode()
-	signature := sign.HmacSHA256Hex(rawQuery, c.apiSecret)
-	fullURL := fmt.Sprintf("%s/api/v3/account?%s&signature=%s", c.baseURL, rawQuery, signature)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	body, err := c.signedGet(ctx, "/api/v3/account", nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("X-MBX-APIKEY", c.apiKey)
-	req.Header.Set("Accept", "application/json")
-	status, body, err := c.http.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("请求币安账户信息失败: %w", err)
-	}
-	if status != http.StatusOK {
-		return "", fmt.Errorf("币安账户接口返回 HTTP %d", status)
-	}
+
 	var payload struct {
 		UID flexString `json:"uid"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("解析币安账户信息失败: %w", err)
+		return "", &APIError{Kind: ErrorParse}
 	}
 	uid := strings.TrimSpace(string(payload.UID))
 	if uid == "" {
-		return "", fmt.Errorf("币安账户接口未返回 UID")
+		return "", &APIError{Kind: ErrorParse}
 	}
 	return uid, nil
 }
@@ -122,6 +114,8 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 // 端点：GET /sapi/v1/pay/transactions
 // 鉴权：X-MBX-APIKEY 头 + HMAC-SHA256 的 signature 查询参数
 func (c *Client) PayTransactions(ctx context.Context, start, end time.Time) ([]Transaction, error) {
+	ctx, cancel := context.WithTimeout(budgeted(ctx, 64), 30*time.Second)
+	defer cancel()
 	if c.apiKey == "" || c.apiSecret == "" {
 		return nil, fmt.Errorf("未配置币安 API Key/Secret")
 	}
@@ -143,7 +137,7 @@ func (c *Client) PayTransactions(ctx context.Context, start, end time.Time) ([]T
 	seen := make(map[string]struct{})
 	for requests := 0; len(pending) > 0; requests++ {
 		if requests >= 63 {
-			return nil, fmt.Errorf("币安历史查询超过分窗上限，未完整读取支付窗口")
+			return nil, &APIError{Kind: ErrorIncomplete}
 		}
 		w := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
@@ -153,7 +147,7 @@ func (c *Client) PayTransactions(ctx context.Context, start, end time.Time) ([]T
 		}
 		if rawCount >= c.limit {
 			if w.start >= w.end {
-				return nil, fmt.Errorf("币安同一毫秒的流水超过单次上限，无法安全确认完整历史")
+				return nil, &APIError{Kind: ErrorIncomplete}
 			}
 			mid := w.start + (w.end-w.start)/2
 			pending = append(pending, window{mid + 1, w.end}, window{w.start, mid})
@@ -170,21 +164,7 @@ func (c *Client) PayTransactions(ctx context.Context, start, end time.Time) ([]T
 }
 
 func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Transaction, int, error) {
-	c.requestMu.Lock()
-	defer c.requestMu.Unlock()
-	if wait := time.Until(c.nextRequest); wait > 0 {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return nil, 0, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	c.nextRequest = time.Now().Add(c.requestInterval)
 	q := url.Values{}
-	q.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
-	q.Set("recvWindow", strconv.Itoa(c.recvWindow))
 	q.Set("limit", strconv.Itoa(c.limit))
 	if !start.IsZero() {
 		q.Set("startTime", strconv.FormatInt(start.UnixMilli(), 10))
@@ -193,25 +173,9 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 		q.Set("endTime", strconv.FormatInt(end.UnixMilli(), 10))
 	}
 
-	// 注意：签名必须基于实际发送的 query string（url.Values.Encode 会按键名排序）
-	rawQuery := q.Encode()
-	signature := sign.HmacSHA256Hex(rawQuery, c.apiSecret)
-
-	fullURL := fmt.Sprintf("%s/sapi/v1/pay/transactions?%s&signature=%s", c.baseURL, rawQuery, signature)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	body, err := c.signedGet(ctx, "/sapi/v1/pay/transactions", q)
 	if err != nil {
 		return nil, 0, err
-	}
-	req.Header.Set("X-MBX-APIKEY", c.apiKey)
-	req.Header.Set("Accept", "application/json")
-
-	status, body, err := c.http.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("请求币安 API 失败: %w", err)
-	}
-	if status != http.StatusOK {
-		return nil, 0, fmt.Errorf("币安 API 返回 HTTP %d", status)
 	}
 
 	var payload struct {
@@ -221,16 +185,17 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 		Data    []json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, 0, fmt.Errorf("解析币安响应失败: %w", err)
+		return nil, 0, &APIError{Kind: ErrorParse}
 	}
 
 	// 币安业务码：000000 表示成功
 	if string(payload.Code) != "000000" || !payload.Success {
-		return nil, 0, fmt.Errorf("币安 API 业务错误 code=%s", payload.Code)
+		code, _ := strconv.Atoi(string(payload.Code))
+		return nil, 0, &APIError{Kind: ErrorBusiness, Code: code}
 	}
 
 	if payload.Data == nil {
-		return nil, 0, fmt.Errorf("币安未返回明确的历史记录数组")
+		return nil, 0, &APIError{Kind: ErrorParse}
 	}
 	out := make([]Transaction, 0, len(payload.Data))
 	seenRecords := make(map[string]struct{}, len(payload.Data))
@@ -251,14 +216,14 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			} `json:"receiverInfo"`
 		}
 		if err := json.Unmarshal(raw, &d); err != nil {
-			return nil, 0, fmt.Errorf("解析币安转账记录失败: %w", err)
+			return nil, 0, &APIError{Kind: ErrorParse}
 		}
 		id := strings.TrimSpace(string(d.TransactionID))
 		if id == "" {
-			return nil, 0, fmt.Errorf("币安历史记录缺少流水号")
+			return nil, 0, &APIError{Kind: ErrorParse}
 		}
 		if _, exists := seenRecords[id]; exists {
-			return nil, 0, fmt.Errorf("币安响应包含重复流水 %s", id)
+			return nil, 0, &APIError{Kind: ErrorParse}
 		}
 		seenRecords[id] = struct{}{}
 		rawAmount := string(d.Amount)
@@ -267,14 +232,14 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 		}
 		amountRat, err := money.Decimal(rawAmount)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, &APIError{Kind: ErrorParse}
 		}
 		amount, _ := amountRat.Float64()
 		if math.IsNaN(amount) || math.IsInf(amount, 0) {
-			return nil, 0, fmt.Errorf("币安转账 %s 的金额不是有限数字", id)
+			return nil, 0, &APIError{Kind: ErrorParse}
 		}
 		if d.TransactionTime <= 0 {
-			return nil, 0, fmt.Errorf("币安转账 %s 缺少有效时间", id)
+			return nil, 0, &APIError{Kind: ErrorParse}
 		}
 		base := Transaction{
 			EventID: id, CanonicalID: id,
@@ -296,12 +261,12 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			for i, fund := range d.FundsDetail {
 				fundRat, err := money.Decimal(string(fund.Amount))
 				if err != nil {
-					return nil, 0, err
+					return nil, 0, &APIError{Kind: ErrorParse}
 				}
 				fundAmount, _ := fundRat.Float64()
 				fundCurrency := strings.ToUpper(strings.TrimSpace(string(fund.Currency)))
 				if math.IsNaN(fundAmount) || math.IsInf(fundAmount, 0) {
-					return nil, 0, fmt.Errorf("币安转账 %s 的明细金额不是有限数字", id)
+					return nil, 0, &APIError{Kind: ErrorParse}
 				}
 				if fundAmount == 0 || fundCurrency == "" {
 					continue
@@ -327,12 +292,12 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			// Never reinterpret a malformed record as a smaller payment just
 			// because one detail happens to match an order.
 			if len(d.FundsDetail) == 1 && detailDirectionKnown && detailTotal.Cmp(amountRat) != 0 {
-				return nil, 0, fmt.Errorf("币安转账 %s 的明细合计与顶层金额不一致", id)
+				return nil, 0, &APIError{Kind: ErrorParse}
 			}
 			continue
 		}
 		if amount == 0 {
-			return nil, 0, fmt.Errorf("币安转账 %s 缺少有效金额", id)
+			return nil, 0, &APIError{Kind: ErrorParse}
 		}
 		base.Amount = abs(amount)
 		base.AmountText = strings.TrimPrefix(string(d.Amount), "-")

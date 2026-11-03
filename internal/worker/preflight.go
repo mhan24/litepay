@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"litepay/internal/binance"
 	"litepay/internal/config"
 	"litepay/internal/settings"
 	"time"
@@ -34,6 +36,10 @@ func Preflight(ctx context.Context, cfg *config.Config) []PreflightResult {
 			}
 			if err != nil {
 				result.Diagnosis = "account_uid_or_history_check_failed; check read permission, UID, clock, network and limits locally"
+				var apiErr *binance.APIError
+				if errors.As(err, &apiErr) {
+					result.Diagnosis = string(apiErr.Kind) + "; account UID validation remains required"
+				}
 			} else {
 				result.AccountAndHistoryOK = true
 				result.Records = len(txs)

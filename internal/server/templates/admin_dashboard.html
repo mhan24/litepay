@@ -115,7 +115,7 @@
           <div class="v">读取 {{.OKXPoll.LastFetched}} 条 · 确认 {{.OKXPoll.LastMatched}} 笔{{if or .OKXPoll.SkipType .OKXPoll.SkipCurrency .OKXPoll.SkipReceiver .OKXPoll.SkipAmount .OKXPoll.SkipDuplicate}} · 跳过 类型{{.OKXPoll.SkipType}}/币种{{.OKXPoll.SkipCurrency}}/收款人{{.OKXPoll.SkipReceiver}}/金额{{.OKXPoll.SkipAmount}}/已入账{{.OKXPoll.SkipDuplicate}}{{end}}</div>
           <div class="k">累计确认</div>
           <div class="v">Binance {{.Poll.TotalMatched}} 笔 · OKX {{.OKXPoll.TotalMatched}} 笔</div>
-          {{if .Poll.LastError}}<div class="k">Binance 异常</div><div class="v" style="color:var(--danger);font-size:12px">{{.Poll.LastError}}</div>{{end}}
+          {{if .Poll.LastError}}<div class="k">Binance 异常</div><div class="v" style="color:var(--danger);font-size:12px">{{.Poll.LastError}}{{if .Poll.ErrorKind}} · {{.Poll.ErrorKind}}{{end}}</div>{{end}}
           {{if .OKXPoll.LastError}}<div class="k">OKX 异常</div><div class="v" style="color:var(--danger);font-size:12px">{{.OKXPoll.LastError}}</div>{{end}}
           <div class="k">数据库</div><div class="v">{{.DBSize}}</div>
           <div class="k">网关地址</div><div class="v mono" style="font-size:12px">{{.BaseURL}}</div>

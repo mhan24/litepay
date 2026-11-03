@@ -2,11 +2,11 @@ package binance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -99,7 +99,8 @@ func TestAuditFundsDetailMustAccountForTopLevelAmount(t *testing.T) {
 	cli := New("key", "secret", srv.URL, 5000, 100)
 	cli.UseTestTransport()
 	_, err := cli.PayTransactions(context.Background(), time.UnixMilli(1000), time.UnixMilli(4000))
-	if err == nil || !strings.Contains(err.Error(), "明细合计") {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Kind != ErrorParse {
 		t.Fatalf("incomplete funds detail accepted: %v", err)
 	}
 }
@@ -148,7 +149,7 @@ func TestRequestBudgetWaitCanBeCanceled(t *testing.T) {
 	cli.nextRequest = time.Now().Add(time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := cli.fetchWindow(ctx, time.Now().Add(-time.Minute), time.Now()); err != context.Canceled {
+	if _, _, err := cli.fetchWindow(ctx, time.Now().Add(-time.Minute), time.Now()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled scan continued into API request: %v", err)
 	}
 }

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"litepay/internal/amount"
@@ -24,6 +26,7 @@ import (
 
 // PollStats 到账确认运行状态快照（供后台展示）。
 type PollStats struct {
+	ErrorKind           string    `json:"error_kind"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
 	Enabled             bool      `json:"enabled"`
 	Provider            string    `json:"provider"`
@@ -79,6 +82,7 @@ const (
 
 // Poller 同时确认 Binance 和 OKX 到账；每笔订单只按自己选择的平台确认。
 type Poller struct {
+	scanWaiting atomic.Bool
 	workMu      sync.Mutex // Shared clients and UID checks must not race with customer inquiries.
 	inquiryNext map[string]time.Time
 	cfg         *settings.Manager
@@ -289,7 +293,9 @@ type scanTotals struct {
 }
 
 func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) {
+	p.scanWaiting.Store(true)
 	p.workMu.Lock()
+	p.scanWaiting.Store(false)
 	defer p.workMu.Unlock()
 	p.setStats(provider, func(s *PollStats) {
 		s.LastRunAt = time.Now()
@@ -355,6 +361,7 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 		s.ConsecutiveFailures = 0
 		s.LastOKAt = time.Now()
 		s.LastError = ""
+		s.ErrorKind = ""
 		if plan.gap != nil || (cursor != nil && cursor.GapEnd != nil) {
 			s.LastError = "存在超出自动回溯范围的历史缺口，需人工对账"
 		}
@@ -381,6 +388,11 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 
 // failScan 记录一次失败的扫描：游标不推进，失败原因落库供后台排查。
 func (p *Poller) failScan(ctx context.Context, provider string, err error) {
+	kind := "exchange_or_storage"
+	var apiErr *binance.APIError
+	if errors.As(err, &apiErr) {
+		kind = string(apiErr.Kind)
+	}
 	p.failures[provider]++
 	shift := p.failures[provider]
 	if shift > 6 {
@@ -388,6 +400,7 @@ func (p *Poller) failScan(ctx context.Context, provider string, err error) {
 	}
 	p.retryAfter[provider] = time.Now().Add(time.Duration(1<<shift) * 5 * time.Second)
 	p.setStats(provider, func(s *PollStats) {
+		s.ErrorKind = kind
 		s.LastError = "交易所查询或本地持久化失败，请检查凭据、权限、限流与数据库"
 		s.Provider = provider
 		s.ConsecutiveFailures++

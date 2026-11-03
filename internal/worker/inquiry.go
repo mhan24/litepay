@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"litepay/internal/binance"
 	"litepay/internal/config"
 	"litepay/internal/maintenance"
 	"litepay/internal/model"
@@ -35,11 +36,11 @@ func (p *Poller) CheckPayment(ctx context.Context, tradeNo, reference string) (s
 	if !validPaymentReference(reference) {
 		return "", ErrInquiryInvalid
 	}
-	if maintenance.Blocked() || !p.workMu.TryLock() {
+	if maintenance.Blocked() || p.scanWaiting.Load() || !p.workMu.TryLock() {
 		return "", ErrInquiryBusy
 	}
 	defer p.workMu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	o, err := p.store.GetByTradeNo(ctx, tradeNo)
 	if err != nil {
@@ -83,6 +84,7 @@ func (p *Poller) CheckPayment(ctx context.Context, tradeNo, reference string) (s
 	}()
 	var txs []incomingTransaction
 	if provider == config.ProviderBinance {
+		ctx = binance.WithRequestBudget(ctx, 4)
 		end := time.Now()
 		if o.ExpiredAt.Before(end) {
 			end = o.ExpiredAt

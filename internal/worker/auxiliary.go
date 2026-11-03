@@ -13,7 +13,7 @@ import (
 
 // ReconcileOKXBills is an explicit admin diagnostic. No background dual polling and no payment writes.
 func (p *Poller) ReconcileOKXBills(ctx context.Context) error {
-	if maintenance.Blocked() || !p.workMu.TryLock() {
+	if maintenance.Blocked() || p.scanWaiting.Load() || !p.workMu.TryLock() {
 		return ErrInquiryBusy
 	}
 	defer p.workMu.Unlock()
