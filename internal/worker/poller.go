@@ -48,6 +48,7 @@ type PollerStats struct {
 }
 
 type incomingTransaction struct {
+	AmountText   string
 	ID           string
 	Type         string
 	Amount       float64
@@ -430,6 +431,7 @@ func (p *Poller) scanWindow(ctx context.Context, cfg *config.Config, provider st
 				Provider:        provider,
 				Type:            tx.Type,
 				Amount:          tx.Amount,
+				AmountText:      tx.AmountText,
 				Currency:        tx.Currency,
 				ReceiverID:      tx.ReceiverID,
 				ReceiverAddr:    tx.ReceiverAddr,
@@ -552,7 +554,7 @@ func (b *txObservationBook) observe(tx *incomingTransaction, reason, orderTradeN
 	}
 	b.items[tx.ID] = model.TxObservation{
 		Provider: b.provider, TransactionID: tx.ID, Type: tx.Type,
-		Amount: tx.Amount, Currency: tx.Currency, ReceiverID: tx.ReceiverID,
+		Amount: tx.Amount, AmountText: tx.AmountText, Currency: tx.Currency, ReceiverID: tx.ReceiverID,
 		TransactionTime: tx.Time, Reason: reason, ReasonRank: rank,
 		OrderTradeNo: orderTradeNo, Raw: tx.Raw,
 	}
@@ -579,7 +581,14 @@ func (b *txObservationBook) pending() []model.TxObservation {
 }
 
 func orderMatchesTransaction(o *model.Order, tx *incomingTransaction, amountPrecision int) bool {
-	return amount.MatchRounded(amount.FormatPrecision(o.PayAmount, o.AmountPrecision), tx.Amount)
+	expected := amount.FormatPrecision(o.PayAmount, o.AmountPrecision)
+	if o.PayUnits != 0 {
+		expected = amount.Text(o.PayUnits, o.AmountPrecision)
+	}
+	if tx.AmountText != "" {
+		return amount.MatchDecimal(expected, tx.AmountText)
+	}
+	return amount.MatchRounded(expected, tx.Amount)
 }
 
 func (p *Poller) binanceTransactions(ctx context.Context, cfg *config.Config,
@@ -616,7 +625,7 @@ func (p *Poller) binanceTransactions(ctx context.Context, cfg *config.Config,
 	for _, row := range rows {
 		out = append(out, incomingTransaction{
 			ID: row.TransactionID, Type: strings.ToUpper(row.OrderType),
-			Amount: row.Amount, Currency: strings.ToUpper(row.Currency),
+			Amount: row.Amount, AmountText: row.AmountText, Currency: strings.ToUpper(row.Currency),
 			Time: row.TransactionTime, ReceiverID: row.ReceiverID,
 			ReceiverAddr: row.ReceiverID, Incoming: row.Incoming, Raw: row.Raw,
 		})
@@ -688,7 +697,7 @@ func (p *Poller) okxTransactions(ctx context.Context, cfg *config.Config, since,
 			}
 			seen[key] = struct{}{}
 			out = append(out, incomingTransaction{
-				ID: key, Type: "3", Amount: row.Amount,
+				ID: key, Type: "3", Amount: row.Amount, AmountText: row.AmountText,
 				Currency: row.Currency, Time: row.Timestamp,
 				ReceiverID: uid, ReceiverAddr: uid, Incoming: true, Raw: row.Raw,
 			})

@@ -42,6 +42,7 @@ type Order struct {
 	// 展示精度处理，尾差只用于区分同金额并发订单。
 	OriginMoney     string     `gorm:"size:32" json:"origin_money"`
 	OriginCurrency  string     `gorm:"size:16" json:"origin_currency"`
+	PayUnits        int64      `gorm:"index"`
 	PayAmount       float64    `gorm:"column:pay_amount" json:"pay_amount"`
 	Currency        string     `gorm:"size:16" json:"currency"`
 	AmountPrecision int        `gorm:"not null;default:2" json:"amount_precision"`
@@ -89,11 +90,12 @@ func (Order) TableName() string { return "orders" }
 // 通过对 (provider, currency, amount) 建唯一索引，币安和 OKX 可各自
 // 使用相同的精确金额而不会互相占用。
 type AmountSlot struct {
-	AmountPrecision int       `gorm:"not null;default:2"`
-	ID              uint      `gorm:"primaryKey"`
-	Provider        string    `gorm:"size:16;uniqueIndex:uk_slot_provider_currency_amount"`
-	Currency        string    `gorm:"size:16;uniqueIndex:uk_slot_provider_currency_amount"`
-	Amount          float64   `gorm:"uniqueIndex:uk_slot_provider_currency_amount"`
+	AmountPrecision int    `gorm:"not null;default:2"`
+	ID              uint   `gorm:"primaryKey"`
+	Provider        string `gorm:"size:16;uniqueIndex:uk_slot_units,where:amount_units > 0"`
+	Currency        string `gorm:"size:16;uniqueIndex:uk_slot_units,where:amount_units > 0"`
+	AmountUnits     int64  `gorm:"uniqueIndex:uk_slot_units,where:amount_units > 0"`
+	Amount          float64
 	OrderID         uint      `gorm:"index"`
 	TradeNo         string    `gorm:"size:64;index"`
 	ExpiresAt       time.Time `gorm:"index"`
@@ -106,9 +108,10 @@ func (AmountSlot) TableName() string { return "amount_slots" }
 // IncomingTx 已处理过的收款流水（幂等表）。交易所流水号只在各自通道内唯一，
 // 因此使用 (provider, transaction_id) 复合主键，避免币安和 OKX 互相碰撞。
 type IncomingTx struct {
-	Provider        string    `gorm:"primaryKey;size:16"`
-	TransactionID   string    `gorm:"primaryKey;size:128"`
-	Type            string    `gorm:"size:16"`
+	Provider        string `gorm:"primaryKey;size:16"`
+	TransactionID   string `gorm:"primaryKey;size:128"`
+	Type            string `gorm:"size:16"`
+	AmountText      string
 	Amount          float64   `gorm:"column:amount"`
 	Currency        string    `gorm:"size:16;index"`
 	ReceiverID      string    `gorm:"size:128"`
@@ -186,9 +189,10 @@ func TxObservationRank(reason string) int {
 // resolved，后台不再展示；ReasonRank 保证多次观察之间只保留最严重的
 // 失败原因。
 type TxObservation struct {
-	Provider        string    `gorm:"primaryKey;size:16"`
-	TransactionID   string    `gorm:"primaryKey;size:128"`
-	Type            string    `gorm:"size:16"`
+	Provider        string `gorm:"primaryKey;size:16"`
+	TransactionID   string `gorm:"primaryKey;size:128"`
+	Type            string `gorm:"size:16"`
+	AmountText      string
 	Amount          float64   `gorm:"column:amount"`
 	Currency        string    `gorm:"size:16;index"`
 	ReceiverID      string    `gorm:"size:128"`

@@ -97,6 +97,9 @@ func Open(path string) (*Store, error) {
 		&model.Credential{}); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
+	if err := migrateFixedAmounts(db); err != nil {
+		return nil, err
+	}
 	if err := migrateObservationLedger(db); err != nil {
 		return nil, fmt.Errorf("回填未归属流水账本失败: %w", err)
 	}
@@ -194,22 +197,15 @@ func (s *Store) CreateOrReuseCashierOrder(ctx context.Context, in CreateOrderInp
 				result = &existing
 				return nil
 			}
-			// 官方 BEpusdt 会以最新参数重建可替换订单。未选择付款方式时
-			// 没有金额档位，重复建单继续幂等；一旦用户已选择平台和币种，
-			// 商户显式重建就要使用新金额与有效期，不能沿用旧支付信息。
-			if in.ReplaceReady && existing.Status == model.StatusReady &&
-				!existing.ExpireFinalized {
-				// 但完全相同的重复请求是同一次建单的重试，不是新的支付约定。
-				// 若照旧重建，用户页面上已展示的收款地址与金额会立即失效，
-				// 已经付款的转账将再也无法核销。
-				if paymentContractUnchanged(&existing, in) {
-					result = &existing
-					return nil
+			// An already displayed payment is immutable to merchant request changes.
+			if existing.Status == model.StatusReady && !existing.ExpireFinalized {
+				if !paymentContractUnchanged(&existing, in) {
+					return errors.New("商户订单已有有效支付约定；参数冲突，请使用新的商户订单号")
 				}
-				if err := retireOrder(tx, &existing); err != nil {
-					return err
-				}
-			} else if (existing.Status == model.StatusPending || existing.Status == model.StatusReady) &&
+				result = &existing
+				return nil
+			}
+			if (existing.Status == model.StatusPending || existing.Status == model.StatusReady) &&
 				time.Now().Before(existing.ExpiredAt) {
 				result = &existing
 				return nil
@@ -272,15 +268,12 @@ func paymentContractUnchanged(o *model.Order, in CreateOrderInput) bool {
 // amountMatch 按十进制修约比较两个金额字符串，避免 "2.5" 与 "2.50" 被当成
 // 不同金额而触发不必要的重建。
 func amountMatch(a, b string) bool {
-	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
-	if a == b {
-		return true
-	}
-	actual, err := strconv.ParseFloat(b, 64)
+	left, err := amount.Decimal(a)
 	if err != nil {
 		return false
 	}
-	return amount.MatchRounded(a, actual)
+	right, err := amount.Decimal(b)
+	return err == nil && left.Cmp(right) == 0
 }
 
 // retireOrder 静默结束不再允许支付的旧订单。
@@ -340,6 +333,16 @@ func (s *Store) MatchableOrders(ctx context.Context, provider string, grace time
 func (s *Store) SelectPayment(ctx context.Context, tradeNo, provider, currency string,
 	payAddress string, baseAmount, step float64, maxOffset int, minAmount float64,
 	amountPrecision int, slotGrace time.Duration) (*model.Order, error) {
+	return s.selectPaymentDecimal(ctx, tradeNo, provider, currency, payAddress, strconv.FormatFloat(baseAmount, 'f', -1, 64), step, maxOffset, minAmount, amountPrecision, slotGrace)
+}
+
+// SelectPaymentDecimal is the HTTP path: keep merchant amount as decimal text.
+func (s *Store) SelectPaymentDecimal(ctx context.Context, tradeNo, provider, currency, payAddress, baseText string,
+	step float64, maxOffset int, minAmount float64, amountPrecision int, slotGrace time.Duration) (*model.Order, error) {
+	return s.selectPaymentDecimal(ctx, tradeNo, provider, currency, payAddress, baseText, step, maxOffset, minAmount, amountPrecision, slotGrace)
+}
+func (s *Store) selectPaymentDecimal(ctx context.Context, tradeNo, provider, currency, payAddress, baseText string,
+	step float64, maxOffset int, minAmount float64, amountPrecision int, slotGrace time.Duration) (*model.Order, error) {
 	var updated model.Order
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var order model.Order
@@ -379,25 +382,40 @@ func (s *Store) SelectPayment(ctx context.Context, tradeNo, provider, currency s
 		// ends, preventing late transfers from being credited to another order.
 		var incompatible int64
 		if err := tx.Model(&model.AmountSlot{}).
-			Where("amount_slots.provider = ? AND amount_slots.currency = ? AND amount_slots.expires_at > ? AND amount_slots.amount_precision <> ?", provider, currency, time.Now(), amountPrecision).
+			Where("amount_slots.provider = ? AND amount_slots.currency = ? AND (amount_slots.order_id <> 0 OR amount_slots.expires_at > ?) AND amount_slots.amount_precision <> ?", provider, currency, time.Now(), amountPrecision).
 			Count(&incompatible).Error; err != nil {
 			return err
 		}
 		if incompatible > 0 {
 			return errors.New("该通道仍有其他精度的金额占用，请等待其结束后重试")
 		}
-		step = amount.Round(step, amountPrecision)
+		stepUnits, err := amount.FloatUnits(step, amountPrecision)
+		if err != nil {
+			return err
+		}
+		baseUnits, err := amount.Units(baseText, amountPrecision)
+		if err != nil {
+			return err
+		}
+		step = amount.Float(stepUnits)
 		if step <= 0 {
 			return errors.New("金额步长必须大于 0")
 		}
-		base := amount.Round(baseAmount, amountPrecision)
+		base := amount.Float(baseUnits)
 		if base < amount.Round(minAmount, amountPrecision) {
 			return fmt.Errorf("订单应付金额低于最低金额 %.2f %s", minAmount, currency)
 		}
 		for i := 1; i <= maxOffset; i++ {
-			candidate := amount.Round(base+float64(i)*step, amountPrecision)
+			if stepUnits > (amount.MaxUnits-baseUnits)/int64(i) {
+				return errors.New("金额档位溢出")
+			}
+			candidateUnits := baseUnits + int64(i)*stepUnits
+			candidate := amount.Float(candidateUnits)
+			if roundTrip, err := amount.FloatUnits(candidate, amountPrecision); err != nil || roundTrip != candidateUnits {
+				return errors.New("金额无法兼容商户 JSON 数值精度")
+			}
 			slot := model.AmountSlot{
-				Provider: provider, Currency: currency, Amount: candidate, TradeNo: order.TradeNo, AmountPrecision: amountPrecision,
+				Provider: provider, Currency: currency, Amount: candidate, AmountUnits: candidateUnits, TradeNo: order.TradeNo, AmountPrecision: amountPrecision,
 				OrderID: order.ID, ExpiresAt: order.ExpiredAt.Add(slotGrace),
 			}
 			res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&slot)
@@ -408,7 +426,7 @@ func (s *Store) SelectPayment(ctx context.Context, tradeNo, provider, currency s
 				// 金额已被占用。占用者是本订单此前释放的档位（重选同一金额）
 				// 时重新绑定；否则该金额处于冷却期，尝试下一个偏移。
 				var existing model.AmountSlot
-				if err := tx.Where("provider = ? AND currency = ? AND amount = ?", provider, currency, candidate).
+				if err := tx.Where("provider = ? AND currency = ? AND amount_units = ?", provider, currency, candidateUnits).
 					First(&existing).Error; err != nil {
 					return err
 				}
@@ -431,7 +449,7 @@ func (s *Store) SelectPayment(ctx context.Context, tradeNo, provider, currency s
 			if err := tx.Model(&order).Updates(map[string]any{
 				"currency":   currency,
 				"collection": provider, "pay_address": payAddress,
-				"pay_amount": candidate, "slot_offset": i,
+				"pay_amount": candidate, "pay_units": candidateUnits, "slot_offset": i,
 				"amount_precision": amountPrecision, "selected_at": selectedAt,
 				"status": model.StatusReady, "updated_at": time.Now(),
 			}).Error; err != nil {
@@ -440,6 +458,7 @@ func (s *Store) SelectPayment(ctx context.Context, tradeNo, provider, currency s
 			order.Currency, order.Collection = currency, provider
 			order.PayAddress = payAddress
 			order.PayAmount, order.SlotOffset = candidate, i
+			order.PayUnits = candidateUnits
 			order.AmountPrecision, order.SelectedAt = amountPrecision, &selectedAt
 			order.Status = model.StatusReady
 			updated = order
@@ -567,7 +586,16 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 				strings.TrimSpace(tx.ReceiverAddr)) {
 			return rejectClaim("收款 UID 与订单不一致")
 		}
-		if !amount.MatchRounded(amount.FormatPrecision(current.PayAmount, current.AmountPrecision), tx.Amount) {
+		actualText := tx.AmountText
+		if actualText == "" {
+			actualText = strconv.FormatFloat(tx.Amount, 'f', -1, 64)
+		}
+		tx.AmountText = actualText
+		expected := amount.FormatPrecision(current.PayAmount, current.AmountPrecision)
+		if current.PayUnits != 0 {
+			expected = amount.Text(current.PayUnits, current.AmountPrecision)
+		}
+		if !amount.MatchDecimal(expected, actualText) {
 			return rejectClaim("收款金额与订单应付金额不一致")
 		}
 		if current.Status != model.StatusReady &&

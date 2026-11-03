@@ -13,8 +13,11 @@ import (
 
 // Round 四舍五入到指定小数位（2~6）。
 func Round(v float64, precision int) float64 {
-	factor := math.Pow10(normalizePrecision(precision))
-	return math.Round(v*factor) / factor
+	u, err := FloatUnits(v, normalizePrecision(precision))
+	if err != nil {
+		return math.NaN()
+	}
+	return Float(u)
 }
 
 // FormatPrecision 按指定小数位格式化，不做多余尾零截断。

@@ -392,8 +392,8 @@ func (h *Handlers) selectPayment(c *gin.Context) {
 	} else {
 		payAddress = cfg.Checkout.Binance.UID
 	}
-	updated, err := h.st.SelectPayment(c.Request.Context(), tradeNo, provider, currency,
-		payAddress, origin,
+	updated, err := h.st.SelectPaymentDecimal(c.Request.Context(), tradeNo, provider, currency,
+		payAddress, o.OriginMoney,
 		cfg.Order.AmountStep, cfg.Order.MaxOffset, cfg.Order.MinAmount,
 		cfg.Order.AmountPrecision,
 		time.Duration(cfg.Order.SlotGraceSeconds)*time.Second)

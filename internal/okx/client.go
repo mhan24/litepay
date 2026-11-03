@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	money "litepay/internal/amount"
 	"litepay/internal/httpx"
 	"litepay/internal/sign"
 )
@@ -65,6 +66,7 @@ func (c *Client) UseTestTransport() {
 
 // Deposit 一条 OKX 充值历史记录。
 type Deposit struct {
+	AmountText     string
 	DepositID      string
 	FromWithdrawID string
 	TransactionID  string
@@ -182,7 +184,11 @@ func (c *Client) depositHistoryPage(ctx context.Context, currency string, after 
 	}
 	seen := make(map[string]struct{}, len(rows))
 	for i, row := range rows {
-		amount, err := strconv.ParseFloat(string(row.Amount), 64)
+		decimal, err := money.Decimal(string(row.Amount))
+		if err != nil {
+			return nil, fmt.Errorf("解析 OKX 充值金额失败: %w", err)
+		}
+		amount, _ := decimal.Float64()
 		if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) {
 			return nil, fmt.Errorf("解析 OKX 充值金额失败: %w", err)
 		}
@@ -209,6 +215,7 @@ func (c *Client) depositHistoryPage(ctx context.Context, currency string, after 
 			TransactionID:  string(row.TransactionID),
 			Currency:       strings.ToUpper(string(row.Currency)),
 			Amount:         amount,
+			AmountText:     string(row.Amount),
 			State:          strings.TrimSpace(string(row.State)),
 			Type:           depositType,
 			Timestamp:      time.UnixMilli(int64(row.Timestamp)),

@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	money "litepay/internal/amount"
 	"litepay/internal/httpx"
 	"litepay/internal/sign"
 )
@@ -56,6 +58,7 @@ type Transaction struct {
 	OrderType       string    `json:"orderType"`
 	TransactionID   string    `json:"transactionId"`
 	TransactionTime time.Time `json:"transactionTime"`
+	AmountText      string    `json:"amount_text"`
 	Amount          float64   `json:"amount"` // 绝对值；收支方向由 Incoming 表示
 	Incoming        bool      `json:"incoming"`
 	Currency        string    `json:"currency"`
@@ -211,10 +214,10 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			OrderType       flexString `json:"orderType"`
 			TransactionID   flexString `json:"transactionId"`
 			TransactionTime flexInt64  `json:"transactionTime"`
-			Amount          flexFloat  `json:"amount"` // 正数收入、负数支出
+			Amount          flexString `json:"amount"` // 正数收入、负数支出
 			Currency        flexString `json:"currency"`
 			FundsDetail     []struct {
-				Amount   flexFloat  `json:"amount"`
+				Amount   flexString `json:"amount"`
 				Currency flexString `json:"currency"`
 			} `json:"fundsDetail"`
 			ReceiverInfo struct {
@@ -232,7 +235,15 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			return nil, 0, fmt.Errorf("币安响应包含重复流水 %s", id)
 		}
 		seenRecords[id] = struct{}{}
-		amount := float64(d.Amount)
+		rawAmount := string(d.Amount)
+		if rawAmount == "" && len(d.FundsDetail) > 0 {
+			rawAmount = "0"
+		}
+		amountRat, err := money.Decimal(rawAmount)
+		if err != nil {
+			return nil, 0, err
+		}
+		amount, _ := amountRat.Float64()
 		if math.IsNaN(amount) || math.IsInf(amount, 0) {
 			return nil, 0, fmt.Errorf("币安转账 %s 的金额不是有限数字", id)
 		}
@@ -251,9 +262,13 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			// absent/zero do we infer direction from each detail, because a
 			// positive detail under a missing top-level amount is still income.
 			detailDirectionKnown := amount != 0
-			detailTotal := 0.0
+			detailTotal := new(big.Rat)
 			for i, fund := range d.FundsDetail {
-				fundAmount := float64(fund.Amount)
+				fundRat, err := money.Decimal(string(fund.Amount))
+				if err != nil {
+					return nil, 0, err
+				}
+				fundAmount, _ := fundRat.Float64()
 				fundCurrency := strings.ToUpper(strings.TrimSpace(string(fund.Currency)))
 				if math.IsNaN(fundAmount) || math.IsInf(fundAmount, 0) {
 					return nil, 0, fmt.Errorf("币安转账 %s 的明细金额不是有限数字", id)
@@ -261,12 +276,10 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 				if fundAmount == 0 || fundCurrency == "" {
 					continue
 				}
-				detailTotal += fundAmount
-				if math.IsNaN(detailTotal) || math.IsInf(detailTotal, 0) {
-					return nil, 0, fmt.Errorf("币安转账 %s 的明细金额溢出", id)
-				}
+				detailTotal.Add(detailTotal, fundRat)
 				item := base
 				item.Amount = abs(fundAmount)
+				item.AmountText = strings.TrimPrefix(string(fund.Amount), "-")
 				if detailDirectionKnown {
 					item.Incoming = amount > 0 && fundAmount > 0
 				} else {
@@ -278,7 +291,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			}
 			// Never reinterpret a malformed record as a smaller payment just
 			// because one detail happens to match an order.
-			if detailDirectionKnown && math.Abs(detailTotal-amount) > 1e-9 {
+			if detailDirectionKnown && detailTotal.Cmp(amountRat) != 0 {
 				return nil, 0, fmt.Errorf("币安转账 %s 的明细合计与顶层金额不一致", id)
 			}
 			continue
@@ -287,6 +300,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			return nil, 0, fmt.Errorf("币安转账 %s 缺少有效金额", id)
 		}
 		base.Amount = abs(amount)
+		base.AmountText = strings.TrimPrefix(string(d.Amount), "-")
 		base.Incoming = amount > 0
 		base.Currency = strings.ToUpper(strings.TrimSpace(string(d.Currency)))
 		out = append(out, base)

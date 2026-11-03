@@ -89,6 +89,10 @@ func BuildNotifyParams(o *model.Order) map[string]string {
 	if token == "" {
 		token = strings.TrimSpace(o.ReceiveAddr)
 	}
+	actual := strconv.FormatFloat(amount.Round(o.PayAmount, o.AmountPrecision), 'f', -1, 64)
+	if o.PayUnits != 0 {
+		actual = strings.TrimRight(strings.TrimRight(amount.Text(o.PayUnits, o.AmountPrecision), "0"), ".")
+	}
 	return map[string]string{
 		"trade_id": o.TradeNo,
 		"order_id": o.OutTradeNo,
@@ -96,7 +100,7 @@ func BuildNotifyParams(o *model.Order) map[string]string {
 		// Dujiao decodes actual_amount as a JSON number and re-signs its
 		// numeric representation. Round at the configured precision, then
 		// remove insignificant trailing zeroes so e.g. 2.5100 -> 2.51.
-		"actual_amount":        strconv.FormatFloat(amount.Round(o.PayAmount, o.AmountPrecision), 'f', -1, 64),
+		"actual_amount":        actual,
 		"token":                token,
 		"block_transaction_id": stringValue(o.TxID),
 		"status":               status,

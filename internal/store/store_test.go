@@ -162,7 +162,7 @@ func TestCreateOrReuseCashierOrderRetiresExpiredOrderSilently(t *testing.T) {
 	}
 }
 
-func TestCreateOrReuseCashierOrderRebuildsReadyOrderOnlyWhenRequested(t *testing.T) {
+func TestCreateOrReuseCashierOrderRejectsConflictingReadyRequests(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 	old, err := st.CreateOrReuseCashierOrder(ctx, CreateOrderInput{
@@ -184,8 +184,8 @@ func TestCreateOrReuseCashierOrderRebuildsReadyOrderOnlyWhenRequested(t *testing
 		OutTradeNo: "MERCHANT-READY-REBUILD", OriginMoney: "3.50", OriginCurrency: "USD",
 		ExpiredAt: time.Now().Add(time.Hour), Reselect: true,
 	})
-	if err != nil || reused.TradeNo != old.TradeNo {
-		t.Fatalf("implicit retry replaced READY order: %+v err=%v", reused, err)
+	if err == nil || reused != nil {
+		t.Fatal("conflicting retry must be rejected")
 	}
 
 	replacement, err := st.CreateOrReuseCashierOrder(ctx, CreateOrderInput{
@@ -194,15 +194,12 @@ func TestCreateOrReuseCashierOrderRebuildsReadyOrderOnlyWhenRequested(t *testing
 		NotifyURL: "https://merchant.example/notify", ReturnURL: "https://merchant.example/return",
 		ExpiredAt: time.Now().Add(time.Hour), Reselect: true, ReplaceReady: true,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || replacement != nil {
+		t.Fatal("explicit conflicting retry must be rejected")
 	}
-	if replacement.TradeNo != "LP-READY-NEW" || replacement.OriginMoney != "3.50" {
-		t.Fatalf("ready order was not rebuilt: %+v", replacement)
-	}
-	retired, _ := st.GetByTradeNo(ctx, old.TradeNo)
-	if retired.Status != model.StatusSuperseded || !retired.ExpireFinalized {
-		t.Fatalf("old ready order was not retired: %+v", retired)
+	retained, _ := st.GetByTradeNo(ctx, old.TradeNo)
+	if retained.Status != model.StatusReady || retained.OriginMoney != "2.50" {
+		t.Fatalf("displayed payment changed: %+v", retained)
 	}
 }
 
@@ -844,23 +841,20 @@ func TestCreateOrReuseCashierOrderKeepsReadyOrderOnIdenticalRetry(t *testing.T) 
 		t.Fatalf("equivalent amount retry replaced order: %+v", again)
 	}
 
-	// 真正的支付约定变化仍然重建。
+	// A different contract cannot silently retire a displayed payment.
 	changed := input("LP-RETRY-4")
 	changed.OriginMoney = "3.50"
-	replaced, err := st.CreateOrReuseCashierOrder(ctx, changed)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := st.CreateOrReuseCashierOrder(ctx, changed); err == nil {
+		t.Fatal("changed contract silently replaced READY order")
 	}
-	if replaced.TradeNo != "LP-RETRY-4" {
-		t.Fatalf("changed amount did not rebuild: %+v", replaced)
+	if retained, _ := st.GetByTradeNo(ctx, selected.TradeNo); retained.Status != model.StatusReady {
+		t.Fatal("old payment contract retired")
 	}
-	if retired, _ := st.GetByTradeNo(ctx, selected.TradeNo); retired.Status != model.StatusSuperseded {
-		t.Fatalf("old order not retired: %+v", retired)
-	}
+
 }
 
 // 回调地址变化属于新的支付约定，必须重建（发给旧地址的回调不会被商户接受）。
-func TestCreateOrReuseCashierOrderRebuildsOnNotifyURLChange(t *testing.T) {
+func TestCreateOrReuseCashierOrderRejectsNotifyURLChange(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 	in := CreateOrderInput{
@@ -880,14 +874,11 @@ func TestCreateOrReuseCashierOrderRebuildsOnNotifyURLChange(t *testing.T) {
 
 	in.TradeNo = "LP-URL-2"
 	in.NotifyURL = "https://b.example/notify"
-	second, err := st.CreateOrReuseCashierOrder(ctx, in)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := st.CreateOrReuseCashierOrder(ctx, in); err == nil {
+		t.Fatal("callback change silently replaced READY order")
 	}
-	if second.TradeNo != "LP-URL-2" {
-		t.Fatalf("notify_url change reused the old order: %+v", second)
+	if retained, _ := st.GetByTradeNo(ctx, first.TradeNo); retained.Status != model.StatusReady {
+		t.Fatal("old payment contract retired")
 	}
-	if retired, _ := st.GetByTradeNo(ctx, first.TradeNo); retired.Status != model.StatusSuperseded {
-		t.Fatalf("old order not retired: %+v", retired)
-	}
+
 }
