@@ -12,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -384,6 +385,13 @@ func (c *Config) ProviderLookback(provider string) int {
 	return c.Binance.LookbackBuffer
 }
 
+// ScanRetention 是补查一笔到账的最长时间：订单有效期、宽限期与回看缓冲之和。
+// 超过这个时间仍未确认的到账不再自动归属订单，只保留证据交人工核对。
+func (c *Config) ScanRetention() time.Duration {
+	return time.Duration(c.Order.ExpireMinutes+max(c.Binance.LookbackBuffer, c.OKX.LookbackBuffer))*time.Minute +
+		time.Duration(c.Order.SlotGraceSeconds)*time.Second
+}
+
 // CurrencyEnabled 判断币种是否在支持列表中。
 func (c *Config) CurrencyEnabled(cur string) bool {
 	cur = strings.ToUpper(strings.TrimSpace(cur))
@@ -393,14 +401,6 @@ func (c *Config) CurrencyEnabled(cur string) bool {
 		}
 	}
 	return false
-}
-
-// DefaultCurrency 返回启用列表中的第一个币种。
-func (c *Config) DefaultCurrency() string {
-	if len(c.Checkout.Currencies) == 0 {
-		return "USDT"
-	}
-	return c.Checkout.Currencies[0]
 }
 
 // AdminEnabled 是否启用后台。

@@ -1,1 +1,79 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>{{.Base.Title}} · LitePay</title>{{template "theme_head" .}}{{template "admin_css" .}}</head><body>{{template "admin_nav" .}}<main class="shell">{{template "admin_flash" .}}<header class="pagehead"><h1>{{.Base.Title}}</h1></header><section class="card"><div class="card-h"><h2>{{.Order.OutTradeNo}}</h2><span class="badge">{{.Order.Status}}</span></div><div class="card-b kv"><span class="k">网关订单</span><span>{{.Order.TradeNo}}</span><span class="k">商城金额</span><span>{{.Order.Original}} USD</span><span class="k">应付</span><span>{{.Order.PayAmount}} {{.Order.Currency}}</span><span class="k">收款账户</span><span>{{.Order.Provider}} / {{.Order.Receiver}}</span><span class="k">付款窗口</span><span>{{.Order.SelectedAt}} 至 {{.Order.ExpiresAt}}</span><span class="k">实际核销</span><span>{{.Order.PaidAt}}</span></div></section><h2>已认领资金事件</h2><section class="card"><div class="card-b">{{range .Transactions}}<p>{{.Provider}} / {{.EventID}} · 外部查询编号 {{.Reference}} · 到账 {{.OccurredAt}}</p>{{else}}尚未核销到账流水{{end}}</div></section><h2>商户通知</h2><section class="card"><div class="card-b">{{range .Callbacks}}<p>已尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>{{else}}付款确认后创建通知任务{{end}}{{range .Logs}}<p>第 {{.Attempt}} 次 · HTTP {{.StatusCode}} · 确认 {{.Success}} · {{.Error}}</p>{{end}}<p>交付状态请到商城确认。此处不提供强制标记付款或绕过流水的入口。</p></div></section><h2>自助查款</h2><section class="card"><div class="card-b">{{range .Inquiries}}<p>{{.Reference}} · 第 {{.Attempts}} 次 · {{.Result}}</p>{{else}}暂无查款请求{{end}}</div></section></main>{{template "theme_script" .}}</body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>{{.Base.Title}} · LitePay</title>
+  {{template "theme_head" .}}
+  {{template "admin_css" .}}
+</head>
+<body>
+  {{template "admin_nav" .}}
+  <main class="shell">
+    {{template "admin_flash" .}}
+    <header class="pagehead">
+      <h1>{{.Base.Title}}</h1>
+    </header>
+
+    <section class="card">
+      <div class="card-h">
+        <h2>{{.Order.OutTradeNo}}</h2>
+        <span class="badge">{{.Order.Status}}</span>
+      </div>
+      <div class="card-b kv">
+        <span class="k">网关订单</span>
+        <span>{{.Order.TradeNo}}</span>
+        <span class="k">商城金额</span>
+        <span>{{.Order.Original}} USD</span>
+        <span class="k">应付</span>
+        <span>{{.Order.PayAmount}} {{.Order.Currency}}</span>
+        <span class="k">收款账户</span>
+        <span>{{.Order.Provider}} / {{.Order.Receiver}}</span>
+        <span class="k">付款窗口</span>
+        <span>{{.Order.SelectedAt}} 至 {{.Order.ExpiresAt}}</span>
+        <span class="k">实际核销</span>
+        <span>{{.Order.PaidAt}}</span>
+      </div>
+    </section>
+
+    <h2>已认领资金事件</h2>
+    <section class="card">
+      <div class="card-b">
+        {{range .Transactions}}
+        <p>{{.Provider}} / {{.EventID}} · 外部查询编号 {{.Reference}} · 到账 {{.OccurredAt}}</p>
+        {{else}}
+        尚未核销到账流水
+        {{end}}
+      </div>
+    </section>
+
+    <h2>商户通知</h2>
+    <section class="card">
+      <div class="card-b">
+        {{range .Callbacks}}
+        <p>已尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
+        {{else}}
+        付款确认后创建通知任务
+        {{end}}
+        {{range .Logs}}
+        <p>第 {{.Attempt}} 次 · HTTP {{.StatusCode}} · 确认 {{.Success}} · {{.Error}}</p>
+        {{end}}
+        <p>交付状态请到商城确认。此处不提供强制标记付款或绕过流水的入口。</p>
+      </div>
+    </section>
+
+    <h2>自助查款</h2>
+    <section class="card">
+      <div class="card-b">
+        {{range .Inquiries}}
+        <p>{{.Reference}} · 第 {{.Attempts}} 次 · {{.Result}}</p>
+        {{else}}
+        暂无查款请求
+        {{end}}
+      </div>
+    </section>
+  </main>
+  {{template "theme_script" .}}
+</body>
+</html>

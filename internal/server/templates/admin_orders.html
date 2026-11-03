@@ -1,1 +1,61 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>{{.Base.Title}} · LitePay</title>{{template "theme_head" .}}{{template "admin_css" .}}</head><body>{{template "admin_nav" .}}<main class="shell">{{template "admin_flash" .}}<header class="pagehead"><h1>{{.Base.Title}}</h1></header><form class="filters"><input name="q" value="{{.Query}}" placeholder="完整商户订单号或网关订单号"><button class="btn btn-ghost">查询</button></form><section class="card"><div class="table-wrap"><table><thead><tr><th>商户订单</th><th>付款方式</th><th>精确应付</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{{range .Orders}}<tr><td><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.OutTradeNo}}</a></td><td>{{.Provider}} {{.Currency}}</td><td>{{if .PayUnits}}{{.PayAmount}}{{else}}尚未选定{{end}}</td><td>{{.Status}}</td><td>{{.CreatedAt.Format "01-02 15:04:05"}}</td></tr>{{else}}<tr><td colspan="5">暂无订单</td></tr>{{end}}</tbody></table></div></section><div class="pager"><a href="?page={{.Prev}}&q={{.Query}}">上一页</a><span>{{.Page}}</span><a href="?page={{.Next}}&q={{.Query}}">下一页</a></div></main>{{template "theme_script" .}}</body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>{{.Base.Title}} · LitePay</title>
+  {{template "theme_head" .}}
+  {{template "admin_css" .}}
+</head>
+<body>
+  {{template "admin_nav" .}}
+  <main class="shell">
+    {{template "admin_flash" .}}
+    <header class="pagehead">
+      <h1>{{.Base.Title}}</h1>
+    </header>
+
+    <form class="filters">
+      <input name="q" value="{{.Query}}" placeholder="完整商户订单号或网关订单号">
+      <button class="btn btn-ghost">查询</button>
+    </form>
+
+    <section class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>商户订单</th>
+              <th>付款方式</th>
+              <th>精确应付</th>
+              <th>状态</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{range .Orders}}
+            <tr>
+              <td><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.OutTradeNo}}</a></td>
+              <td>{{.Provider}} {{.Currency}}</td>
+              <td>{{if .PayUnits}}{{.PayAmount}}{{else}}尚未选定{{end}}</td>
+              <td>{{.Status}}</td>
+              <td>{{.CreatedAt.Format "01-02 15:04:05"}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="5">暂无订单</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="pager">
+      <a href="?page={{.Prev}}&q={{.Query}}">上一页</a>
+      <span>{{.Page}}</span>
+      <a href="?page={{.Next}}&q={{.Query}}">下一页</a>
+    </div>
+  </main>
+  {{template "theme_script" .}}
+</body>
+</html>

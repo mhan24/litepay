@@ -255,12 +255,14 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 		if expectedTrade != "" && o.TradeNo != expectedTrade {
 			return finish("other_order")
 		}
-		// A matching amount must still have this order's live reservation.
-		// This also enforces the final confirmation deadline before the reaper runs.
+		// A matching amount must still hold this order's reservation: that row is the proof
+		// the payment window was never released. The wall clock is deliberately not consulted,
+		// so a scan that discovers an on-time payment late can still claim it. Closure is
+		// enforced by Expire, which removes the order from the candidate query above.
 		var slot model.Slot
-		err := db.Where("order_id = ? AND provider = ? AND currency = ? AND units = ? AND expires_at >= ?", o.ID, o.Provider, o.Currency, o.PayUnits, time.Now()).First(&slot).Error
+		err := db.Where("order_id = ? AND provider = ? AND currency = ? AND units = ?", o.ID, o.Provider, o.Currency, o.PayUnits).First(&slot).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return finish("confirmation_window_closed")
+			return finish("reservation_released")
 		}
 		if err != nil {
 			return err
@@ -282,14 +284,79 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 	})
 	return result, err
 }
-func (s *Store) Expire(ctx context.Context, grace int) error {
+
+// heldOpen keeps an order open while an exchange-unconfirmed deposit inside its payment window
+// may still be confirmed into it. The retention argument bounds that wait, so an abandoned
+// deposit cannot pin an order or the scanner forever.
+const heldOpen = `NOT EXISTS (
+	SELECT 1 FROM transactions t
+	WHERE t.provider = orders.provider AND t.receiver = orders.receiver AND t.currency = orders.currency
+		AND t.state = ? AND t.occurred_at >= orders.selected_at AND t.occurred_at <= orders.expires_at
+		AND t.occurred_at >= ?
+)`
+
+// Expire closes orders only once a successful scan has covered their whole payment window,
+// so a failing or lagging exchange query can never close an order the payer can still settle
+// on time. It is the only place that releases a payment window: Process derives claimability
+// from the reservation rows this method removes.
+func (s *Store) Expire(ctx context.Context, grace int, retention time.Duration) error {
+	window := -time.Duration(grace) * time.Second
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		cutoff := time.Now().Add(-time.Duration(grace) * time.Second)
-		if err := db.Model(&model.Order{}).Where("status IN ? AND expires_at < ?", []string{model.Pending, model.Ready}, cutoff).Update("status", model.Expired).Error; err != nil {
+		now := time.Now()
+		// A pending order holds no amount tier and no deposit can be matched to it yet.
+		if err := db.Model(&model.Order{}).Where("status = ? AND expires_at < ?", model.Pending, now.Add(window)).Update("status", model.Expired).Error; err != nil {
 			return err
 		}
-		return db.Where("expires_at < ?", time.Now()).Delete(&model.Slot{}).Error
+		var cursors []model.ScanCursor
+		if err := db.Find(&cursors).Error; err != nil {
+			return err
+		}
+		for _, cursor := range cursors {
+			covered := cursor.ScannedUntil
+			if covered.After(now) {
+				covered = now
+			}
+			// Coverage is only what a successful query actually scanned; a provider that never
+			// succeeded keeps its orders open instead of closing them blind.
+			if err := db.Model(&model.Order{}).
+				Where("status = ? AND provider = ? AND expires_at < ?", model.Ready, cursor.Provider, covered.Add(window)).
+				Where(heldOpen, model.Unconfirmed, now.Add(-retention)).
+				Update("status", model.Expired).Error; err != nil {
+				return err
+			}
+		}
+		// Closed orders no longer need their amount tier. Tiers left behind by reselect, cancel
+		// and payment stay reserved through their original cooldown.
+		open := db.Model(&model.Order{}).Select("id").Where("status IN ?", []string{model.Pending, model.Ready})
+		if err := db.Model(&model.Slot{}).Where("order_id IS NOT NULL AND order_id NOT IN (?)", open).Update("order_id", nil).Error; err != nil {
+			return err
+		}
+		return db.Where("order_id IS NULL AND expires_at < ?", now).Delete(&model.Slot{}).Error
 	})
+}
+
+// ScanDue reports whether an exchange history query can still change any order: an order is
+// waiting for payment, or an unconfirmed deposit is recent enough to land in a payment window.
+// While neither holds, the caller skips the query and leaves the cursor untouched, so the next
+// real scan catches up from the last confirmed position instead of re-reading empty history.
+func (s *Store) ScanDue(ctx context.Context, provider string, retention time.Duration) (bool, error) {
+	cursor, err := s.Cursor(ctx, provider)
+	if err != nil {
+		return false, err
+	}
+	if cursor.LastSuccess.IsZero() {
+		// The first successful query also proves the read-only credentials work.
+		return true, nil
+	}
+	db := s.db.WithContext(ctx)
+	var n int64
+	if err := db.Model(&model.Order{}).Where("status = ? AND provider = ?", model.Ready, provider).Count(&n).Error; err != nil || n > 0 {
+		return n > 0, err
+	}
+	if err := db.Model(&model.Transaction{}).Where("provider = ? AND state = ? AND occurred_at >= ?", provider, model.Unconfirmed, time.Now().Add(-retention)).Count(&n).Error; err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 func (s *Store) ReserveInquiry(ctx context.Context, no, ref string) (*model.Order, error) {
 	var o model.Order
@@ -324,14 +391,15 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 	var task model.Callback
 	var o model.Order
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		if e := db.Where("delivered_at IS NULL AND attempts < ? AND next_at <= ?", maxAttempts, time.Now()).Order("next_at").First(&task).Error; e != nil {
+		// Only paid orders are notified. Filtering here keeps a task whose order is not paid
+		// from blocking the queue: it would never become deliverable and every reservation
+		// would return the same row again.
+		paid := db.Model(&model.Order{}).Select("id").Where("status = ?", model.Paid)
+		if e := db.Where("delivered_at IS NULL AND attempts < ? AND next_at <= ? AND order_id IN (?)", maxAttempts, time.Now(), paid).Order("next_at").First(&task).Error; e != nil {
 			return e
 		}
 		if e := db.First(&o, task.OrderID).Error; e != nil {
 			return e
-		}
-		if o.Status != model.Paid {
-			return errors.New("非已支付订单不能回调")
 		}
 		task.Attempts++
 		task.NextAt = time.Now().Add(time.Duration(timeout+5) * time.Second)

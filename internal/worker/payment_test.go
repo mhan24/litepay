@@ -19,12 +19,17 @@ import (
 )
 
 type fixture struct {
-	rows []model.Transaction
-	err  error
+	rows  []model.Transaction
+	err   error
+	calls int
+	from  time.Time
+	to    time.Time
 }
 
 func (f *fixture) AccountUID(context.Context) (string, error) { return "receiver", nil }
-func (f *fixture) History(context.Context, time.Time, time.Time) ([]model.Transaction, error) {
+func (f *fixture) History(_ context.Context, start, end time.Time) ([]model.Transaction, error) {
+	f.calls++
+	f.from, f.to = start, end
 	return f.rows, f.err
 }
 func (f *fixture) Lookup(context.Context, string, time.Time, time.Time) ([]model.Transaction, error) {
@@ -130,5 +135,106 @@ func TestScanInquiryAndSignedCallback(t *testing.T) {
 	}
 	if did, e := n.Deliver(ctx); e != nil || did {
 		t.Fatal("delivered callback sent again", e)
+	}
+}
+
+// 空闲期不请求交易所：既没有等待付款的订单，也没有待确认到账时，历史查询不可能改变任何
+// 订单状态，扫描游标保持原位，等下一次真正需要补查时从该位置继续。
+func TestScanSkipsIdleExchangeQueries(t *testing.T) {
+	ctx := context.Background()
+	st, e := store.Open(":memory:")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if e = mgr.Load(ctx); e != nil {
+		t.Fatal(e)
+	}
+	f := &fixture{}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: f}
+
+	// 首次查询同时核验只读凭据，即使还没有订单。
+	if e = p.Scan(ctx, "binance"); e != nil {
+		t.Fatal(e)
+	}
+	if f.calls != 1 {
+		t.Fatal("missing verification scan", f.calls)
+	}
+	before, e := st.Cursor(ctx, "binance")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = p.Scan(ctx, "binance"); e != nil {
+		t.Fatal(e)
+	}
+	after, e := st.Cursor(ctx, "binance")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if f.calls != 1 {
+		t.Fatal("idle scan queried the exchange", f.calls)
+	}
+	if !after.ScannedUntil.Equal(before.ScannedUntil) {
+		t.Fatal("idle scan moved the cursor")
+	}
+
+	// 等待付款的订单必须触发查询。
+	if _, e = st.Create(ctx, model.Order{TradeNo: "a", OutTradeNo: "a", OriginUnits: 10000000, NotifyURL: "https://merchant.example/callback", ExpiresAt: time.Now().Add(time.Minute)}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Select(ctx, "a", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e != nil {
+		t.Fatal(e)
+	}
+	if e = p.Scan(ctx, "binance"); e != nil {
+		t.Fatal(e)
+	}
+	if f.calls != 2 {
+		t.Fatal("ready order did not trigger a scan", f.calls)
+	}
+
+	// 订单关闭后重新空闲，但仍存在的未确认到账需要继续补查。
+	if e = st.Cancel(ctx, "a"); e != nil {
+		t.Fatal(e)
+	}
+	if e = p.Scan(ctx, "binance"); e != nil {
+		t.Fatal(e)
+	}
+	if f.calls != 2 {
+		t.Fatal("closed order still queried the exchange", f.calls)
+	}
+	if e = st.DB().Create(&model.Transaction{Provider: "binance", EventID: "confirming", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: time.Now(), State: model.Unconfirmed}).Error; e != nil {
+		t.Fatal(e)
+	}
+	if e = p.Scan(ctx, "binance"); e != nil {
+		t.Fatal(e)
+	}
+	if f.calls != 3 {
+		t.Fatal("unconfirmed deposit was not rechecked", f.calls)
+	}
+
+	// 空闲可能让游标落后数小时：补查从最早一张待付款订单的窗口开始，不重读空白历史。
+	if _, e = st.Create(ctx, model.Order{TradeNo: "c", OutTradeNo: "c", OriginUnits: 10000000, NotifyURL: "https://merchant.example/callback", ExpiresAt: time.Now().Add(time.Minute)}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Select(ctx, "c", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e != nil {
+		t.Fatal(e)
+	}
+	if e = st.DB().Model(&model.ScanCursor{}).Where("provider = ?", "binance").Update("scanned_until", time.Now().Add(-3*time.Hour)).Error; e != nil {
+		t.Fatal(e)
+	}
+	if e = p.Scan(ctx, "binance"); e != nil {
+		t.Fatal(e)
+	}
+	if f.calls != 4 {
+		t.Fatal("ready order did not trigger a scan", f.calls)
+	}
+	if time.Since(f.from) > 10*time.Minute || f.to.Before(f.from) {
+		t.Fatal("scan did not resume near the open payment window", f.from, f.to)
 	}
 }

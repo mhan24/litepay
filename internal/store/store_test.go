@@ -166,13 +166,130 @@ func TestPendingEvidenceAndFinalDeadline(t *testing.T) {
 	if result, e := s.Process(ctx, tx, ""); e != nil || result != "paid" {
 		t.Fatal("pending deposit cannot complete", result, e)
 	}
+	// A closed order never takes a claim, even when the evidence arrived inside its window.
 	closed := readyOrder(t, s, "closed")
-	expired := time.Now().Add(-time.Second)
-	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", closed.ID).Update("expires_at", expired).Error; e != nil {
+	past := map[string]any{"selected_at": time.Now().Add(-6 * time.Minute), "expires_at": time.Now().Add(-time.Minute)}
+	if e := s.DB().Model(closed).Updates(past).Error; e != nil {
 		t.Fatal(e)
 	}
-	if result, e := s.Process(ctx, evidence(closed, "late"), ""); e != nil || result != "confirmation_window_closed" {
-		t.Fatal("late claim before expiration sweep", result, e)
+	if e := s.ScanResult(ctx, "binance", time.Now(), nil); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Expire(ctx, 1, time.Hour); e != nil {
+		t.Fatal(e)
+	}
+	fresh, e := s.GetByTradeNo(ctx, closed.TradeNo)
+	if e != nil || fresh.Status != model.Expired {
+		t.Fatal("covered window did not close", fresh.Status, e)
+	}
+	late := evidence(closed, "late")
+	late.OccurredAt = time.Now().Add(-2 * time.Minute)
+	if result, e := s.Process(ctx, late, ""); e != nil || result == "paid" {
+		t.Fatal("closed order paid", result, e)
+	}
+}
+
+// A scan that only discovers an on-time payment after the grace deadline must still claim it:
+// closure is driven by scan coverage, not by the wall clock.
+func TestLateScanStillClaimsOnTimePayment(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "late-scan")
+	past := map[string]any{"selected_at": time.Now().Add(-6 * time.Minute), "expires_at": time.Now().Add(-time.Minute)}
+	if e := s.DB().Model(o).Updates(past).Error; e != nil {
+		t.Fatal(e)
+	}
+	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("expires_at", time.Now().Add(-time.Minute)).Error; e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Expire(ctx, 1, time.Hour); e != nil {
+		t.Fatal(e)
+	}
+	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Ready {
+		t.Fatal("order closed without scan coverage", fresh.Status)
+	}
+	tx := evidence(o, "late-scan-event")
+	tx.OccurredAt = time.Now().Add(-2 * time.Minute)
+	if result, e := s.Process(ctx, tx, ""); e != nil || result != "paid" {
+		t.Fatal("on-time payment lost", result, e)
+	}
+}
+
+func TestExpireRequiresSuccessfulCoverage(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "cover")
+	windowEnd := time.Now().Add(-time.Minute)
+	if e := s.DB().Model(o).Updates(map[string]any{"selected_at": time.Now().Add(-6 * time.Minute), "expires_at": windowEnd}).Error; e != nil {
+		t.Fatal(e)
+	}
+	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("expires_at", windowEnd).Error; e != nil {
+		t.Fatal(e)
+	}
+	// A scan that stopped before the payment window proves nothing about this order.
+	if e := s.ScanResult(ctx, "binance", windowEnd.Add(-time.Minute), nil); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Expire(ctx, 0, time.Hour); e != nil {
+		t.Fatal(e)
+	}
+	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Ready {
+		t.Fatal("closed without coverage", fresh.Status)
+	}
+	var slots int64
+	s.DB().Model(&model.Slot{}).Where("order_id IS NOT NULL").Count(&slots)
+	if slots != 1 {
+		t.Fatal("reservation released without coverage")
+	}
+	// The scan that does cover the window closes the order and frees the tier.
+	if e := s.ScanResult(ctx, "binance", time.Now(), nil); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Expire(ctx, 0, time.Hour); e != nil {
+		t.Fatal(e)
+	}
+	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Expired {
+		t.Fatal("covered window did not close", fresh.Status)
+	}
+	s.DB().Model(&model.Slot{}).Where("order_id IS NOT NULL").Count(&slots)
+	if slots != 0 {
+		t.Fatal("tier not released after closure")
+	}
+}
+
+// An exchange-unconfirmed deposit inside the window keeps the order open, but only for the
+// bounded retention period.
+func TestUnconfirmedDepositHoldsOrderOpen(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "held")
+	windowEnd := time.Now().Add(-time.Minute)
+	if e := s.DB().Model(o).Updates(map[string]any{"selected_at": time.Now().Add(-6 * time.Minute), "expires_at": windowEnd}).Error; e != nil {
+		t.Fatal(e)
+	}
+	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("expires_at", windowEnd).Error; e != nil {
+		t.Fatal(e)
+	}
+	tx := evidence(o, "still-confirming")
+	tx.State = model.Unconfirmed
+	tx.OccurredAt = time.Now().Add(-2 * time.Minute)
+	if _, e := s.Process(ctx, tx, ""); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.ScanResult(ctx, "binance", time.Now(), nil); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Expire(ctx, 0, 10*time.Minute); e != nil {
+		t.Fatal(e)
+	}
+	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Ready {
+		t.Fatal("unconfirmed deposit dropped", fresh.Status)
+	}
+	if e := s.Expire(ctx, 0, time.Second); e != nil {
+		t.Fatal(e)
+	}
+	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Expired {
+		t.Fatal("retention bound ignored", fresh.Status)
 	}
 }
 

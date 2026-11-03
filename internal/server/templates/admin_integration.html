@@ -1,1 +1,45 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>{{.Base.Title}} · LitePay</title>{{template "theme_head" .}}{{template "admin_css" .}}</head><body>{{template "admin_nav" .}}<main class="shell">{{template "admin_flash" .}}<header class="pagehead"><h1>{{.Base.Title}}</h1></header><section class="card"><div class="card-h"><h2>BEpusdt 收银台</h2></div><div class="card-b kv"><span class="k">网关地址</span><code>{{.BaseURL}}</code><span class="k">建单接口</span><code>{{.BaseURL}}/api/v1/order/create-order</code><span class="k">API Token</span><details><summary>显示接入密钥</summary><code>{{.Token}}</code></details></div></section><p class="section-desc">仅支持 USD 订单与 USDT / USDC 站内转账。成功支付回调 status=2，商户须验签并以订单号幂等处理，返回 success 或 ok。网关不发送过期回调；商城按自身订单期限关单。</p><form method="post" action="{{adminPath}}/settings/token"><input type="hidden" name="csrf" value="{{.Base.CSRF}}"><button class="btn btn-danger" onclick="return confirm('轮换会导致尚未更新 Token 的商城无法验签，确定继续？')">轮换 API Token</button></form></main>{{template "theme_script" .}}</body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>{{.Base.Title}} · LitePay</title>
+  {{template "theme_head" .}}
+  {{template "admin_css" .}}
+</head>
+<body>
+  {{template "admin_nav" .}}
+  <main class="shell">
+    {{template "admin_flash" .}}
+    <header class="pagehead">
+      <h1>{{.Base.Title}}</h1>
+    </header>
+
+    <section class="card">
+      <div class="card-h">
+        <h2>BEpusdt 收银台</h2>
+      </div>
+      <div class="card-b kv">
+        <span class="k">网关地址</span>
+        <code>{{.BaseURL}}</code>
+        <span class="k">建单接口</span>
+        <code>{{.BaseURL}}/api/v1/order/create-order</code>
+        <span class="k">API Token</span>
+        <details>
+          <summary>显示接入密钥</summary>
+          <code>{{.Token}}</code>
+        </details>
+      </div>
+    </section>
+
+    <p class="section-desc">仅支持 USD 订单与 USDT / USDC 站内转账。成功支付回调 status=2，商户须验签并以订单号幂等处理，返回 success 或 ok。网关不发送过期回调；商城按自身订单期限关单。</p>
+
+    <form method="post" action="{{adminPath}}/settings/token">
+      <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+      <button class="btn btn-danger" onclick="return confirm('轮换会导致尚未更新 Token 的商城无法验签，确定继续？')">轮换 API Token</button>
+    </form>
+  </main>
+  {{template "theme_script" .}}
+</body>
+</html>

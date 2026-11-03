@@ -314,9 +314,9 @@ func (m *Manager) Update(ctx context.Context, p Patch, operator string) error {
 	}
 
 	current := m.cur.Load()
-	sensitive := current.Binance.APIKey != next.Binance.APIKey || current.Binance.APISecret != next.Binance.APISecret ||
-		current.OKX.APIKey != next.OKX.APIKey || current.OKX.APISecret != next.OKX.APISecret || current.OKX.Passphrase != next.OKX.Passphrase ||
-		current.Checkout.Binance.UID != next.Checkout.Binance.UID || current.Checkout.OKX.UID != next.Checkout.OKX.UID ||
+	// 只有会改变到账归属或付款窗口的字段需要在待付款期间冻结。API 凭据不改变
+	// 归属（换 Key 仍须通过 UID 核验），必须允许在扫描失败时随时修正。
+	sensitive := current.Checkout.Binance.UID != next.Checkout.Binance.UID || current.Checkout.OKX.UID != next.Checkout.OKX.UID ||
 		current.Order.SlotGraceSeconds != next.Order.SlotGraceSeconds || !reflect.DeepEqual(current.Checkout.Currencies, next.Checkout.Currencies)
 	if sensitive {
 		active, err := m.st.HasActivePayments(ctx)

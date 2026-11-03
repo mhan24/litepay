@@ -362,7 +362,11 @@ func (h *Handlers) Health(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"ok": true})
 }
+
+// Ready 只在“现在确实需要扫描”时要求游标新鲜。空闲期间扫描器主动不请求交易所，
+// 游标陈旧是预期状态，此时只要该平台曾经成功查询过就算就绪。
 func (h *Handlers) Ready(c *gin.Context) {
+	ctx := c.Request.Context()
 	cfg := h.C()
 	if !cfg.BinanceEnabled() && !cfg.OKXEnabled() {
 		c.JSON(503, gin.H{"ready": false, "reason": "未配置收款账户"})
@@ -372,8 +376,17 @@ func (h *Handlers) Ready(c *gin.Context) {
 		if !cfg.ProviderEnabled(provider) {
 			continue
 		}
-		cursor, err := h.st.Cursor(c.Request.Context(), provider)
-		if err != nil || cursor.LastSuccess.IsZero() || cursor.LastError != "" || time.Since(cursor.LastSuccess) > 2*time.Minute || time.Since(cursor.ScannedUntil) > 3*time.Minute {
+		cursor, err := h.st.Cursor(ctx, provider)
+		if err != nil || cursor.LastSuccess.IsZero() {
+			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
+			return
+		}
+		due, err := h.st.ScanDue(ctx, provider, cfg.ScanRetention())
+		if err != nil {
+			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
+			return
+		}
+		if due && (cursor.LastError != "" || time.Since(cursor.LastSuccess) > 2*time.Minute || time.Since(cursor.ScannedUntil) > 3*time.Minute) {
 			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
 			return
 		}

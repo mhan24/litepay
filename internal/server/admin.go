@@ -50,7 +50,6 @@ const (
 	adminSessionIterations = 210000
 	adminSessionKeyBytes   = 32
 	adminOrdersMaxPage     = 100000
-	adminOrdersMaxKeyword  = 256
 )
 
 // adminSession 会话载荷（Base64(JSON) + "." + HMAC 签名）。
@@ -645,8 +644,8 @@ func (h *Handlers) AdminOrders(c *gin.Context) {
 	if page < 1 {
 		page = 1
 	}
-	if page > 100000 {
-		page = 100000
+	if page > adminOrdersMaxPage {
+		page = adminOrdersMaxPage
 	}
 	var orders []model.Order
 	db := h.st.DB().WithContext(c.Request.Context()).Order("id DESC")

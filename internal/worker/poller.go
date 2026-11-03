@@ -93,6 +93,13 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	if !cfg.ProviderEnabled(provider) {
 		return nil
 	}
+	// Nothing is waiting for a payment, so a history query could only rediscover evidence no
+	// order can claim. Skipping keeps the cursor honest: the next scan that is actually due
+	// catches up from the last position a successful query really read.
+	due, err := p.st.ScanDue(ctx, provider, cfg.ScanRetention())
+	if err != nil || !due {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	end := time.Now()
@@ -101,12 +108,17 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 		var cursor model.ScanCursor
 		cursor, err = p.st.Cursor(ctx, provider)
 		if err == nil {
-			start := cursor.ScannedUntil.Add(-time.Duration(cfg.ProviderLookback(provider)) * time.Minute)
+			lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
+			start := cursor.ScannedUntil.Add(-lookback)
 			if cursor.ScannedUntil.IsZero() {
-				start = end.Add(-time.Duration(cfg.Order.ExpireMinutes+2) * time.Minute)
-				var earliest model.Order
-				if e := p.st.DB().WithContext(ctx).Where("status = ? AND provider = ?", model.Ready, provider).Order("selected_at").First(&earliest).Error; e == nil && earliest.SelectedAt != nil && earliest.SelectedAt.Before(start) {
-					start = earliest.SelectedAt.Add(-time.Minute)
+				start = end.Add(-cfg.ScanRetention())
+			}
+			// 空闲期可能让游标落后很久，但早于最早一张待付款订单选择时间的到账已不可能
+			// 再归属任何订单，所以从这里开始补查即可，不必重读中间整段空白历史。
+			var earliest model.Order
+			if e := p.st.DB().WithContext(ctx).Where("status = ? AND provider = ?", model.Ready, provider).Order("selected_at").First(&earliest).Error; e == nil && earliest.SelectedAt != nil {
+				if floor := earliest.SelectedAt.Add(-lookback); floor.After(start) {
+					start = floor
 				}
 			}
 			if end.Sub(start) > time.Hour {
@@ -195,6 +207,9 @@ func minTime(a, b time.Time) time.Time {
 	}
 	return b
 }
+
+// Run 每秒推进付款窗口，并按各平台的查询间隔调度扫描。是否需要请求交易所由 Scan
+// 自身判断，这里不再重复粗略的“有没有订单”判断。
 func (p *Poller) Run(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -204,20 +219,16 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			cfg := p.cfg.Get()
 			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX} {
 				if !time.Now().Before(next[provider]) {
 					if err := p.Scan(ctx, provider); err != nil && ctx.Err() == nil {
 						slog.Warn("收款扫描未完成", "provider", provider)
 					}
-					interval := p.cfg.Get().ProviderInterval(provider)
-					var active int64
-					if e := p.st.DB().WithContext(ctx).Model(&model.Order{}).Where("provider = ? AND status = ?", provider, model.Ready).Count(&active).Error; e == nil && active == 0 {
-						interval = max(interval, 30)
-					}
-					next[provider] = time.Now().Add(time.Duration(interval) * time.Second)
+					next[provider] = time.Now().Add(time.Duration(cfg.ProviderInterval(provider)) * time.Second)
 				}
 			}
-			if err := p.st.Expire(ctx, p.cfg.Get().Order.SlotGraceSeconds); err != nil && ctx.Err() == nil {
+			if err := p.st.Expire(ctx, cfg.Order.SlotGraceSeconds, cfg.ScanRetention()); err != nil && ctx.Err() == nil {
 				slog.Error("订单过期状态写入失败")
 			}
 		}

@@ -1,1 +1,107 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>{{.Base.Title}} · LitePay</title>{{template "theme_head" .}}{{template "admin_css" .}}</head><body>{{template "admin_nav" .}}<main class="shell">{{template "admin_flash" .}}<header class="pagehead"><h1>{{.Base.Title}}</h1></header><p class="section-desc">到账、核销、商户确认分别记录。商户确认回调不代表已经交付商品。</p><section class="card"><div class="card-h"><h2>扫描状态</h2></div><div class="card-b">{{range .Scans}}<p>{{.Provider}} · 最后成功 {{.LastSuccess.Format "01-02 15:04:05"}} · 已查至 {{.ScannedUntil.Format "01-02 15:04:05"}}{{if .LastError}} · <strong>查询失败：{{.LastError}}</strong>{{end}}</p>{{else}}尚未完成首次扫描{{end}}</div></section><h2>最近订单</h2><section class="card"><div class="table-wrap"><table><thead><tr><th>商户订单</th><th>付款方式</th><th>精确应付</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{{range .Orders}}<tr><td><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.OutTradeNo}}</a></td><td>{{.Provider}} {{.Currency}}</td><td>{{if .PayUnits}}{{.PayAmount}}{{else}}尚未选定{{end}}</td><td>{{.Status}}</td><td>{{.CreatedAt.Format "01-02 15:04:05"}}</td></tr>{{else}}<tr><td colspan="5">暂无订单</td></tr>{{end}}</tbody></table></div></section><h2>待核对到账</h2><section class="card"><div class="table-wrap"><table><thead><tr><th>平台 / 原始资金事件</th><th>查询编号</th><th>币种 / 到账金额</th><th>原因</th></tr></thead><tbody>{{range .Evidence}}<tr><td>{{.Provider}} / {{.EventID}}</td><td>{{.Reference}}</td><td>{{.Currency}} / {{.Amount}}</td><td>{{.State}} · {{.Reason}}{{if .Assets}}<details><summary>资产明细</summary>{{.Assets}}</details>{{end}}</td></tr>{{else}}<tr><td colspan="4">暂无未归属记录</td></tr>{{end}}</tbody></table></div></section><h2>商户尚未确认的回调</h2><section class="card"><div class="card-b">{{range .Callbacks}}<p>本地订单 {{.OrderID}} · 已尝试 {{.Attempts}} 次 · {{.LastError}} · 下次调度 {{.NextAt.Format "01-02 15:04:05"}}</p>{{else}}暂无待确认回调{{end}}</div></section></main>{{template "theme_script" .}}</body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>{{.Base.Title}} · LitePay</title>
+  {{template "theme_head" .}}
+  {{template "admin_css" .}}
+</head>
+<body>
+  {{template "admin_nav" .}}
+  <main class="shell">
+    {{template "admin_flash" .}}
+    <header class="pagehead">
+      <h1>{{.Base.Title}}</h1>
+    </header>
+    <p class="section-desc">到账、核销、商户确认分别记录。商户确认回调不代表已经交付商品。</p>
+
+    <section class="card">
+      <div class="card-h">
+        <h2>扫描状态</h2>
+      </div>
+      <div class="card-b">
+        {{range .Scans}}
+        <p>{{.Provider}} · 最后成功 {{.LastSuccess.Format "01-02 15:04:05"}} · 已查至 {{.ScannedUntil.Format "01-02 15:04:05"}}{{if .LastError}} · <strong>查询失败：{{.LastError}}</strong>{{end}}</p>
+        {{else}}
+        尚未完成首次扫描
+        {{end}}
+      </div>
+    </section>
+
+    <h2>最近订单</h2>
+    <section class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>商户订单</th>
+              <th>付款方式</th>
+              <th>精确应付</th>
+              <th>状态</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{range .Orders}}
+            <tr>
+              <td><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.OutTradeNo}}</a></td>
+              <td>{{.Provider}} {{.Currency}}</td>
+              <td>{{if .PayUnits}}{{.PayAmount}}{{else}}尚未选定{{end}}</td>
+              <td>{{.Status}}</td>
+              <td>{{.CreatedAt.Format "01-02 15:04:05"}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="5">暂无订单</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <h2>待核对到账</h2>
+    <section class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>平台 / 原始资金事件</th>
+              <th>查询编号</th>
+              <th>币种 / 到账金额</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{range .Evidence}}
+            <tr>
+              <td>{{.Provider}} / {{.EventID}}</td>
+              <td>{{.Reference}}</td>
+              <td>{{.Currency}} / {{.Amount}}</td>
+              <td>
+                {{.State}} · {{.Reason}}
+                {{if .Assets}}<details><summary>资产明细</summary>{{.Assets}}</details>{{end}}
+              </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="4">暂无未归属记录</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <h2>商户尚未确认的回调</h2>
+    <section class="card">
+      <div class="card-b">
+        {{range .Callbacks}}
+        <p>本地订单 {{.OrderID}} · 已尝试 {{.Attempts}} 次 · {{.LastError}} · 下次调度 {{.NextAt.Format "01-02 15:04:05"}}</p>
+        {{else}}
+        暂无待确认回调
+        {{end}}
+      </div>
+    </section>
+  </main>
+  {{template "theme_script" .}}
+</body>
+</html>
