@@ -35,10 +35,21 @@ type Poller struct {
 	clients map[string]*connection
 	// 每个平台下一轮补查未确认到账的偏移量，用于有界轮转。
 	pendingOffset map[string]int
+	// testTransports 仅由端到端测试置位：创建的交易所客户端访问本地模拟服务。
+	testTransports bool
 }
 
 func NewPoller(cfg *settings.Manager, st *store.Store) *Poller {
 	return &Poller{cfg: cfg, st: st, clients: map[string]*connection{}, pendingOffset: map[string]int{}}
+}
+
+// UseTestTransports 只用于端到端测试：调度器创建的交易所客户端只访问本地模拟服务，
+// 已缓存的连接一并作废。生产代码不得调用。
+func (p *Poller) UseTestTransports() {
+	p.mu.Lock()
+	p.testTransports = true
+	p.clients = map[string]*connection{}
+	p.mu.Unlock()
 }
 func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string) (source, error) {
 	if !cfg.ProviderEnabled(provider) {
@@ -54,6 +65,11 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 			cli = okx.New(cfg.OKX.APIKey, cfg.OKX.APISecret, cfg.OKX.Passphrase, cfg.OKX.BaseURL, cfg.OKX.Limit)
 		}
 		cached = &connection{config: *cfg, source: cli}
+		if p.testTransports {
+			if u, ok := cli.(interface{ UseTestTransport() }); ok {
+				u.UseTestTransport()
+			}
+		}
 		p.clients[provider] = cached
 	}
 	if cached.uid == "" {

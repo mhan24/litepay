@@ -29,6 +29,11 @@ type Notifier struct {
 func NewNotifier(cfg *settings.Manager, st *store.Store) *Notifier {
 	return &Notifier{cfg: cfg, st: st, http: httpx.NewClient(60*time.Second, false)}
 }
+
+// UseTestTransport 只用于端到端测试：回调发送到本地模拟商城，不走公网拨号限制。
+func (n *Notifier) UseTestTransport() {
+	n.http = httpx.NewClient(15*time.Second, true)
+}
 func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	cfg := n.cfg.Get()
 	task, o, err := n.st.ReserveCallback(ctx, cfg.Notify.MaxAttempts, cfg.Notify.TimeoutSeconds)
