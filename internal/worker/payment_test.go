@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,17 +20,23 @@ import (
 )
 
 type fixture struct {
-	rows  []model.Transaction
-	err   error
-	calls int
-	from  time.Time
-	to    time.Time
+	rows      []model.Transaction
+	err       error
+	calls     int
+	failAfter int // 大于 0 时，第 N 次之后的查询失败
+	from      time.Time
+	to        time.Time
+	windows   [][2]time.Time
 }
 
 func (f *fixture) AccountUID(context.Context) (string, error) { return "receiver", nil }
 func (f *fixture) History(_ context.Context, start, end time.Time) ([]model.Transaction, error) {
 	f.calls++
 	f.from, f.to = start, end
+	f.windows = append(f.windows, [2]time.Time{start, end})
+	if f.failAfter > 0 && f.calls > f.failAfter {
+		return nil, errors.New("history incomplete")
+	}
 	return f.inWindow(start, end), f.err
 }
 func (f *fixture) Lookup(_ context.Context, _ string, start, end time.Time) ([]model.Transaction, error) {
@@ -431,5 +438,138 @@ func TestOldPendingDepositDoesNotBlockNewPayment(t *testing.T) {
 	}
 	if stored.State != model.Unconfirmed || stored.OrderID != nil {
 		t.Fatal("old evidence was lost or claimed", stored.State, stored.OrderID)
+	}
+}
+
+// 未确认到账的补查按轮转前进：超过单轮上限的记录在后续轮次补上，不会长期饥饿，
+// 同时增量扫描游标照常推进。
+func TestPendingRecheckRotatesAcrossRecords(t *testing.T) {
+	ctx := context.Background()
+	st, e := store.Open(":memory:")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	cfg.Order.ExpireMinutes = 120 // 补查期限两小时以上，12 笔未确认到账都留在补查范围内
+	mgr := settings.New(cfg, st)
+	if e = mgr.Load(ctx); e != nil {
+		t.Fatal(e)
+	}
+	var pending []time.Time
+	for i := 0; i < 12; i++ {
+		at := time.Now().Add(-time.Duration(105-5*i) * time.Minute)
+		pending = append(pending, at)
+		if _, e = st.Process(ctx, model.Transaction{Provider: "binance", EventID: fmt.Sprintf("pending-%d", i), Reference: fmt.Sprintf("ref-%d", i), Receiver: "receiver", Currency: "USDT", Units: 1000000, OccurredAt: at, State: model.Unconfirmed}, ""); e != nil {
+			t.Fatal(e)
+		}
+	}
+	// 游标停在当前时刻附近，增量扫描窗口不会覆盖这些旧记录。
+	if e = st.ScanResult(ctx, "binance", time.Now().Add(-time.Minute), nil); e != nil {
+		t.Fatal(e)
+	}
+	f := &fixture{}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: f}
+
+	for tick := 0; tick < 3; tick++ {
+		if e = p.Scan(ctx, "binance"); e != nil {
+			t.Fatal(e)
+		}
+	}
+	covered := map[int]bool{}
+	for _, w := range f.windows {
+		if w[1].Sub(w[0]) != 4*time.Minute {
+			continue // 只统计按单条记录取窗口的补查查询
+		}
+		for i, at := range pending {
+			if !w[0].After(at) && !w[1].Before(at) {
+				covered[i] = true
+			}
+		}
+	}
+	if len(covered) != len(pending) {
+		t.Fatal("pending recheck starved records", len(covered), len(pending))
+	}
+	cursor, e := st.Cursor(ctx, "binance")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if time.Since(cursor.ScannedUntil) > time.Minute {
+		t.Fatal("old pending deposits blocked the incremental scan", cursor.ScannedUntil)
+	}
+}
+
+// 补查失败单独记录：增量扫描与游标不受影响，后台能看到未完成的补查，恢复后自动清除。
+func TestPendingRecheckFailureIsRecorded(t *testing.T) {
+	ctx := context.Background()
+	st, e := store.Open(":memory:")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if e = mgr.Load(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Create(ctx, model.Order{TradeNo: "d", OutTradeNo: "d", OriginUnits: 10000000, NotifyURL: "https://merchant.example/callback", ExpiresAt: time.Now().Add(10 * time.Minute)}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.Select(ctx, "d", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e != nil {
+		t.Fatal(e)
+	}
+	selected := time.Now().Add(-3 * time.Minute)
+	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "d").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
+		t.Fatal(e)
+	}
+	deposit := model.Transaction{Provider: "binance", EventID: "late-event", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: selected.Add(30 * time.Second), State: model.Unconfirmed}
+	if _, e = st.Process(ctx, deposit, ""); e != nil {
+		t.Fatal(e)
+	}
+	f := &fixture{rows: []model.Transaction{deposit}, failAfter: 1}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: f}
+
+	// 正常增量查询成功，按原始时间补查失败。
+	if e = p.Scan(ctx, "binance"); e == nil {
+		t.Fatal("failed recheck was not reported")
+	}
+	cursor, e := st.Cursor(ctx, "binance")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if cursor.LastError != "" || time.Since(cursor.ScannedUntil) > time.Minute {
+		t.Fatal("recheck failure touched the incremental scan state", cursor.LastError, cursor.ScannedUntil)
+	}
+	if cursor.PendingError == "" || cursor.PendingAt.IsZero() {
+		t.Fatal("recheck failure left no diagnostic")
+	}
+	if o, _ := st.GetByTradeNo(ctx, "d"); o.Status != model.Ready {
+		t.Fatal("failed recheck fabricated a payment", o.Status)
+	}
+
+	// 恢复查询后补查成功，订单核销、诊断清除。
+	f.failAfter = 0
+	deposit.State = model.Confirmed
+	f.rows = []model.Transaction{deposit}
+	if e = p.Scan(ctx, "binance"); e != nil {
+		t.Fatal(e)
+	}
+	cursor, e = st.Cursor(ctx, "binance")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if cursor.PendingError != "" {
+		t.Fatal("recheck diagnostic was not cleared", cursor.PendingError)
+	}
+	if o, _ := st.GetByTradeNo(ctx, "d"); o.Status != model.Paid {
+		t.Fatal("deposit was not settled after the recheck recovered", o.Status)
 	}
 }

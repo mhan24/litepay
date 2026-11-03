@@ -23,7 +23,7 @@
       </div>
       <div class="card-b">
         {{range .Scans}}
-        <p>{{.Provider}} · 最后成功 {{.LastSuccess.Format "01-02 15:04:05"}} · 已查至 {{.ScannedUntil.Format "01-02 15:04:05"}}{{if .LastError}} · <strong>查询失败：{{.LastError}}</strong>{{end}}</p>
+        <p>{{.Provider}} · 最后成功 {{.LastSuccess.Format "01-02 15:04:05"}} · 已查至 {{.ScannedUntil.Format "01-02 15:04:05"}}{{if .LastError}} · <strong>查询失败：{{.LastError}}</strong>{{end}}{{if .PendingError}} · <strong>未确认到账补查失败：{{.PendingError}}</strong>{{end}}</p>
         {{else}}
         尚未完成首次扫描
         {{end}}

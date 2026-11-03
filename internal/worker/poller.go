@@ -33,10 +33,12 @@ type Poller struct {
 	st      *store.Store
 	mu      sync.Mutex
 	clients map[string]*connection
+	// 每个平台下一轮补查未确认到账的偏移量，用于有界轮转。
+	pendingOffset map[string]int
 }
 
 func NewPoller(cfg *settings.Manager, st *store.Store) *Poller {
-	return &Poller{cfg: cfg, st: st, clients: map[string]*connection{}}
+	return &Poller{cfg: cfg, st: st, clients: map[string]*connection{}, pendingOffset: map[string]int{}}
 }
 func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string) (source, error) {
 	if !cfg.ProviderEnabled(provider) {
@@ -110,7 +112,8 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	// 未确认到账按各自原始创建时间单独补查：它只补充事实、不推进游标，因此旧记录既不会
 	// 把正常增量扫描拖回旧窗口，也不会被增量游标越过之后彻底丢失。
 	var pendingErr error
-	if err == nil {
+	rechecked := err == nil
+	if rechecked {
 		pendingErr = p.recheckPending(ctx, cfg, provider, cli)
 	}
 	// Use the parent deadline-independent write to retain a safe diagnostic even after API timeout.
@@ -118,6 +121,12 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	defer saveCancel()
 	if e := p.st.ScanResult(saveCtx, provider, end, err); e != nil {
 		return e
+	}
+	if rechecked {
+		// 补查是独立的一路：结果单独记录，不影响扫描游标与订单过期判断。
+		if e := p.st.PendingResult(saveCtx, provider, pendingErr); e != nil {
+			return e
+		}
 	}
 	if err != nil {
 		return err
@@ -169,11 +178,22 @@ const pendingRecheckLimit = 10
 // recheckPending 按原始创建时间重读仍处于补查期内的未确认到账。交易所历史按创建时间
 // 分页、状态变化不会移动记录，增量游标越过之后就再也读不到，所以这里按记录自身的时间
 // 单独查询：窗口固定在这条记录附近，不重扫整段历史，也不推进扫描游标。
+// 每轮只取 pendingRecheckLimit 条并轮转偏移量，超出的记录在后续轮次补上，不会被永久跳过。
 func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provider string, cli source) error {
-	times, err := p.st.PendingTimes(ctx, provider, cfg.ScanRetention(), pendingRecheckLimit)
+	retention := cfg.ScanRetention()
+	offset := p.pendingOffset[provider]
+	times, err := p.st.PendingTimes(ctx, provider, retention, offset, pendingRecheckLimit)
 	if err != nil {
 		return err
 	}
+	if len(times) == 0 && offset > 0 {
+		// 上一轮已经读到末尾：回到开头继续轮转。
+		offset = 0
+		if times, err = p.st.PendingTimes(ctx, provider, retention, 0, pendingRecheckLimit); err != nil {
+			return err
+		}
+	}
+	p.pendingOffset[provider] = offset + len(times)
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	var covered time.Time
 	for _, at := range times {

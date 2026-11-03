@@ -102,6 +102,9 @@ type ScanCursor struct {
 	ScannedUntil time.Time
 	LastSuccess  time.Time
 	LastError    string
+	// 未确认到账的补查是独立的一路：它不推进 ScannedUntil，失败只记录在这里。
+	PendingError string
+	PendingAt    time.Time
 }
 type Setting struct {
 	ID        uint `gorm:"primaryKey"`

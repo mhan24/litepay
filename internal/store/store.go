@@ -360,16 +360,17 @@ func (s *Store) ScanDue(ctx context.Context, provider string, retention time.Dur
 }
 
 // PendingTimes returns the original occurrence time of unconfirmed deposits that are still
-// inside the retention window, oldest first and capped at limit. Exchange history pages by
-// record creation time and a later status change does not move the record, so the scanner has
-// to reopen exactly those moments; a regular incremental cursor that moved past them can no
-// longer see them. Deposits older than retention are excluded: they are never attributed
-// automatically, their evidence stays available for manual review.
-func (s *Store) PendingTimes(ctx context.Context, provider string, retention time.Duration, limit int) ([]time.Time, error) {
+// inside the retention window, oldest first, starting at offset and capped at limit. Exchange
+// history pages by record creation time and a later status change does not move the record, so
+// the scanner has to reopen exactly those moments; a regular incremental cursor that moved past
+// them can no longer see them. Callers rotate the offset, so records beyond limit are rechecked
+// on later rounds instead of starving. Deposits older than retention are excluded: they are
+// never attributed automatically, their evidence stays available for manual review.
+func (s *Store) PendingTimes(ctx context.Context, provider string, retention time.Duration, offset, limit int) ([]time.Time, error) {
 	var rows []model.Transaction
 	err := s.db.WithContext(ctx).
 		Where("provider = ? AND state = ? AND occurred_at >= ?", provider, model.Unconfirmed, time.Now().Add(-retention)).
-		Order("occurred_at").Limit(limit).Find(&rows).Error
+		Order("occurred_at").Offset(max(offset, 0)).Limit(limit).Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -378,6 +379,22 @@ func (s *Store) PendingTimes(ctx context.Context, provider string, retention tim
 		times = append(times, row.OccurredAt)
 	}
 	return times, nil
+}
+
+// PendingResult records the outcome of the unconfirmed-deposit recheck. It never touches
+// ScannedUntil, so a failing recheck stays visible in the dashboard without making the regular
+// scan or the expiry decision look broken.
+func (s *Store) PendingResult(ctx context.Context, provider string, recheckErr error) error {
+	cursor, err := s.Cursor(ctx, provider)
+	if err != nil {
+		return err
+	}
+	cursor.PendingAt = time.Now()
+	cursor.PendingError = ""
+	if recheckErr != nil {
+		cursor.PendingError = fmt.Sprint(recheckErr)
+	}
+	return s.db.WithContext(ctx).Save(&cursor).Error
 }
 
 func (s *Store) ReserveInquiry(ctx context.Context, no, ref string) (*model.Order, error) {
