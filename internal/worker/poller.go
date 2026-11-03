@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ type PollStats struct {
 	SkipType      int       `json:"skip_type"`
 	SkipReceiver  int       `json:"skip_receiver"`
 	SkipAmount    int       `json:"skip_amount"`
+	SkipDuplicate int       `json:"skip_duplicate"` // 已入账过的流水再次出现在历史窗口
 	SkipCurrency  int       `json:"skip_currency"`
 	SkipState     int       `json:"skip_state"`
 	TotalMatched  int64     `json:"total_matched"`
@@ -223,20 +225,11 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 		return
 	}
 
-	var skipOut, skipType, skipRecv, skipAmt, skipCur int
+	var skipOut, skipType, skipRecv, skipAmt, skipCur, skipDup int
 	matched := 0
 
-	// observe 把未归属交易写入观察账本；写入失败只降级为日志，不影响扫描。
-	observe := func(tx *incomingTransaction, reason, orderTradeNo string) {
-		obs := model.TxObservation{
-			Provider: provider, TransactionID: tx.ID, Type: tx.Type,
-			Amount: tx.Amount, Currency: tx.Currency, ReceiverID: tx.ReceiverID,
-			TransactionTime: tx.Time, Reason: reason, OrderTradeNo: orderTradeNo, Raw: tx.Raw,
-		}
-		if err := p.store.RecordTxObservation(ctx, obs); err != nil {
-			slog.Warn("记录未归属交易失败", "provider", provider, "tx", tx.ID, "err", err)
-		}
-	}
+	// 本轮每笔未归属流水的最高优先级失败原因，扫描结束统一落库。
+	book := newTxObservationBook(provider)
 
 	for _, tx := range txs {
 		reject := rejectTransaction(provider, cfg, &tx)
@@ -254,12 +247,13 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 			// 支出类流水不属于潜在漏单证据，不入账本；类型/币种/收款人被拒
 			// 的流水（如走了链上充值、付错币种）必须留痕。
 			if reject != transactionOutgoing {
-				observe(&tx, observationReason(reject), "")
+				book.observe(&tx, observationReason(reject), "")
 			}
 			continue
 		}
 
 		hit := false
+		resolvedTradeNo := ""
 		for i := range orders {
 			o := &orders[i]
 			if o.Status == model.StatusPaid {
@@ -287,17 +281,22 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 				Raw:             tx.Raw,
 			}, cfg.Order.AmountPrecision)
 			if err != nil {
-				observe(&tx, "claim_failed", o.TradeNo)
+				book.observe(&tx, model.ObservationReasonClaimFailed, o.TradeNo)
 				slog.Error("订单入账失败", "trade_no", o.TradeNo, "tx", tx.ID, "err", err)
 				continue
 			}
 			if !ok {
+				// 幂等闸门拦下：这笔流水已经入账到某个订单，不是未归属流水。
+				// 继续尝试其它订单只会重复触发同一个守卫，直接结束匹配。
 				slog.Debug("流水或订单已被处理，跳过", "tx", tx.ID, "trade_no", o.TradeNo)
-				continue
+				skipDup++
+				hit = true
+				break
 			}
 
 			matched++
 			hit = true
+			resolvedTradeNo = o.TradeNo
 			o.Status = model.StatusPaid
 			slog.Info("已确认到账，订单已支付",
 				"provider", provider,
@@ -310,9 +309,22 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 			)
 			break
 		}
-		if !hit {
-			skipAmt++
-			observe(&tx, "no_match", "")
+		if hit {
+			// 已入账的流水不能继续留在“未归属”里：撤销本轮观察，并把此前
+			// 累积的观察记录标记为 resolved。
+			book.retract(tx.ID)
+			if err := p.store.ResolveTxObservation(ctx, provider, tx.ID, resolvedTradeNo); err != nil {
+				slog.Warn("标记未归属流水已入账失败", "provider", provider, "tx", tx.ID, "err", err)
+			}
+			continue
+		}
+		skipAmt++
+		book.observe(&tx, model.ObservationReasonNoMatch, "")
+	}
+
+	for _, obs := range book.pending() {
+		if err := p.store.RecordTxObservation(ctx, obs); err != nil {
+			slog.Warn("记录未归属交易失败", "provider", provider, "tx", obs.TransactionID, "err", err)
 		}
 	}
 
@@ -328,12 +340,13 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 		s.SkipReceiver = skipRecv
 		s.SkipAmount = skipAmt
 		s.SkipCurrency = skipCur
+		s.SkipDuplicate = skipDup
 	})
 
 	if len(txs) > 0 {
 		slog.Info("到账扫描完成", "provider", provider, "fetched", len(txs), "matched", matched,
 			"skip_outgoing", skipOut, "skip_type", skipType, "skip_currency", skipCur,
-			"skip_receiver", skipRecv, "skip_amount", skipAmt)
+			"skip_receiver", skipRecv, "skip_amount", skipAmt, "skip_duplicate", skipDup)
 	}
 }
 
@@ -372,15 +385,64 @@ func rejectTransaction(provider string, cfg *config.Config, tx *incomingTransact
 func observationReason(r transactionRejectReason) string {
 	switch r {
 	case transactionOutgoing:
-		return "outgoing"
+		return model.ObservationReasonOutgoing
 	case transactionType:
-		return "type"
+		return model.ObservationReasonType
 	case transactionCurrency:
-		return "currency"
+		return model.ObservationReasonCurrency
 	case transactionReceiver:
-		return "receiver"
+		return model.ObservationReasonReceiver
 	}
-	return "unknown"
+	return model.ObservationReasonUnknown
+}
+
+// txObservationBook 汇总一轮扫描中每笔未归属流水的失败原因。
+//
+// 同一笔流水在一轮扫描里可能先被某个订单拒绝入账（claim_failed），又不命中
+// 其它订单而被标成 no_match。逐条写库会让后写的原因覆盖前面的原因，所以先
+// 在内存里只保留优先级最高的一条，扫描结束再统一落库。
+type txObservationBook struct {
+	provider string
+	items    map[string]model.TxObservation
+}
+
+func newTxObservationBook(provider string) *txObservationBook {
+	return &txObservationBook{provider: provider, items: make(map[string]model.TxObservation)}
+}
+
+// observe 记录一次观察；已存在更高优先级的原因时保留原值。
+func (b *txObservationBook) observe(tx *incomingTransaction, reason, orderTradeNo string) {
+	reason = model.NormalizeTxObservationReason(reason)
+	rank := model.TxObservationRank(reason)
+	if cur, ok := b.items[tx.ID]; ok && cur.ReasonRank > rank {
+		return
+	}
+	b.items[tx.ID] = model.TxObservation{
+		Provider: b.provider, TransactionID: tx.ID, Type: tx.Type,
+		Amount: tx.Amount, Currency: tx.Currency, ReceiverID: tx.ReceiverID,
+		TransactionTime: tx.Time, Reason: reason, ReasonRank: rank,
+		OrderTradeNo: orderTradeNo, Raw: tx.Raw,
+	}
+}
+
+// retract 撤销一笔流水本轮的未归属结论（它其实已经入账）。
+func (b *txObservationBook) retract(transactionID string) {
+	delete(b.items, transactionID)
+}
+
+// pending 返回待落库的观察记录，按流水号排序便于测试与日志稳定。
+func (b *txObservationBook) pending() []model.TxObservation {
+	out := make([]model.TxObservation, 0, len(b.items))
+	for _, obs := range b.items {
+		out = append(out, obs)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		return out[i].TransactionID < out[j].TransactionID
+	})
+	return out
 }
 
 func orderMatchesTransaction(o *model.Order, tx *incomingTransaction, amountPrecision int) bool {

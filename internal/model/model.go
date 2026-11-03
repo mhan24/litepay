@@ -1,7 +1,10 @@
 // Package model 定义数据库模型。
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // 订单状态
 const (
@@ -117,11 +120,69 @@ type IncomingTx struct {
 // TableName 指定表名。
 func (IncomingTx) TableName() string { return "incoming_txs" }
 
+// 观察账本的流水状态。
+const (
+	ObservationOpen     = "open"     // 仍未归属任何订单
+	ObservationResolved = "resolved" // 已核销到订单，保留记录供审计
+)
+
+// 观察账本的失败原因（稳定标记，后台模板按此展示）。
+const (
+	ObservationReasonNoMatch     = "no_match"     // 没有可匹配的订单（迟到付款、订单已终结等）
+	ObservationReasonClaimFailed = "claim_failed" // 匹配到订单但入账被拒
+	ObservationReasonReceiver    = "receiver"     // 收款 UID 与配置不一致
+	ObservationReasonCurrency    = "currency"     // 币种不在启用列表内
+	ObservationReasonType        = "type"         // 流水类型不可入账（链上充值、退款等）
+	ObservationReasonOutgoing    = "outgoing"     // 支出类流水
+	ObservationReasonUnknown     = "unknown"
+)
+
+// txObservationRank 定义失败原因在同一条流水上的保留优先级，数值大者优先。
+//
+// 扫描会反复读到同一笔流水，而每次读到的上下文并不相同：先因订单状态
+// 拒绝入账（claim_failed），订单终结后同一笔流水就只剩 no_match。优先级
+// 保证“钱已收到但没进订单”这类需要人工介入的原因不会被更弱的观察覆盖。
+var txObservationRank = map[string]int{
+	ObservationReasonClaimFailed: 60,
+	ObservationReasonNoMatch:     50,
+	ObservationReasonReceiver:    40,
+	ObservationReasonCurrency:    30,
+	ObservationReasonType:        20,
+	ObservationReasonOutgoing:    10,
+	ObservationReasonUnknown:     0,
+}
+
+// TxObservationReasons 返回全部已知的观察原因，用于迁移回填与校验。
+func TxObservationReasons() []string {
+	return []string{
+		ObservationReasonClaimFailed, ObservationReasonNoMatch, ObservationReasonReceiver,
+		ObservationReasonCurrency, ObservationReasonType, ObservationReasonOutgoing,
+	}
+}
+
+// NormalizeTxObservationReason 统一观察原因的写法，未知值归为 unknown。
+func NormalizeTxObservationReason(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	if _, ok := txObservationRank[reason]; ok {
+		return reason
+	}
+	return ObservationReasonUnknown
+}
+
+// TxObservationRank 返回观察原因的保留优先级，数值越大越应保留。
+func TxObservationRank(reason string) int {
+	return txObservationRank[NormalizeTxObservationReason(reason)]
+}
+
 // TxObservation 未归属交易观察账本。
 //
 // 记录扫描到但未能核销到订单的流水：被过滤器跳过、无匹配订单、或核销被拒。
 // 与 incoming_txs 分表存放，避免干扰核销幂等；迟到付款与错误币种/金额的
 // 转账在这里留痕，供后台排查与对账。
+//
+// 账本只回答“现在还有哪笔钱没有归属”：核销成功后由 Status 标记为
+// resolved，后台不再展示；ReasonRank 保证多次观察之间只保留最严重的
+// 失败原因。
 type TxObservation struct {
 	Provider        string    `gorm:"primaryKey;size:16"`
 	TransactionID   string    `gorm:"primaryKey;size:128"`
@@ -131,8 +192,14 @@ type TxObservation struct {
 	ReceiverID      string    `gorm:"size:128"`
 	TransactionTime time.Time `gorm:"index"`
 	Reason          string    `gorm:"size:32;index"`
-	OrderTradeNo    string    `gorm:"size:64;index"`
-	Raw             string    `gorm:"type:text"`
+	ReasonRank      int       `gorm:"not null;default:0"`
+	Status          string    `gorm:"size:16;index;not null;default:'open'"`
+	// OrderTradeNo 是最近一次尝试入账的订单，便于人工顺着订单号排查。
+	OrderTradeNo string `gorm:"size:64;index"`
+	// ResolvedTradeNo 是实际完成入账的订单，仅 Status=resolved 时有值。
+	ResolvedTradeNo string     `gorm:"size:64"`
+	ResolvedAt      *time.Time `gorm:"index"`
+	Raw             string     `gorm:"type:text"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }

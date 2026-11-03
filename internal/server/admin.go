@@ -372,6 +372,7 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 	recent, _ := h.st.RecentOrders(ctx, 8)
 	volumes, _ := h.st.VolumeByCurrency(ctx, midnight)
 	observations, _ := h.st.RecentTxObservations(ctx, 8)
+	observationCount, _ := h.st.CountOpenTxObservations(ctx)
 
 	c.HTML(http.StatusOK, "admin_dashboard.html", gin.H{
 		"Base":             h.adminBase(c, "dashboard", "概览"),
@@ -385,6 +386,7 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 		"ExpireNotifyFail": expireNotifyFail,
 		"Recent":           recent,
 		"Observations":     observations,
+		"ObservationCount": observationCount,
 		"Poll":             h.poller.StatsFor(config.ProviderBinance),
 		"OKXPoll":          h.poller.StatsFor(config.ProviderOKX),
 		"BinanceOn":        h.C().BinanceEnabled(),

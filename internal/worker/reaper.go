@@ -13,7 +13,17 @@ import (
 type Reaper struct {
 	store *store.Store
 	cfg   *settings.Manager
+
+	// lastPrune 记录上次清理观察账本的时间，避免每轮都执行删除。
+	lastPrune time.Time
 }
+
+// observationRetention 未归属流水账本的保留期。账本只服务于近期漏单排查，
+// 长期运行时不能无限增长；已归属记录同样到期清理。
+const observationRetention = 30 * 24 * time.Hour
+
+// observationPruneInterval 清理观察账本的最小间隔。
+const observationPruneInterval = time.Hour
 
 // NewReaper 创建清理器。
 func NewReaper(st *store.Store, cfg *settings.Manager) *Reaper {
@@ -48,5 +58,24 @@ func (r *Reaper) once(ctx context.Context) {
 		slog.Error("终结过期订单失败", "err", err)
 	} else if n > 0 {
 		slog.Info("已结束过期订单，停止确认到账并安排过期通知", "count", n)
+	}
+
+	r.pruneObservations(ctx)
+}
+
+// pruneObservations 按保留期清理未归属流水账本，每小时最多执行一次。
+func (r *Reaper) pruneObservations(ctx context.Context) {
+	if !r.lastPrune.IsZero() && time.Since(r.lastPrune) < observationPruneInterval {
+		return
+	}
+	n, err := r.store.PruneTxObservations(ctx, time.Now().Add(-observationRetention))
+	if err != nil {
+		slog.Error("清理未归属流水账本失败", "err", err)
+		return
+	}
+	r.lastPrune = time.Now()
+	if n > 0 {
+		slog.Info("已清理超过保留期的未归属流水记录", "count", n,
+			"retention_days", int(observationRetention.Hours()/24))
 	}
 }

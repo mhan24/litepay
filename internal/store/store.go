@@ -95,7 +95,35 @@ func Open(path string) (*Store, error) {
 		&model.TxObservation{}, &model.NotifyLog{}, &model.Setting{}, &model.Credential{}); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
+	if err := migrateObservationLedger(db); err != nil {
+		return nil, fmt.Errorf("回填未归属流水账本失败: %w", err)
+	}
 	return &Store{db: db, orderLocks: make(map[string]*orderLock)}, nil
+}
+
+// migrateObservationLedger 为旧库补齐观察账本的状态位与原因优先级。
+//
+// status / reason_rank 是后加的列，历史行迁移后只会取默认值。若不回填，
+// 旧库里一条 claim_failed 的优先级仍是 0，下一次扫描的 no_match 就会把
+// 真正的核销失败原因覆盖掉。
+func migrateObservationLedger(db *gorm.DB) error {
+	if err := db.Model(&model.TxObservation{}).
+		Where("status IS NULL OR status = ''").
+		Update("status", model.ObservationOpen).Error; err != nil {
+		return err
+	}
+	for _, reason := range model.TxObservationReasons() {
+		rank := model.TxObservationRank(reason)
+		if rank == 0 {
+			continue
+		}
+		if err := db.Model(&model.TxObservation{}).
+			Where("reason = ? AND reason_rank < ?", reason, rank).
+			Update("reason_rank", rank).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DB 暴露底层连接（测试/调试用）。
@@ -785,25 +813,107 @@ func (s *Store) HasActivePayments(ctx context.Context) (bool, error) {
 }
 
 // RecordTxObservation 记录未归属交易的观察证据（迟到付款、币种/金额不符、
-// 被过滤器拒绝、核销被拒等）。同一流水以最近一次状态覆盖旧值。
+// 被过滤器拒绝、核销被拒等）。
+//
+// 同一笔流水每轮扫描都会被重新读到，而每次看到的上下文可能不同：先因订单
+// 状态被拒（claim_failed），订单终结后同一笔流水就只剩 no_match。因此这里
+// 遵守两条规则，避免账本给出错误结论：
+//   - 只升级不降级：ReasonRank 更高的原因不会被更弱的原因覆盖；
+//   - 已入账即定稿：status=resolved 的记录不会被改回未归属。
 func (s *Store) RecordTxObservation(ctx context.Context, obs model.TxObservation) error {
 	now := time.Now()
-	obs.CreatedAt = now
-	obs.UpdatedAt = now
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "provider"}, {Name: "transaction_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"reason", "order_trade_no", "updated_at"}),
-	}).Create(&obs).Error
+	obs.Reason = model.NormalizeTxObservationReason(obs.Reason)
+	obs.ReasonRank = model.TxObservationRank(obs.Reason)
+	obs.Status = model.ObservationOpen
+
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing []model.TxObservation
+		if err := tx.Where("provider = ? AND transaction_id = ?", obs.Provider, obs.TransactionID).
+			Limit(1).Find(&existing).Error; err != nil {
+			return err
+		}
+		if len(existing) == 0 {
+			obs.CreatedAt, obs.UpdatedAt = now, now
+			return tx.Create(&obs).Error
+		}
+		if existing[0].Status == model.ObservationResolved {
+			// 已入账的流水会随着历史窗口反复出现（幂等认领返回 false），
+			// 这里只刷新时间，保留“已归属”的结论。
+			return tx.Model(&model.TxObservation{}).
+				Where("provider = ? AND transaction_id = ?", obs.Provider, obs.TransactionID).
+				Update("updated_at", now).Error
+		}
+		if obs.ReasonRank < existing[0].ReasonRank {
+			return nil
+		}
+		return tx.Model(&model.TxObservation{}).
+			Where("provider = ? AND transaction_id = ?", obs.Provider, obs.TransactionID).
+			Updates(map[string]any{
+				"reason":           obs.Reason,
+				"reason_rank":      obs.ReasonRank,
+				"order_trade_no":   obs.OrderTradeNo,
+				"transaction_time": obs.TransactionTime,
+				"updated_at":       now,
+			}).Error
+	})
 }
 
-// RecentTxObservations 返回最近的未归属交易记录（后台排查用）。
+// ResolveTxObservation 把观察账本中的流水标记为已入账。
+//
+// 核销成功的流水不属于未归属流水；账本行保留，用于事后核对迟到付款是在
+// 哪一轮扫描里补上的。tradeNo 为空时只标记状态，不改写已记录的订单号。
+func (s *Store) ResolveTxObservation(ctx context.Context, provider, transactionID, tradeNo string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	transactionID = strings.TrimSpace(transactionID)
+	if provider == "" || transactionID == "" {
+		return nil
+	}
+	now := time.Now()
+	updates := map[string]any{
+		"status":      model.ObservationResolved,
+		"resolved_at": now,
+		"updated_at":  now,
+	}
+	if tradeNo = strings.TrimSpace(tradeNo); tradeNo != "" {
+		updates["resolved_trade_no"] = tradeNo
+	}
+	return s.db.WithContext(ctx).Model(&model.TxObservation{}).
+		Where("provider = ? AND transaction_id = ?", provider, transactionID).
+		Updates(updates).Error
+}
+
+// RecentTxObservations 返回最近仍未归属的流水（后台排查用）。
+//
+// 除状态位外，这里再排除一次已存在于 incoming_txs 的流水：账本上线前写入的
+// 旧行没有状态位，靠这条 JOIN 也不会在后台误报成未归属。
 func (s *Store) RecentTxObservations(ctx context.Context, limit int) ([]model.TxObservation, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
 	var out []model.TxObservation
 	err := s.db.WithContext(ctx).
+		Where("status IS NULL OR status <> ?", model.ObservationResolved).
+		Where(`NOT EXISTS (SELECT 1 FROM incoming_txs WHERE incoming_txs.provider = tx_observations.provider` +
+			` AND incoming_txs.transaction_id = tx_observations.transaction_id)`).
 		Order("transaction_time DESC, provider ASC, transaction_id ASC").
 		Limit(limit).Find(&out).Error
 	return out, err
+}
+
+// CountOpenTxObservations 返回仍未归属的流水数量（后台概览用）。
+func (s *Store) CountOpenTxObservations(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.WithContext(ctx).Model(&model.TxObservation{}).
+		Where("status IS NULL OR status <> ?", model.ObservationResolved).
+		Where(`NOT EXISTS (SELECT 1 FROM incoming_txs WHERE incoming_txs.provider = tx_observations.provider` +
+			` AND incoming_txs.transaction_id = tx_observations.transaction_id)`).
+		Count(&count).Error
+	return count, err
+}
+
+// PruneTxObservations 删除超过保留期的观察记录。已归属与未归属都会清理：
+// 账本只服务于近期排查，长期运行不能无限增长。
+func (s *Store) PruneTxObservations(ctx context.Context, before time.Time) (int64, error) {
+	res := s.db.WithContext(ctx).Where("updated_at < ?", before).Delete(&model.TxObservation{})
+	return res.RowsAffected, res.Error
 }

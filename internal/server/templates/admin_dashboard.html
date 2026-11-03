@@ -95,13 +95,13 @@
           <div class="k">最近检查</div>
           <div class="v">{{if .Poll.LastRunAt.IsZero}}<span class="muted">尚未运行</span>{{else}}{{.Poll.LastRunAt.Format "01-02 15:04:05"}}{{end}}</div>
           <div class="k">最近结果</div>
-          <div class="v">读取 {{.Poll.LastFetched}} 条 · 确认 {{.Poll.LastMatched}} 笔{{if or .Poll.SkipType .Poll.SkipCurrency .Poll.SkipReceiver .Poll.SkipAmount}} · 跳过 类型{{.Poll.SkipType}}/币种{{.Poll.SkipCurrency}}/收款人{{.Poll.SkipReceiver}}/金额{{.Poll.SkipAmount}}{{end}}</div>
+          <div class="v">读取 {{.Poll.LastFetched}} 条 · 确认 {{.Poll.LastMatched}} 笔{{if or .Poll.SkipType .Poll.SkipCurrency .Poll.SkipReceiver .Poll.SkipAmount .Poll.SkipDuplicate}} · 跳过 类型{{.Poll.SkipType}}/币种{{.Poll.SkipCurrency}}/收款人{{.Poll.SkipReceiver}}/金额{{.Poll.SkipAmount}}/已入账{{.Poll.SkipDuplicate}}{{end}}</div>
           <div class="k">OKX</div>
           <div class="v">{{if .OKXOn}}{{if .OKXPoll.LastError}}<span class="badge b-err">查询异常</span>{{else}}<span class="badge b-ok">运行中</span>{{end}}{{else}}<span class="badge b-gray">未启用</span>{{end}}</div>
           <div class="k">最近检查</div>
           <div class="v">{{if .OKXPoll.LastRunAt.IsZero}}<span class="muted">尚未运行</span>{{else}}{{.OKXPoll.LastRunAt.Format "01-02 15:04:05"}}{{end}}</div>
           <div class="k">最近结果</div>
-          <div class="v">读取 {{.OKXPoll.LastFetched}} 条 · 确认 {{.OKXPoll.LastMatched}} 笔{{if or .OKXPoll.SkipType .OKXPoll.SkipCurrency .OKXPoll.SkipReceiver .OKXPoll.SkipAmount}} · 跳过 类型{{.OKXPoll.SkipType}}/币种{{.OKXPoll.SkipCurrency}}/收款人{{.OKXPoll.SkipReceiver}}/金额{{.OKXPoll.SkipAmount}}{{end}}</div>
+          <div class="v">读取 {{.OKXPoll.LastFetched}} 条 · 确认 {{.OKXPoll.LastMatched}} 笔{{if or .OKXPoll.SkipType .OKXPoll.SkipCurrency .OKXPoll.SkipReceiver .OKXPoll.SkipAmount .OKXPoll.SkipDuplicate}} · 跳过 类型{{.OKXPoll.SkipType}}/币种{{.OKXPoll.SkipCurrency}}/收款人{{.OKXPoll.SkipReceiver}}/金额{{.OKXPoll.SkipAmount}}/已入账{{.OKXPoll.SkipDuplicate}}{{end}}</div>
           <div class="k">累计确认</div>
           <div class="v">Binance {{.Poll.TotalMatched}} 笔 · OKX {{.OKXPoll.TotalMatched}} 笔</div>
           {{if .Poll.LastError}}<div class="k">Binance 异常</div><div class="v" style="color:var(--danger);font-size:11.5px">{{.Poll.LastError}}</div>{{end}}
@@ -113,10 +113,10 @@
     </section>
 
     <section class="card">
-      <div class="card-h"><h2>未归属流水</h2><span class="hint">扫描到但未核销到订单的交易，用于漏单排查</span></div>
+      <div class="card-h"><h2>未归属流水</h2><span class="hint">扫描到但至今仍未核销到订单的交易，用于漏单排查{{if .ObservationCount}}（共 {{.ObservationCount}} 笔）{{end}}</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>交易时间</th><th>通道</th><th>币种 / 金额</th><th>原因</th><th>尝试订单</th></tr></thead>
+          <thead><tr><th>交易时间</th><th>通道</th><th>币种 / 金额</th><th>原因</th><th>尝试订单</th><th>最近观察</th></tr></thead>
           <tbody>
           {{range .Observations}}
             <tr>
@@ -132,9 +132,10 @@
                 {{else}}<span class="badge b-gray">{{.Reason}}</span>{{end}}
               </td>
               <td class="muted mono">{{if .OrderTradeNo}}{{.OrderTradeNo}}{{else}}—{{end}}</td>
+              <td class="muted mono">{{.UpdatedAt.Format "01-02 15:04:05"}}</td>
             </tr>
           {{else}}
-            <tr><td colspan="5" class="empty">暂无未归属流水。</td></tr>
+            <tr><td colspan="6" class="empty">暂无未归属流水。</td></tr>
           {{end}}
           </tbody>
         </table>
