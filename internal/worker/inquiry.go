@@ -95,7 +95,7 @@ func (p *Poller) CheckPayment(ctx context.Context, tradeNo, reference string) (s
 		}
 		var matched []incomingTransaction
 		for _, tx := range txs {
-			if tx.ReferenceID == reference || (tx.OrderID != "" && tx.OrderID == reference) {
+			if tx.EventID == reference || (tx.OrderID != "" && tx.OrderID == reference) {
 				matched = append(matched, tx)
 			}
 		}
@@ -135,6 +135,11 @@ func (p *Poller) CheckPayment(ctx context.Context, tradeNo, reference string) (s
 		return result, nil
 	}
 	if len(txs) != 1 {
+		for _, tx := range txs {
+			if err := p.store.RecordTxObservation(ctx, model.TxObservation{Provider: provider, TransactionID: tx.ID, EventID: tx.EventID, DetailID: tx.DetailID, CanonicalID: tx.CanonicalID, ReferenceID: reference, IdentityIssue: "ambiguous", Type: tx.Type, Amount: tx.Amount, AmountText: tx.AmountText, Currency: tx.Currency, ReceiverID: tx.ReceiverID, TransactionTime: tx.Time, Raw: tx.Raw, Reason: model.ObservationReasonIdentity, OrderTradeNo: o.TradeNo}); err != nil {
+				return "", err
+			}
+		}
 		result = "needs_review"
 		return result, nil
 	}

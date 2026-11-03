@@ -114,12 +114,19 @@ func migrateEventIdentity(db *gorm.DB) error {
 			}
 			if ambiguous {
 				issue = "ambiguous"
+				if event != "" {
+					if err := d.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.EventClaim{Provider: row.Provider, EventID: event, CanonicalID: row.TransactionID, State: "ambiguous"}).Error; err != nil {
+						return err
+					}
+				}
 			}
 			if err := d.Model(&model.TxObservation{}).Where("provider = ? AND transaction_id = ?", row.Provider, row.TransactionID).Updates(map[string]any{"event_id": event, "reference_id": ref, "canonical_id": row.TransactionID, "identity_issue": issue}).Error; err != nil {
 				return err
 			}
 		}
-		return nil
+		return d.Exec(`INSERT OR IGNORE INTO event_claims(provider,event_id,canonical_id,state)
+ SELECT provider,event_id,MIN(canonical_id),'ambiguous' FROM tx_observations
+ WHERE identity_issue = 'ambiguous' AND event_id <> '' GROUP BY provider,event_id`).Error
 	})
 }
 

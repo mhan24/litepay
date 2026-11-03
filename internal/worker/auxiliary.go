@@ -30,7 +30,11 @@ func (p *Poller) ReconcileOKXBills(ctx context.Context) error {
 	since := time.Now().Add(-24 * time.Hour)
 	uid, err := cli.AccountUID(ctx)
 	if err != nil || uid != cfg.Checkout.OKX.UID {
-		p.store.SaveAuxiliary(context.Background(), "incomplete", "账户核验失败，未执行辅助对账", nil)
+		auditCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stop()
+		if saveErr := p.store.SaveAuxiliary(auditCtx, "incomplete", "账户核验失败，未执行辅助对账", nil); saveErr != nil {
+			return saveErr
+		}
 		return ErrInquiryClosed
 	}
 	result, diagnostic := "needs_review", "辅助账单仅作排查，不作为自动核销依据"

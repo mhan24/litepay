@@ -436,6 +436,17 @@ func (p *Poller) scanWindow(ctx context.Context, cfg *config.Config, provider st
 
 		reject := rejectTransaction(provider, cfg, &tx)
 		if reject != transactionAccepted {
+			// Fence ambiguity immediately; a later window/interface must not reinterpret
+			// a partial view of this same parent as an independent payable event.
+			if tx.IdentityIssue == "ambiguous" {
+				tmp := newTxObservationBook(provider)
+				tmp.observe(&tx, model.ObservationReasonIdentity, "")
+				for _, obs := range tmp.pending() {
+					if err := p.store.RecordTxObservation(ctx, obs); err != nil {
+						return err
+					}
+				}
+			}
 			switch reject {
 			case transactionOutgoing:
 				totals.skipOut++
@@ -674,7 +685,7 @@ func (p *Poller) binanceTransactions(ctx context.Context, cfg *config.Config,
 	out := make([]incomingTransaction, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, incomingTransaction{
-			EventID: row.EventID, DetailID: row.DetailID, CanonicalID: row.CanonicalID, IdentityIssue: row.IdentityIssue, ID: row.TransactionID, ReferenceID: row.ReferenceID, OrderID: row.OrderID, Type: strings.ToUpper(row.OrderType),
+			EventID: row.EventID, DetailID: row.DetailID, CanonicalID: row.CanonicalID, IdentityIssue: row.IdentityIssue, ID: row.EvidenceID, ReferenceID: row.ReferenceID, OrderID: row.OrderID, Type: strings.ToUpper(row.OrderType),
 			Amount: row.Amount, AmountText: row.AmountText, Currency: strings.ToUpper(row.Currency),
 			Time: row.TransactionTime, ReceiverID: row.ReceiverID,
 			ReceiverAddr: row.ReceiverID, Incoming: row.Incoming, Raw: row.Raw,

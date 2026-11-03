@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,41 @@ import (
 
 	"litepay/internal/model"
 )
+
+func TestUpgradePreIdentitySQLitePreservesPaidOrders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-schema.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE incoming_txs(provider text,transaction_id text,type text,amount real,currency text,order_trade_no text,raw text,PRIMARY KEY(provider,transaction_id))`,
+		`INSERT INTO incoming_txs VALUES('binance','old-event:0','PAY',2.51,'USDT','PAID-OLD','{"transactionId":"old-event","orderId":"old-app"}')`,
+		`CREATE TABLE orders(id integer PRIMARY KEY,trade_no text,status text,pay_amount real,origin_money text,origin_currency text,amount_precision integer)`,
+		`INSERT INTO orders VALUES(1,'PAID-OLD','PAID',2.51,'2.50','USD',2)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := st.GetByTradeNo(context.Background(), "PAID-OLD")
+	if err != nil || old.Status != model.StatusPaid || old.PayAmount != 2.51 {
+		t.Fatalf("legacy paid order changed: %+v %v", old, err)
+	}
+	var row model.IncomingTx
+	if err := st.DB().Where("transaction_id = ?", "old-event:0").First(&row).Error; err != nil || row.EventID != "old-event" || row.ReferenceID != "old-app" || row.TransactionID != "old-event:0" {
+		t.Fatalf("legacy identity lost: %+v %v", row, err)
+	}
+	var guard model.EventClaim
+	if err := st.DB().Where("provider = ? AND event_id = ?", "binance", "old-event").First(&guard).Error; err != nil || guard.TradeNo != "PAID-OLD" {
+		t.Fatal("legacy event not reserved")
+	}
+}
 
 func TestParentEventCanOnlyConsumeOneOrder(t *testing.T) {
 	st := openTestStore(t)
@@ -101,5 +137,22 @@ func TestStoreRejectsAmbiguousOrMissingExchangeIdentity(t *testing.T) {
 		if ok, err := st.ClaimAndPay(context.Background(), o, model.IncomingTx{Provider: "binance", TransactionID: "funds", Type: "PAY", Currency: o.Currency, Amount: o.PayAmount, ReceiverAddr: o.PayAddress, TransactionTime: time.Now(), Raw: raw}, 2); ok || err == nil {
 			t.Fatal("uncertain identity accepted")
 		}
+	}
+}
+
+func TestObservedAmbiguityCannotBeErasedByAnotherAPIShape(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	o := createTestOrder(t, st, "SHAPE", "SHAPE", 1)
+	if err := st.RecordTxObservation(ctx, model.TxObservation{Provider: "binance", TransactionID: "shape:0", EventID: "shape", CanonicalID: "shape", IdentityIssue: "ambiguous", Reason: model.ObservationReasonIdentity}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.ClaimAndPay(ctx, o, model.IncomingTx{Provider: "binance", TransactionID: "shape", EventID: "shape", CanonicalID: "shape", Type: "PAY", Currency: o.Currency, Amount: o.PayAmount, ReceiverAddr: o.PayAddress, TransactionTime: time.Now(), Raw: `{"transactionId":"shape"}`}, 2); ok || err == nil {
+		t.Fatal("changed API shape erased ambiguity")
+	}
+	var count int64
+	st.DB().Model(&model.IncomingTx{}).Count(&count)
+	if count != 0 {
+		t.Fatal("ambiguous shape created claim")
 	}
 }

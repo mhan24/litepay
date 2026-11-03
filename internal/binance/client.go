@@ -65,13 +65,14 @@ func (c *Client) UseTestTransport() {
 
 // Transaction 一条 Binance 站内转账记录（已解析）。
 type Transaction struct {
-	EventID          string
-	DetailID         string
-	CanonicalID      string
-	IdentityIssue    string
+	EventID          string    `json:"event_id"`
+	DetailID         string    `json:"detail_id"`
+	CanonicalID      string    `json:"canonical_id"`
+	IdentityIssue    string    `json:"identity_issue"`
+	EvidenceID       string    `json:"evidence_id"`
 	OrderID          string    `json:"orderId"` // Optional exchange-provided App reference, never inferred.
 	RawTransactionID string    `json:"raw_transaction_id"`
-	ReferenceID      string    `json:"reference_id"` // Exchange ID before canonical fundsDetail suffixes.
+	ReferenceID      string    `json:"reference_id"` // Preferred exchange-provided lookup reference; not a consumption key.
 	OrderType        string    `json:"orderType"`
 	TransactionID    string    `json:"transactionId"`
 	TransactionTime  time.Time `json:"transactionTime"`
@@ -242,7 +243,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			return nil, 0, &APIError{Kind: ErrorParse}
 		}
 		base := Transaction{
-			EventID: id, CanonicalID: id,
+			EventID: id, CanonicalID: id, EvidenceID: id,
 			OrderID:          strings.TrimSpace(string(d.OrderID)),
 			RawTransactionID: id,
 			OrderType:        strings.ToUpper(string(d.OrderType)),
@@ -251,6 +252,9 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 			TransactionTime:  time.UnixMilli(int64(d.TransactionTime)),
 			ReceiverID:       strings.TrimSpace(string(d.ReceiverInfo.BinanceID)),
 			Raw:              truncate(string(raw), maxStoredRawBytes),
+		}
+		if base.OrderID != "" {
+			base.ReferenceID = base.OrderID
 		}
 		if len(d.FundsDetail) > 0 {
 			// A non-zero top-level amount is authoritative. Only when it is
@@ -285,7 +289,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end time.Time) ([]Trans
 				item.CanonicalID = id
 				if len(d.FundsDetail) > 1 {
 					item.IdentityIssue = "ambiguous"
-					item.TransactionID = fmt.Sprintf("%s:%d", id, i)
+					item.EvidenceID = fmt.Sprintf("%s#%s", id, item.DetailID)
 				}
 				out = append(out, item)
 			}

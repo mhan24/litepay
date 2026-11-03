@@ -571,13 +571,17 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 		if consumed != 0 {
 			return nil
 		}
-		var usedEvent int64
-		if err := d.Model(&model.EventClaim{}).Where("provider = ? AND event_id = ?", tx.Provider, tx.EventID).Count(&usedEvent).Error; err != nil {
+		var guards []model.EventClaim
+		if err := d.Where("provider = ? AND event_id = ?", tx.Provider, tx.EventID).Limit(1).Find(&guards).Error; err != nil {
 			return err
 		}
-		if usedEvent != 0 {
+		if len(guards) > 0 {
+			if guards[0].State != "claimed" {
+				return rejectClaim("资金事件曾存在歧义或历史冲突，需人工处理")
+			}
 			return nil
 		}
+
 		if err := guardLegacyIdentity(d, &tx); err != nil {
 			return err
 		}
@@ -973,6 +977,22 @@ func (s *Store) RecordTxObservation(ctx context.Context, obs model.TxObservation
 	obs.Status = model.ObservationOpen
 
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if obs.EventID != "" {
+			if obs.IdentityIssue == "ambiguous" {
+				if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.EventClaim{Provider: obs.Provider, EventID: obs.EventID, CanonicalID: obs.CanonicalID, State: "ambiguous"}).Error; err != nil {
+					return err
+				}
+			}
+			var guards []model.EventClaim
+			if err := tx.Where("provider = ? AND event_id = ?", obs.Provider, obs.EventID).Limit(1).Find(&guards).Error; err != nil {
+				return err
+			}
+			if len(guards) > 0 && guards[0].State == "claimed" {
+				obs.Status = model.ObservationResolved
+				obs.ResolvedTradeNo = guards[0].TradeNo
+				obs.ResolvedAt = &now
+			}
+		}
 		var existing []model.TxObservation
 		if err := tx.Where("provider = ? AND transaction_id = ?", obs.Provider, obs.TransactionID).
 			Limit(1).Find(&existing).Error; err != nil {
@@ -995,6 +1015,7 @@ func (s *Store) RecordTxObservation(ctx context.Context, obs model.TxObservation
 		return tx.Model(&model.TxObservation{}).
 			Where("provider = ? AND transaction_id = ?", obs.Provider, obs.TransactionID).
 			Updates(map[string]any{
+				"status": obs.Status, "resolved_trade_no": obs.ResolvedTradeNo, "resolved_at": obs.ResolvedAt,
 				"event_id": obs.EventID, "detail_id": obs.DetailID, "canonical_id": obs.CanonicalID, "reference_id": obs.ReferenceID, "identity_issue": obs.IdentityIssue,
 				"reason":           obs.Reason,
 				"reason_rank":      obs.ReasonRank,

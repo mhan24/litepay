@@ -125,3 +125,26 @@ func TestSharedRequestBudgetAndDeadline(t *testing.T) {
 		t.Fatalf("deadline lost: %v", err)
 	}
 }
+
+func TestNetworkInterruptionAndTimeoutAreDistinctAndRedacted(t *testing.T) {
+	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	address := closed.URL
+	closed.Close()
+	cli := New("key", "secret", address, 5000, 100)
+	cli.UseTestTransport()
+	_, err := cli.AccountUID(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Kind != ErrorNetwork || strings.Contains(err.Error(), address) {
+		t.Fatalf("network category/redaction: %v", err)
+	}
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer slow.Close()
+	cli = New("key", "secret", slow.URL, 5000, 100)
+	cli.UseTestTransport()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+	_, err = cli.AccountUID(ctx)
+	if !errors.As(err, &apiErr) || apiErr.Kind != ErrorTimeout || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout category: %v", err)
+	}
+}

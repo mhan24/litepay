@@ -75,9 +75,13 @@ func TestCustomerInquiryRejectsUnsafeEvidence(t *testing.T) {
 					rows := []any{}
 					if scenario != "missing" {
 						if provider == "binance" {
-							rows = append(rows, map[string]any{"orderId": "app-order-77", "transactionId": id, "transactionTime": stamp, "orderType": kind, "currency": currency, "amount": amount, "receiverInfo": map[string]string{"binanceId": "receiver"}})
+							row := map[string]any{"orderId": "app.order/77:alt", "transactionId": id, "transactionTime": stamp, "orderType": kind, "currency": currency, "amount": amount, "receiverInfo": map[string]string{"binanceId": "receiver"}}
+							if scenario == "missing_order_reference" {
+								delete(row, "orderId")
+							}
+							rows = append(rows, row)
 						} else {
-							if r.URL.Query().Get("fromWdId") != "reference-1" || r.URL.Query().Get("type") != "3" || r.URL.Query().Get("ccy") != "USDT" {
+							if r.URL.Query().Get("fromWdId") != "" && (r.URL.Query().Get("fromWdId") != "reference-1" || r.URL.Query().Get("type") != "3" || r.URL.Query().Get("ccy") != "USDT") {
 								t.Error("missing targeted OKX filters")
 							}
 							kind = "3"
@@ -149,9 +153,21 @@ func TestCustomerInquiryRejectsUnsafeEvidence(t *testing.T) {
 					}
 				}
 				p := NewPoller(settings.New(cfg, st), st)
+				if provider == "okx" && (scenario == "no_depid" || scenario == "ambiguous") {
+					p.tick(ctx, cfg, provider)
+					cur, _ := st.GetByTradeNo(ctx, o.TradeNo)
+					if cur.Status != model.StatusReady {
+						t.Fatal("auto scanner used unreliable OKX identity")
+					}
+				}
+				beforeCursor, _ := st.ScanCursor(ctx, provider)
+				beforeUntil := time.Time{}
+				if beforeCursor != nil {
+					beforeUntil = beforeCursor.ScannedUntil
+				}
 				reference := "reference-1"
 				if provider == "binance" && scenario == "order_reference" {
-					reference = "app-order-77"
+					reference = "app.order/77:alt"
 				}
 				if provider == "binance" && scenario == "missing_order_reference" {
 					reference = "app-order-not-returned"
@@ -170,6 +186,14 @@ func TestCustomerInquiryRejectsUnsafeEvidence(t *testing.T) {
 					current, _ := st.GetByTradeNo(ctx, o.TradeNo)
 					if current.Status == model.StatusPaid {
 						t.Fatalf("unsafe evidence paid: %s %v", result, err)
+					}
+				}
+				if !wantPaid && scenario != "closed" {
+					var claims, slots int64
+					st.DB().Model(&model.IncomingTx{}).Where("order_trade_no = ?", o.TradeNo).Count(&claims)
+					st.DB().Model(&model.AmountSlot{}).Where("order_id = ?", o.ID).Count(&slots)
+					if claims != 0 || slots != 1 {
+						t.Fatalf("failed inquiry changed money guards: claims=%d slots=%d", claims, slots)
 					}
 				}
 				if scenario == "early" && !errors.Is(err, ErrInquiryEarly) {
@@ -192,7 +216,7 @@ func TestCustomerInquiryRejectsUnsafeEvidence(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if cursor != nil && !cursor.ScannedUntil.IsZero() {
+				if cursor != nil && !cursor.ScannedUntil.Equal(beforeUntil) {
 					t.Fatal("targeted inquiry advanced scan cursor")
 				}
 			})
