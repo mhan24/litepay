@@ -130,7 +130,7 @@ func (c *Client) DepositHistorySince(ctx context.Context, currency string, since
 			seen[key] = struct{}{}
 			all = append(all, row)
 		}
-		if len(rows) < c.limit || oldest == 0 || oldest <= since.UnixMilli() {
+		if len(rows) < c.limit || oldest == 0 || oldest < since.UnixMilli() {
 			break
 		}
 		next := oldest + 1

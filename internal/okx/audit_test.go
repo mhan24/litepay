@@ -73,3 +73,21 @@ func TestAuditAmountParseErrorIsReported(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestFullPageAtSinceBoundaryCannotSilentlyTruncate(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprint(w, `{"code":"0","data":[{"depId":"a","amt":"1","ts":"4000"},{"depId":"b","amt":"1","ts":"4000"}]}`)
+	}))
+	defer srv.Close()
+	cli := New("key", "secret", "pass", srv.URL, 2)
+	cli.UseTestTransport()
+	cli.syncTime = false
+	if _, err := cli.DepositHistorySince(context.Background(), "USDT", time.UnixMilli(4000)); err == nil {
+		t.Fatal("ambiguous saturated timestamp must fail rather than report complete")
+	}
+	if calls < 2 {
+		t.Fatal("full boundary page was not checked")
+	}
+}

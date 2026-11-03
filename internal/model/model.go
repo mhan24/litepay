@@ -21,6 +21,7 @@ const (
 // 回调通知状态
 const (
 	NotifyPending  = "PENDING"  // 待通知 / 通知失败待重试
+	NotifySending  = "SENDING"  // 已领取，正在发送（带租约，崩溃后可被重新领取）
 	NotifySuccess  = "SUCCESS"  // 商户已确认收到（返回 success）
 	NotifyFailed   = "FAILED"   // 达到最大重试次数仍未成功
 	NotifyCanceled = "CANCELED" // 商户取消，无需发送过期结果
@@ -248,3 +249,22 @@ type Credential struct {
 }
 
 func (Credential) TableName() string { return "credentials" }
+
+// 扫描游标：记录每个收款通道已完整扫描到的时间点。
+//
+// 轮询窗口过去完全由“当前待确认订单”推导，服务重启、交易所 API 延迟或长时间
+// 故障后，窗口之外的流水永远不会被读到，到账资金也就没有任何证据。游标把
+// 扫描进度落库，重启后可以从上次的位置继续补扫。
+type ScanCursor struct {
+	Provider string `gorm:"primaryKey;size:16"`
+	// ScannedUntil 表示 (…, ScannedUntil] 区间已被完整扫描。
+	ScannedUntil time.Time `gorm:"index"`
+	// LastRunAt 最近一次成功扫描的时间。
+	LastRunAt time.Time
+	// LastError 最近一次扫描失败的原因，成功后清空。
+	LastError string `gorm:"type:text"`
+	UpdatedAt time.Time
+}
+
+// TableName 指定表名。
+func (ScanCursor) TableName() string { return "scan_cursors" }

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -92,7 +93,8 @@ func Open(path string) (*Store, error) {
 	sqlDB.SetMaxIdleConns(1)
 
 	if err := db.AutoMigrate(&model.Order{}, &model.AmountSlot{}, &model.IncomingTx{},
-		&model.TxObservation{}, &model.NotifyLog{}, &model.Setting{}, &model.Credential{}); err != nil {
+		&model.TxObservation{}, &model.ScanCursor{}, &model.NotifyLog{}, &model.Setting{},
+		&model.Credential{}); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
 	if err := migrateObservationLedger(db); err != nil {
@@ -197,6 +199,13 @@ func (s *Store) CreateOrReuseCashierOrder(ctx context.Context, in CreateOrderInp
 			// 商户显式重建就要使用新金额与有效期，不能沿用旧支付信息。
 			if in.ReplaceReady && existing.Status == model.StatusReady &&
 				!existing.ExpireFinalized {
+				// 但完全相同的重复请求是同一次建单的重试，不是新的支付约定。
+				// 若照旧重建，用户页面上已展示的收款地址与金额会立即失效，
+				// 已经付款的转账将再也无法核销。
+				if paymentContractUnchanged(&existing, in) {
+					result = &existing
+					return nil
+				}
 				if err := retireOrder(tx, &existing); err != nil {
 					return err
 				}
@@ -243,6 +252,35 @@ func newOrder(in CreateOrderInput) *model.Order {
 		ClientIP:       in.ClientIP,
 		ExpiredAt:      in.ExpiredAt,
 	}
+}
+
+// paymentContractUnchanged 判断重复建单请求是否与原订单的支付约定一致。
+//
+// 金额、法币、币种限制和回调地址共同决定了用户会看到什么、商户会收到什么；
+// 只要其中任何一项变化，就是新的支付约定，必须重建订单。全部一致时说明这
+// 只是商户侧的重试，复用原订单才不会让已在进行的付款失去归属。
+func paymentContractUnchanged(o *model.Order, in CreateOrderInput) bool {
+	if !amountMatch(o.OriginMoney, in.OriginMoney) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(o.OriginCurrency), strings.TrimSpace(in.OriginCurrency)) &&
+		normalizeCurrencyLimit(o.CurrencyLimit) == normalizeCurrencyLimit(in.CurrencyLimit) &&
+		strings.TrimSpace(o.NotifyURL) == strings.TrimSpace(in.NotifyURL) &&
+		strings.TrimSpace(o.ReturnURL) == strings.TrimSpace(in.ReturnURL)
+}
+
+// amountMatch 按十进制修约比较两个金额字符串，避免 "2.5" 与 "2.50" 被当成
+// 不同金额而触发不必要的重建。
+func amountMatch(a, b string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	actual, err := strconv.ParseFloat(b, 64)
+	if err != nil {
+		return false
+	}
+	return amount.MatchRounded(a, actual)
 }
 
 // retireOrder 静默结束不再允许支付的旧订单。
@@ -583,6 +621,13 @@ func (s *Store) ClaimAndPay(ctx context.Context, order *model.Order, tx model.In
 			Update("order_id", 0).Error; err != nil {
 			return err
 		}
+		// 与支付状态同一事务提交，崩溃也不会留下已入账的未归属记录。
+		if err := d.Model(&model.TxObservation{}).
+			Where("provider = ? AND transaction_id = ?", tx.Provider, tx.TransactionID).
+			Updates(map[string]any{"status": model.ObservationResolved,
+				"resolved_trade_no": current.TradeNo, "resolved_at": now, "updated_at": now}).Error; err != nil {
+			return err
+		}
 		claimed = true
 		return nil
 	})
@@ -661,8 +706,12 @@ func (s *Store) DueNotifications(ctx context.Context, maxAttempts, limit int) ([
 	now := time.Now()
 	err := s.db.WithContext(ctx).
 		Where("protocol = ?", "bepusdt").
-		Where("status IN ? AND notify_status IN ? AND notify_attempts < ?",
-			[]string{model.StatusPaid, model.StatusExpired}, []string{model.NotifyPending, ""}, maxAttempts).
+		Where("status IN ? AND notify_attempts < ?",
+			[]string{model.StatusPaid, model.StatusExpired}, maxAttempts).
+		// SENDING 表示已领取但结果未落库（进程崩溃或正在发送）。租约到期后
+		// 必须重新参与调度，否则这次回调会永久卡在“发送中”。
+		Where("(notify_status IN ? OR (notify_status = ? AND (next_notify_at IS NULL OR next_notify_at <= ?)))",
+			[]string{model.NotifyPending, ""}, model.NotifySending, now).
 		Where("(status = ? OR expire_finalized = ?)", model.StatusPaid, true).
 		Where("next_notify_at IS NULL OR next_notify_at <= ?", now).
 		Order("next_notify_at ASC").
@@ -772,7 +821,8 @@ func (s *Store) WithCurrentNotification(ctx context.Context, snapshot *model.Ord
 		return err
 	}
 	if current == nil || current.Status != snapshot.Status || current.NotifyAttempts != snapshot.NotifyAttempts ||
-		(current.NotifyStatus != model.NotifyPending && current.NotifyStatus != "") {
+		(current.NotifyStatus != model.NotifyPending && current.NotifyStatus != model.NotifySending &&
+			current.NotifyStatus != "") {
 		return nil
 	}
 	if current.Status != model.StatusPaid && !(current.Status == model.StatusExpired && current.ExpireFinalized) {
@@ -916,4 +966,73 @@ func (s *Store) CountOpenTxObservations(ctx context.Context) (int64, error) {
 func (s *Store) PruneTxObservations(ctx context.Context, before time.Time) (int64, error) {
 	res := s.db.WithContext(ctx).Where("updated_at < ?", before).Delete(&model.TxObservation{})
 	return res.RowsAffected, res.Error
+}
+
+// -----------------------------------------------------------------------------
+// 扫描游标
+// -----------------------------------------------------------------------------
+
+// ScanCursor 返回指定通道的扫描进度；从未扫描过时返回 nil。
+func (s *Store) ScanCursor(ctx context.Context, provider string) (*model.ScanCursor, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	var rows []model.ScanCursor
+	if err := s.db.WithContext(ctx).Where("provider = ?", provider).Limit(1).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+// SaveScanCursor 记录一次完整扫描的结束时间，并把失败原因清空。
+//
+// 只有整轮扫描（含补扫窗口）都成功才会调用，失败时游标必须原地不动，
+// 否则重启后那段未扫到的时间就永久丢了。
+func (s *Store) SaveScanCursor(ctx context.Context, provider string, until time.Time) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	now := time.Now()
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "provider"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"scanned_until", "last_run_at", "last_error", "updated_at",
+		}),
+	}).Create(&model.ScanCursor{
+		Provider: provider, ScannedUntil: until, LastRunAt: now, UpdatedAt: now,
+	}).Error
+}
+
+// SaveScanError 记录扫描失败原因，游标保持不变。
+func (s *Store) SaveScanError(ctx context.Context, provider, message string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	now := time.Now()
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "provider"}},
+		DoUpdates: clause.AssignmentColumns([]string{"last_error", "last_run_at", "updated_at"}),
+	}).Create(&model.ScanCursor{
+		Provider: provider, LastError: truncate(message, 500), LastRunAt: now, UpdatedAt: now,
+	}).Error
+}
+
+// ClaimNotify 领取一次回调任务：把订单从待发送状态原子地切到“发送中”，
+// 并写入租约到期时间。
+//
+// 回调是外部副作用，进程可能在请求发出后、结果落库前崩溃。用租约而不是
+// 纯内存标记，重启后租约到期就能重新领取；同一订单不会被两个 worker
+// 同时发送（条件更新保证只有一方 RowsAffected = 1）。
+func (s *Store) ClaimNotify(ctx context.Context, o *model.Order, lease time.Duration) (bool, error) {
+	now := time.Now()
+	res := s.db.WithContext(ctx).Model(&model.Order{}).
+		Where("id = ? AND status = ? AND notify_attempts = ?", o.ID, o.Status, o.NotifyAttempts).
+		Where("(notify_status IN ? OR (notify_status = ? AND (next_notify_at IS NULL OR next_notify_at <= ?)))",
+			[]string{model.NotifyPending, ""}, model.NotifySending, now).
+		Updates(map[string]any{
+			"notify_status":  model.NotifySending,
+			"next_notify_at": now.Add(lease),
+			"updated_at":     now,
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
 }

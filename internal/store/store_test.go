@@ -774,3 +774,104 @@ func TestManualPayRequiresValidSelectionAndGrace(t *testing.T) {
 		t.Fatal("manual pay accepted an order past the grace period")
 	}
 }
+
+// 商户侧重试（请求完全一致）不能作废用户已经看到的收款信息。
+func TestCreateOrReuseCashierOrderKeepsReadyOrderOnIdenticalRetry(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	input := func(tradeNo string) CreateOrderInput {
+		return CreateOrderInput{
+			Protocol: "bepusdt", Pid: "bepusdt", TradeNo: tradeNo,
+			OutTradeNo: "MERCHANT-RETRY", Name: "vip",
+			OriginMoney: "2.50", OriginCurrency: "USD", CurrencyLimit: "USDT,USDC",
+			NotifyURL: "https://merchant.example/notify", ReturnURL: "https://merchant.example/return",
+			ExpiredAt: time.Now().Add(30 * time.Minute), Reselect: true, ReplaceReady: true,
+		}
+	}
+	first, err := st.CreateOrReuseCashierOrder(ctx, input("LP-RETRY-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := st.SelectPayment(ctx, first.TradeNo, "binance", "USDT",
+		"binance-uid", 2.5, .01, 99, .01, 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 完全相同的重试：复用原订单，金额档位保持不变。
+	retry := input("LP-RETRY-2")
+	retry.ExpiredAt = time.Now().Add(45 * time.Minute) // 重试带了新的过期时间也不算新约定
+	reused, err := st.CreateOrReuseCashierOrder(ctx, retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.TradeNo != selected.TradeNo || reused.Status != model.StatusReady {
+		t.Fatalf("identical retry replaced a READY order: %+v", reused)
+	}
+	if reused.PayAmount != selected.PayAmount || reused.PayAddress != selected.PayAddress {
+		t.Fatalf("retry changed payment info: %+v -> %+v", selected, reused)
+	}
+	if !reused.ExpiredAt.Equal(first.ExpiredAt) {
+		t.Fatalf("retry changed expiry: %s -> %s", first.ExpiredAt, reused.ExpiredAt)
+	}
+	if n := slotCount(t, st); n != 1 {
+		t.Fatalf("slots = %d, want the original reservation kept", n)
+	}
+	// 金额写法不同但数值相同（2.5 / 2.50）同样属于同一次建单。
+	equivalent := input("LP-RETRY-3")
+	equivalent.OriginMoney = "2.5"
+	again, err := st.CreateOrReuseCashierOrder(ctx, equivalent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.TradeNo != selected.TradeNo {
+		t.Fatalf("equivalent amount retry replaced order: %+v", again)
+	}
+
+	// 真正的支付约定变化仍然重建。
+	changed := input("LP-RETRY-4")
+	changed.OriginMoney = "3.50"
+	replaced, err := st.CreateOrReuseCashierOrder(ctx, changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.TradeNo != "LP-RETRY-4" {
+		t.Fatalf("changed amount did not rebuild: %+v", replaced)
+	}
+	if retired, _ := st.GetByTradeNo(ctx, selected.TradeNo); retired.Status != model.StatusSuperseded {
+		t.Fatalf("old order not retired: %+v", retired)
+	}
+}
+
+// 回调地址变化属于新的支付约定，必须重建（发给旧地址的回调不会被商户接受）。
+func TestCreateOrReuseCashierOrderRebuildsOnNotifyURLChange(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	in := CreateOrderInput{
+		Protocol: "bepusdt", Pid: "bepusdt", TradeNo: "LP-URL-1", OutTradeNo: "MERCHANT-URL",
+		OriginMoney: "2.50", OriginCurrency: "USD",
+		NotifyURL: "https://a.example/notify", ReturnURL: "https://a.example/return",
+		ExpiredAt: time.Now().Add(30 * time.Minute), Reselect: true, ReplaceReady: true,
+	}
+	first, err := st.CreateOrReuseCashierOrder(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SelectPayment(ctx, first.TradeNo, "binance", "USDT",
+		"binance-uid", 2.5, .01, 99, .01, 2, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	in.TradeNo = "LP-URL-2"
+	in.NotifyURL = "https://b.example/notify"
+	second, err := st.CreateOrReuseCashierOrder(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.TradeNo != "LP-URL-2" {
+		t.Fatalf("notify_url change reused the old order: %+v", second)
+	}
+	if retired, _ := st.GetByTradeNo(ctx, first.TradeNo); retired.Status != model.StatusSuperseded {
+		t.Fatalf("old order not retired: %+v", retired)
+	}
+}

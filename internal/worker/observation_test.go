@@ -106,14 +106,24 @@ func newPollFixture(t *testing.T, tradeNo string) *pollFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 把订单时间整体前移到 5 分钟前：测试用“刚刚发生”的交易时间去匹配，
+	// 既不落在支付窗口之外，也不会晚于扫描窗口的上界。
+	createdAt := time.Now().Add(-5 * time.Minute)
+	selectedAt := time.Now().Add(-4 * time.Minute)
+	if err := st.DB().Model(&model.Order{}).Where("id = ?", o.ID).Updates(map[string]any{
+		"created_at": createdAt, "selected_at": selectedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	o.CreatedAt, o.SelectedAt = createdAt, &selectedAt
 
 	return &pollFixture{st: st, cfg: cfg, poller: NewPoller(settings.New(cfg, st), st), stub: stub, order: o}
 }
 
-// 交易时间固定在订单支付窗口内。币安接口按毫秒回传，而 created_at 带亚毫秒
-// 精度，直接用 time.Now() 会让流水偶尔落在窗口之前。
+// 交易时间固定在订单支付窗口内、且已经发生：币安接口按毫秒回传，直接用
+// time.Now() 可能落在扫描窗口上界之后。
 func (f *pollFixture) txTime() time.Time {
-	return f.order.CreatedAt.Add(3 * time.Second)
+	return time.Now().Add(-time.Second)
 }
 
 func (f *pollFixture) tick(t *testing.T) {
@@ -270,11 +280,14 @@ func TestPollerResolvesAlreadyClaimedTransaction(t *testing.T) {
 		}).Error; err != nil {
 		t.Fatal(err)
 	}
+	// 与第一张订单一致，把时间整体前移，让“刚刚发生”的交易时间落在窗口内。
+	created := time.Now().Add(-5 * time.Minute)
+	selected := time.Now().Add(-4 * time.Minute)
 	if err := f.st.DB().Model(&model.Order{}).Where("id = ?", second.ID).
 		Updates(map[string]any{
 			"collection": "binance", "currency": "USDT", "pay_address": "binance-uid",
 			"pay_amount": slot.Amount, "amount_precision": 2,
-			"status": model.StatusReady, "selected_at": second.CreatedAt,
+			"status": model.StatusReady, "created_at": created, "selected_at": selected,
 		}).Error; err != nil {
 		t.Fatal(err)
 	}

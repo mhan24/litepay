@@ -178,7 +178,7 @@ func TestOKXPollerAcceptsOnlyInternalTransfers(t *testing.T) {
 	mgr := settings.New(cfg, st)
 	p := NewPoller(mgr, st)
 
-	txs, err := p.okxTransactions(context.Background(), cfg, time.UnixMilli(0))
+	txs, err := p.okxTransactions(context.Background(), cfg, time.UnixMilli(0), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestOKXPollerRejectsConfiguredUIDMismatch(t *testing.T) {
 	cfg.OKX.Passphrase = "pass"
 	cfg.Checkout.OKX.UID = "123456789"
 	p := NewPoller(settings.New(cfg, st), st)
-	if _, err := p.okxTransactions(context.Background(), cfg, time.UnixMilli(0)); err == nil {
+	if _, err := p.okxTransactions(context.Background(), cfg, time.UnixMilli(0), time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("accepted API account UID different from configured receiver UID")
 	}
 }

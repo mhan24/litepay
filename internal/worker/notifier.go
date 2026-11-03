@@ -20,6 +20,10 @@ import (
 	"litepay/internal/store"
 )
 
+// notifyLease 是一次回调任务的租约时长。超过这个时间仍未落库结果，说明
+// 进程在发送途中崩溃，任务可以被重新领取；正常路径会在租约到期前写回结果。
+const notifyLease = 60 * time.Second
+
 // Notifier 负责向商户 notify_url 推送支付成功通知。
 type Notifier struct {
 	cfg       *settings.Manager
@@ -58,6 +62,16 @@ func (n *Notifier) tick(ctx context.Context) {
 	}
 	for i := range orders {
 		if err := n.store.WithCurrentNotification(ctx, &orders[i], func(current *model.Order) {
+			// 先领取任务再发送：领取失败说明另一个 worker 或上一轮仍在处理，
+			// 不能重复投递同一笔回调。
+			claimed, err := n.store.ClaimNotify(ctx, current, notifyLease)
+			if err != nil {
+				slog.Error("领取回调任务失败", "trade_no", current.TradeNo, "err", err)
+				return
+			}
+			if !claimed {
+				return
+			}
 			n.notifyOne(ctx, cfg, current)
 		}); err != nil {
 			slog.Error("检查回调订单失败", "err", err)

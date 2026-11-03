@@ -157,10 +157,12 @@ func (p *Poller) Run(ctx context.Context) {
 					slog.Error("查询待确认订单失败", "err", err)
 					continue
 				}
-				if !hasOrdersForProvider(orders, provider) {
-					continue
-				}
+				// 没有待确认订单时降频扫描，而不是完全停扫：宕机或交易所
+				// API 延迟期间的迟到流水也要能被发现并留痕。
 				interval := time.Duration(cfg.ProviderInterval(provider)) * time.Second
+				if !hasOrdersForProvider(orders, provider) {
+					interval = idleScanInterval
+				}
 				if now.Sub(p.lastRuns[provider]) < interval {
 					continue
 				}
@@ -180,6 +182,87 @@ func hasOrdersForProvider(orders []model.Order, provider string) bool {
 	return false
 }
 
+const (
+	// scanOverlap 相邻两次扫描的重叠量，覆盖交易所侧延迟入账的流水。
+	scanOverlap = 2 * time.Minute
+	// maxScanWindow 单轮补扫的最大跨度；更久的历史按轮次分块追赶。
+	maxScanWindow = 6 * time.Hour
+	// maxScanBackfill 补扫的最远回溯，避免游标损坏后拉取过久历史。
+	maxScanBackfill = 7 * 24 * time.Hour
+	// idleScanInterval 没有待确认订单时的扫描间隔，用于发现迟到流水。
+	idleScanInterval = 2 * time.Minute
+	// scanClockSkew 容忍交易所时间略超前于本机时钟，避免把刚到的流水
+	// 判成“未来”而丢弃。
+	scanClockSkew = 2 * time.Minute
+)
+
+// scanWindow 是一次交易所查询覆盖的时间区间。
+type scanWindow struct{ start, end time.Time }
+
+// scanPlan 是一轮扫描要覆盖的窗口。
+type scanPlan struct {
+	recent  scanWindow
+	backlog *scanWindow
+}
+
+// newScanPlan 依据待确认订单和持久化游标计算本轮扫描窗口。
+//
+// 待确认订单给出“现在必须实时确认”的区间；游标给出“上次已经扫到哪里”。
+// 两者取更早者，重启或交易所 API 故障后才不会留下永久空洞。
+func newScanPlan(orders []model.Order, cursor *model.ScanCursor, lookback time.Duration, now time.Time) scanPlan {
+	recentStart := now.Add(-lookback)
+	if len(orders) > 0 {
+		recentStart = orders[0].CreatedAt.Add(-lookback)
+	}
+	start := recentStart
+	if cursor != nil && !cursor.ScannedUntil.IsZero() {
+		if from := cursor.ScannedUntil.Add(-scanOverlap); from.Before(start) {
+			start = from
+		}
+	}
+	if floor := now.Add(-maxScanBackfill); start.Before(floor) {
+		start = floor
+	}
+	plan := scanPlan{recent: scanWindow{start: recentStart, end: now}}
+	if end := start.Add(maxScanWindow); end.Before(recentStart) {
+		// 落后超过一个窗口的跨度：先补最老的一段，剩下的交给后续轮次。
+		plan.backlog = &scanWindow{start: start, end: end}
+	} else if start.Before(recentStart) {
+		plan.recent.start = start
+	}
+	return plan
+}
+
+// windows 返回本轮要扫描的窗口，积压窗口在前。
+func (p scanPlan) windows() []scanWindow {
+	if p.backlog != nil {
+		return []scanWindow{*p.backlog, p.recent}
+	}
+	return []scanWindow{p.recent}
+}
+
+// advance 返回扫描成功后游标应推进到的时间点。
+//
+// 存在积压时只推进到积压窗口末尾：否则中间那段未扫描的时间会被永久跳过。
+func (p scanPlan) advance() time.Time {
+	if p.backlog != nil {
+		return p.backlog.end
+	}
+	return p.recent.end
+}
+
+// scanTotals 汇总一轮扫描（可能覆盖多个窗口）的计数。
+type scanTotals struct {
+	fetched  int
+	matched  int
+	skipOut  int
+	skipType int
+	skipRecv int
+	skipAmt  int
+	skipCur  int
+	skipDup  int
+}
+
 func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) {
 	p.setStats(provider, func(s *PollStats) {
 		s.LastRunAt = time.Now()
@@ -194,9 +277,6 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 		slog.Error("查询待确认订单失败", "err", err)
 		return
 	}
-	if len(orders) == 0 {
-		return
-	}
 	// 只保留当前通道已选中的订单。收银台尚未选择的订单不参与任何通道。
 	filtered := orders[:0]
 	for _, o := range orders {
@@ -205,44 +285,104 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 		}
 	}
 	orders = filtered
-	if len(orders) == 0 {
+
+	cursor, err := p.store.ScanCursor(ctx, provider)
+	if err != nil {
+		p.failScan(ctx, provider, fmt.Errorf("读取扫描进度失败: %w", err))
 		return
 	}
 
-	buffer := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
-	start := orders[0].CreatedAt.Add(-buffer)
-	end := time.Now()
+	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
+	plan := newScanPlan(orders, cursor, lookback, time.Now())
+
+	book := newTxObservationBook(provider)
+	var totals scanTotals
+	for _, w := range plan.windows() {
+		if err := p.scanWindow(ctx, cfg, provider, orders, w, book, &totals); err != nil {
+			p.failScan(ctx, provider, err)
+			return
+		}
+	}
+
+	for _, obs := range book.pending() {
+		if err := p.store.RecordTxObservation(ctx, obs); err != nil {
+			p.failScan(ctx, provider, fmt.Errorf("保存交易观察失败: %w", err))
+			return
+		}
+	}
+	// 只有整轮扫描全部成功才推进游标，失败时保持原地等待下一轮补扫。
+	if err := p.store.SaveScanCursor(ctx, provider, plan.advance()); err != nil {
+		p.failScan(ctx, provider, fmt.Errorf("保存扫描进度失败: %w", err))
+		return
+	}
+
+	p.setStats(provider, func(s *PollStats) {
+		s.LastOKAt = time.Now()
+		s.LastError = ""
+		s.Provider = provider
+		s.LastFetched = totals.fetched
+		s.LastMatched = totals.matched
+		s.TotalMatched += int64(totals.matched)
+		s.SkipOutgoing = totals.skipOut
+		s.SkipType = totals.skipType
+		s.SkipReceiver = totals.skipRecv
+		s.SkipAmount = totals.skipAmt
+		s.SkipCurrency = totals.skipCur
+		s.SkipDuplicate = totals.skipDup
+	})
+
+	if totals.fetched > 0 {
+		slog.Info("到账扫描完成", "provider", provider, "fetched", totals.fetched,
+			"matched", totals.matched, "skip_outgoing", totals.skipOut,
+			"skip_type", totals.skipType, "skip_currency", totals.skipCur,
+			"skip_receiver", totals.skipRecv, "skip_amount", totals.skipAmt,
+			"skip_duplicate", totals.skipDup)
+	}
+}
+
+// failScan 记录一次失败的扫描：游标不推进，失败原因落库供后台排查。
+func (p *Poller) failScan(ctx context.Context, provider string, err error) {
+	p.setStats(provider, func(s *PollStats) { s.LastError = err.Error(); s.Provider = provider })
+	slog.Warn("查询到账记录失败", "provider", provider, "err", err)
+	if saveErr := p.store.SaveScanError(ctx, provider, err.Error()); saveErr != nil {
+		slog.Warn("记录扫描失败原因失败", "provider", provider, "err", saveErr)
+	}
+}
+
+// scanWindow 查询并处理一个时间窗口内的流水。
+func (p *Poller) scanWindow(ctx context.Context, cfg *config.Config, provider string,
+	orders []model.Order, w scanWindow, book *txObservationBook, totals *scanTotals) error {
 
 	var txs []incomingTransaction
+	var err error
 	if provider == config.ProviderOKX {
-		txs, err = p.okxTransactions(ctx, cfg, start)
+		txs, err = p.okxTransactions(ctx, cfg, w.start, w.end)
 	} else {
-		txs, err = p.binanceTransactions(ctx, cfg, start, end)
+		txs, err = p.binanceTransactions(ctx, cfg, w.start, w.end)
 	}
 	if err != nil {
-		p.setStats(provider, func(s *PollStats) { s.LastError = err.Error(); s.Provider = provider })
-		slog.Warn("查询到账记录失败", "provider", provider, "err", err)
-		return
+		return err
 	}
 
-	var skipOut, skipType, skipRecv, skipAmt, skipCur, skipDup int
-	matched := 0
-
-	// 本轮每笔未归属流水的最高优先级失败原因，扫描结束统一落库。
-	book := newTxObservationBook(provider)
-
 	for _, tx := range txs {
+		// 交易所可能忽略时间参数返回窗口外的流水，不能算进本轮结论。
+		// 上界放宽一个时钟偏移量，避免交易所时间略超前时丢掉刚到的付款。
+		if tx.Time.Before(w.start) || tx.Time.After(w.end.Add(scanClockSkew)) {
+			continue
+		}
+		totals.fetched++
+
 		reject := rejectTransaction(provider, cfg, &tx)
 		if reject != transactionAccepted {
 			switch reject {
 			case transactionOutgoing:
-				skipOut++
+				totals.skipOut++
 			case transactionType:
-				skipType++
+				totals.skipType++
 			case transactionCurrency:
-				skipCur++
+				totals.skipCur++
 			case transactionReceiver:
-				skipRecv++
+				totals.skipRecv++
 			}
 			// 支出类流水不属于潜在漏单证据，不入账本；类型/币种/收款人被拒
 			// 的流水（如走了链上充值、付错币种）必须留痕。
@@ -289,12 +429,12 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 				// 幂等闸门拦下：这笔流水已经入账到某个订单，不是未归属流水。
 				// 继续尝试其它订单只会重复触发同一个守卫，直接结束匹配。
 				slog.Debug("流水或订单已被处理，跳过", "tx", tx.ID, "trade_no", o.TradeNo)
-				skipDup++
+				totals.skipDup++
 				hit = true
 				break
 			}
 
-			matched++
+			totals.matched++
 			hit = true
 			resolvedTradeNo = o.TradeNo
 			o.Status = model.StatusPaid
@@ -314,40 +454,14 @@ func (p *Poller) tick(ctx context.Context, cfg *config.Config, provider string) 
 			// 累积的观察记录标记为 resolved。
 			book.retract(tx.ID)
 			if err := p.store.ResolveTxObservation(ctx, provider, tx.ID, resolvedTradeNo); err != nil {
-				slog.Warn("标记未归属流水已入账失败", "provider", provider, "tx", tx.ID, "err", err)
+				return fmt.Errorf("标记交易观察已归属失败: %w", err)
 			}
 			continue
 		}
-		skipAmt++
+		totals.skipAmt++
 		book.observe(&tx, model.ObservationReasonNoMatch, "")
 	}
-
-	for _, obs := range book.pending() {
-		if err := p.store.RecordTxObservation(ctx, obs); err != nil {
-			slog.Warn("记录未归属交易失败", "provider", provider, "tx", obs.TransactionID, "err", err)
-		}
-	}
-
-	p.setStats(provider, func(s *PollStats) {
-		s.LastOKAt = time.Now()
-		s.LastError = ""
-		s.Provider = provider
-		s.LastFetched = len(txs)
-		s.LastMatched = matched
-		s.TotalMatched += int64(matched)
-		s.SkipOutgoing = skipOut
-		s.SkipType = skipType
-		s.SkipReceiver = skipRecv
-		s.SkipAmount = skipAmt
-		s.SkipCurrency = skipCur
-		s.SkipDuplicate = skipDup
-	})
-
-	if len(txs) > 0 {
-		slog.Info("到账扫描完成", "provider", provider, "fetched", len(txs), "matched", matched,
-			"skip_outgoing", skipOut, "skip_type", skipType, "skip_currency", skipCur,
-			"skip_receiver", skipRecv, "skip_amount", skipAmt, "skip_duplicate", skipDup)
-	}
+	return nil
 }
 
 // rejectTransaction 只放行订单所选平台可确认的站内收入。
@@ -491,7 +605,7 @@ func (p *Poller) binanceTransactions(ctx context.Context, cfg *config.Config,
 	return out, nil
 }
 
-func (p *Poller) okxTransactions(ctx context.Context, cfg *config.Config, since time.Time) ([]incomingTransaction, error) {
+func (p *Poller) okxTransactions(ctx context.Context, cfg *config.Config, since, until time.Time) ([]incomingTransaction, error) {
 	cli := p.okxClientFor(cfg)
 	uid := strings.TrimSpace(cfg.Checkout.OKX.UID)
 	if uid == "" {
@@ -526,6 +640,11 @@ func (p *Poller) okxTransactions(ctx context.Context, cfg *config.Config, since 
 			return nil, err
 		}
 		for _, row := range rows {
+			// OKX 的 after 只用来翻页，返回结果可能超出一轮扫描的窗口，
+			// 越界流水交给对应窗口的那一轮处理。
+			if row.Timestamp.After(until) || row.Timestamp.Before(since) {
+				continue
+			}
 			// 官方状态：0 等待确认、1 确认到账、2 充值成功。
 			// 仅 state=2 允许入账，避免未完成确认的充值提前发货。
 			// 客户端用 fromWdId 识别未返回 type 的站内转账。
