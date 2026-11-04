@@ -10,6 +10,17 @@ import (
 const Scale int64 = 1_000_000
 const Max int64 = 9_000_000_000_000_000
 
+// 上游商城（dujiao-next 的 BEpusdt 适配器）回调验签时把金额转成 float64 再用 %v 重
+// 渲染：>= 1000000 渲染成 1e+06，< 0.0001 渲染成 1e-05，与网关按十进制字符串算出的
+// 签名永远不一致，回调会被商城静默拒绝。因此只有 [MinMall, MaxMall) 内的金额是双方
+// 都能精确表达的；创建订单和分配应付金额都必须守在这个区间内，越界只能整单拒绝。
+const MinMall int64 = 100               // 0.0001
+const MaxMall int64 = 1_000_000 * Scale // 1000000，不含
+
+// MallCompatible reports whether units keeps its decimal form when the upstream mall
+// re-renders it as a float64 for signature verification.
+func MallCompatible(units int64) bool { return units >= MinMall && units < MaxMall }
+
 // Parse rejects any nonzero precision beyond micro-units. It never rounds a payment.
 func Parse(raw string) (int64, error) {
 	raw = strings.TrimSpace(raw)

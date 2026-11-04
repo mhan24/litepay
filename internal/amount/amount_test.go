@@ -18,3 +18,12 @@ func TestExactAmounts(t *testing.T) {
 		t.Fatal("format")
 	}
 }
+
+// 商城按 float64 %v 重渲染金额参与验签：只有 [0.0001, 1000000) 保持十进制写法。
+func TestMallCompatibleBoundaries(t *testing.T) {
+	for units, want := range map[int64]bool{-1: false, 0: false, 99: false, MinMall: true, MaxMall - 1: true, MaxMall: false, MaxMall + 1: false, Max: false} {
+		if MallCompatible(units) != want {
+			t.Fatalf("%d: want %v", units, want)
+		}
+	}
+}

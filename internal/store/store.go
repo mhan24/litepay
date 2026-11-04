@@ -123,8 +123,13 @@ func (s *Store) Select(ctx context.Context, no, provider, currency, receiver str
 		if (o.Status != model.Pending && o.Status != model.Ready) || !now.Before(o.ExpiresAt) {
 			return errors.New("订单不能再选择付款方式")
 		}
+		// 重选同一付款方式复用已占用档位，但选中金额也可能是修复前写入的：落在商城
+		// 无法验签的区间时必须拒绝，不能把注定无法核销的金额继续交给用户付款。
 		if o.Provider == provider && o.Currency == currency && o.Receiver == receiver {
-			return nil
+			if amount.MallCompatible(o.PayUnits) {
+				return nil
+			}
+			return errors.New("已选应付金额超出可核销范围，请取消后重新下单")
 		}
 		if o.Status == model.Ready && !o.Reselect {
 			return errors.New("订单不允许重选")
@@ -138,11 +143,19 @@ func (s *Store) Select(ctx context.Context, no, provider, currency, receiver str
 		q := amount.Quantum(precision)
 		base := max(o.OriginUnits, minUnits)
 		base = ((base + q - 1) / q) * q
+		// 创建订单只约束原始金额，应付金额是向上对齐后再按档位递增得到的，可能越过
+		// 商城 float64 验签区间 [0.0001, 1000000)。越界只能整单拒绝：不放宽边界、不截断、
+		// 不调低金额，也不占用任何金额档位（整个事务回滚）。
+		inRange := 0
 		for i := 0; i <= maxOffset; i++ {
 			units := base + int64(i)*step
-			if units > amount.Max {
-				return errors.New("金额超出范围")
+			if units >= amount.MaxMall {
+				break // 档位随 i 单调递增，越过上限后不再有合法金额
 			}
+			if units < amount.MinMall {
+				continue // 低于商城可验签下限，继续向上递增
+			}
+			inRange++
 			slot := model.Slot{Provider: provider, Currency: currency, Units: units, OrderID: &o.ID, ExpiresAt: o.ExpiresAt.Add(time.Duration(grace) * time.Second)}
 			r := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&slot)
 			if r.Error != nil {
@@ -159,6 +172,9 @@ func (s *Store) Select(ctx context.Context, no, provider, currency, receiver str
 			o.SelectedAt = &now
 			o.Status = model.Ready
 			return db.Save(&o).Error
+		}
+		if inRange == 0 {
+			return errors.New("应付金额超出可核销范围，请调低订单金额后重新下单")
 		}
 		return errors.New("可用金额档位已满，请稍后重试")
 	})

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"litepay/internal/config"
+	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/sign"
 	"litepay/internal/store"
@@ -154,5 +155,61 @@ func TestBEpusdtCreateRejectsInteroperabilityRange(t *testing.T) {
 				t.Fatal("expected explicit interoperability rejection", w.Body.String())
 			}
 		})
+	}
+}
+
+// 创建订单接受的原始金额，向上对齐到两位小数后可能正好越过商城验签上限：
+// 选择付款方式必须整单拒绝，且失败不能留下金额档位占用。
+func TestPaymentSelectionRejectsAlignmentOverflow(t *testing.T) {
+	st, e := store.Open(":memory:")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if e = mgr.Load(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	engine, e := New(mgr, st, worker.NewPoller(mgr, st))
+	if e != nil {
+		t.Fatal(e)
+	}
+	payload := map[string]any{"order_id": "shop-overflow", "amount": json.Number("999999.999999"), "notify_url": "https://shop.example/notify", "redirect_url": "https://shop.example/return", "fiat": "USD"}
+	payload["signature"] = sign.BEpusdtSignGeneric(payload, mgr.Get().BEpusdt.APIToken)
+	body, _ := json.Marshal(payload)
+	r := httptest.NewRequest("POST", "/api/v1/order/create-order", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, r)
+	var reply struct {
+		Status int `json:"status_code"`
+		Data   struct {
+			ID string `json:"trade_id"`
+		} `json:"data"`
+	}
+	if e = json.Unmarshal(w.Body.Bytes(), &reply); e != nil || reply.Status != 200 || reply.Data.ID == "" {
+		t.Fatal(w.Body.String(), e)
+	}
+	no := reply.Data.ID
+	form := url.Values{"trade_no": {no}, "provider": {"binance"}, "currency": {"USDT"}}
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("POST", "/api/order/payment", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	engine.ServeHTTP(w, r)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "可核销范围") {
+		t.Fatal("alignment overflow accepted", w.Code, w.Body.String())
+	}
+	o, e := st.GetByTradeNo(context.Background(), no)
+	if e != nil || o.Status != model.Pending || o.PayUnits != 0 || o.SelectedAt != nil {
+		t.Fatal("rejected selection mutated the order", o, e)
+	}
+	var slots int64
+	st.DB().Model(&model.Slot{}).Count(&slots)
+	if slots != 0 {
+		t.Fatalf("rejected selection reserved %d tiers", slots)
 	}
 }

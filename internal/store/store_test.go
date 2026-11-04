@@ -293,6 +293,97 @@ func TestUnconfirmedDepositHoldsOrderOpen(t *testing.T) {
 	}
 }
 
+func createOrder(t *testing.T, s *Store, no string, units int64) {
+	t.Helper()
+	if _, e := s.Create(context.Background(), model.Order{TradeNo: no, OutTradeNo: no, OriginUnits: units, ExpiresAt: time.Now().Add(time.Minute), Reselect: true, NotifyURL: "https://merchant.example/callback"}); e != nil {
+		t.Fatal(e)
+	}
+}
+
+func slotOwners(t *testing.T, s *Store, orderID uint) int64 {
+	t.Helper()
+	var n int64
+	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", orderID).Count(&n).Error; e != nil {
+		t.Fatal(e)
+	}
+	return n
+}
+
+// 创建订单只约束原始金额；应付金额是向上对齐后再按档位递增算出来的，同样必须落在
+// 商城能用 float64 验签的 [0.0001, 1000000) 区间内，否则付款后回调永远验签失败。
+func TestSelectRejectsAmountsAboveMallLimit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// 两位精度把 999999.999999 向上对齐成 1000000，越界必须整单拒绝。
+	createOrder(t, s, "align", 999_999_999_999)
+	if _, e := s.Select(ctx, "align", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e == nil {
+		t.Fatal("precision alignment above the mall limit accepted")
+	}
+	align, e := s.GetByTradeNo(ctx, "align")
+	if e != nil || align.Status != model.Pending || align.PayUnits != 0 || slotOwners(t, s, align.ID) != 0 {
+		t.Fatal("rejected selection left the order or a tier reserved", align, e)
+	}
+	// 首档合法、冲突递增后越界：只能拒绝，且不能占用任何档位。
+	createOrder(t, s, "first", 999_999_990_000)
+	createOrder(t, s, "second", 999_999_990_000)
+	if _, e = s.Select(ctx, "first", "binance", "USDT", "receiver", 2, 10000, 10000, 1, 120); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Select(ctx, "second", "binance", "USDT", "receiver", 2, 10000, 10000, 1, 120); e == nil {
+		t.Fatal("conflict increment above the mall limit accepted")
+	}
+	second, e := s.GetByTradeNo(ctx, "second")
+	if e != nil || second.Status != model.Pending || second.PayUnits != 0 || slotOwners(t, s, second.ID) != 0 {
+		t.Fatal("failed increment left the order or a tier reserved", second, e)
+	}
+	var slots int64
+	s.DB().Model(&model.Slot{}).Count(&slots)
+	if slots != 1 {
+		t.Fatalf("failed selection created %d tiers", slots)
+	}
+	// 上限内侧的金额仍然可用：不做过度收紧。
+	createOrder(t, s, "top", 999_999_999_999)
+	top, e := s.Select(ctx, "top", "binance", "USDT", "receiver", 6, 1, 1, 99, 120)
+	if e != nil || top.PayAmount() != "999999.999999" || !amount.MallCompatible(top.PayUnits) {
+		t.Fatal("top of the interoperable range refused", top, e)
+	}
+}
+
+// 低于商城最小金额的旧订单只能向上递增到合法档位，绝不能截断或调低。
+func TestSelectRaisesAmountsBelowMallMinimum(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	createOrder(t, s, "tiny", 50) // 0.00005：创建校验之前写入的原始金额
+	if _, e := s.Select(ctx, "tiny", "binance", "USDT", "receiver", 6, 10, 1, 4, 120); e == nil {
+		t.Fatal("amount below the mall minimum accepted")
+	}
+	o, e := s.Select(ctx, "tiny", "binance", "USDT", "receiver", 6, 10, 1, 5, 120)
+	if e != nil || o.PayUnits != amount.MinMall || o.PayAmount() != "0.000100" {
+		t.Fatal("lowest interoperable tier not reached by incrementing", o, e)
+	}
+}
+
+// 重选同一付款方式复用已占用档位，但修复前写入的越界金额不能原样交回给用户。
+func TestReselectRejectsOutOfRangeSelectedAmount(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "a")
+	again, e := s.Select(ctx, "a", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if e != nil || again.PayUnits != o.PayUnits {
+		t.Fatal("same method reselect changed the amount", again, e)
+	}
+	if e = s.DB().Model(o).Update("pay_units", amount.MaxMall).Error; e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Select(ctx, "a", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e == nil {
+		t.Fatal("out-of-range selected amount handed back to the payer")
+	}
+	fresh, e := s.GetByTradeNo(ctx, "a")
+	if e != nil || fresh.PayUnits != amount.MaxMall || fresh.Status != model.Ready {
+		t.Fatal("rejected reselect mutated the order", fresh, e)
+	}
+}
+
 func TestCallbackAttemptFencesStaleResult(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
