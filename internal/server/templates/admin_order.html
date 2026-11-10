@@ -14,6 +14,9 @@
     {{template "admin_flash" .}}
     <header class="pagehead">
       <h1>{{.Base.Title}}</h1>
+      {{if or (eq .Order.Status "PENDING") (eq .Order.Status "READY")}}
+      <form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/close"><input type="hidden" name="csrf" value="{{.Base.CSRF}}"><button class="btn btn-danger" type="submit">关闭订单</button></form>
+      {{end}}
     </header>
 
     <section class="card">
@@ -63,16 +66,6 @@
       </div>
     </section>
 
-    <h2>自助查款</h2>
-    <section class="card">
-      <div class="card-b">
-        {{range .Inquiries}}
-        <p>{{.Reference}} · 第 {{.Attempts}} 次 · {{.Result}}</p>
-        {{else}}
-        暂无查款请求
-        {{end}}
-      </div>
-    </section>
   </main>
   {{template "theme_script" .}}
 </body>

@@ -103,19 +103,6 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 	}
 	return nil, fmt.Errorf("OKX incomplete history: page limit")
 }
-func (c *Client) Lookup(ctx context.Context, ref string, start, end time.Time) ([]model.Transaction, error) {
-	rows, e := c.History(ctx, start, end)
-	if e != nil {
-		return nil, e
-	}
-	out := []model.Transaction{}
-	for _, t := range rows {
-		if t.EventID == ref || t.Reference == ref {
-			out = append(out, t)
-		}
-	}
-	return out, nil
-}
 func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, error) {
 	// 文档只定义了 type 请求参数（3=站内转账，4=链上充值），响应里没有 type 字段，
 	// 因此「是否站内转账」只能由请求过滤 + fromWdId 回填共同确认；fromWdId 是否存在
@@ -219,20 +206,20 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 	if err != nil {
 		return nil, fmt.Errorf("OKX network request failed")
 	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("OKX API 返回 HTTP %d", status)
-	}
-
 	var envelope struct {
 		Code flexString      `json:"code"`
 		Msg  flexString      `json:"msg"`
 		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("解析 OKX 响应失败: %w", err)
+	parseErr := json.Unmarshal(body, &envelope)
+	if status != http.StatusOK {
+		return nil, &APIError{HTTPStatus: status, Code: boundedCode(string(envelope.Code))}
+	}
+	if parseErr != nil {
+		return nil, fmt.Errorf("OKX 响应格式无效")
 	}
 	if string(envelope.Code) != "0" {
-		return nil, fmt.Errorf("OKX business rejection")
+		return nil, &APIError{HTTPStatus: status, Code: boundedCode(string(envelope.Code))}
 	}
 	if len(envelope.Data) == 0 || strings.TrimSpace(string(envelope.Data)) == "null" {
 		return nil, fmt.Errorf("OKX 未返回明确的数据数组")

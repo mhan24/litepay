@@ -30,7 +30,7 @@
               <th>付款方式</th>
               <th>精确应付</th>
               <th>状态</th>
-              <th>创建时间</th>
+              <th>创建时间</th><th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -41,9 +41,10 @@
               <td>{{if .PayUnits}}{{.PayAmount}}{{else}}尚未选定{{end}}</td>
               <td>{{.Status}}</td>
               <td>{{.CreatedAt.Format "01-02 15:04:05"}}</td>
+              <td>{{if or (eq .Status "PENDING") (eq .Status "READY")}}<form method="post" action="{{adminPath}}/orders/{{.TradeNo}}/close"><input type="hidden" name="csrf" value="{{$.Base.CSRF}}"><button class="btn btn-ghost btn-sm" type="submit">关闭订单</button></form>{{else}}—{{end}}</td>
             </tr>
             {{else}}
-            <tr><td colspan="5">暂无订单</td></tr>
+            <tr><td colspan="6">暂无订单</td></tr>
             {{end}}
           </tbody>
         </table>

@@ -69,7 +69,7 @@ func TestAtomicClaimOwnershipAndCooldown(t *testing.T) {
 	if callbacks != 0 {
 		t.Fatal("invalid evidence created callback")
 	}
-	// Automatic scanning and inquiry race on the exact same event.
+	// Concurrent scans race on the exact same event.
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	paid := 0
@@ -413,5 +413,31 @@ func TestCallbackAttemptFencesStaleResult(t *testing.T) {
 	}
 	if _, _, e = s.ReserveCallback(ctx, 5, 3); !errors.Is(e, gorm.ErrRecordNotFound) {
 		t.Fatal("acknowledged callback reserved again", e)
+	}
+}
+
+func TestCanceledOrderReleasesOwnershipButPreservesCooldown(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "close-ready")
+	var before model.Slot
+	if err := s.DB().Where("order_id = ?", o.ID).First(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CancelReference(ctx, o.TradeNo, o.OutTradeNo); err != nil {
+		t.Fatal(err)
+	}
+	var after model.Slot
+	if err := s.DB().Where("provider = ? AND currency = ? AND units = ?", before.Provider, before.Currency, before.Units).First(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.OrderID != nil || !after.ExpiresAt.Equal(before.ExpiresAt) {
+		t.Fatal("cooldown changed", before, after)
+	}
+	if next := readyOrder(t, s, "after-close"); next.PayUnits == o.PayUnits {
+		t.Fatal("canceled amount reused before cooldown")
+	}
+	if result, err := s.Process(ctx, evidence(o, "late-payment"), o.TradeNo); err != nil || result == "paid" {
+		t.Fatal(result, err)
 	}
 }

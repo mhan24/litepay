@@ -9,6 +9,7 @@ import (
 
 	"litepay/internal/binance"
 	"litepay/internal/config"
+	"litepay/internal/gram"
 	"litepay/internal/model"
 	"litepay/internal/okx"
 	"litepay/internal/settings"
@@ -18,7 +19,6 @@ import (
 type source interface {
 	AccountUID(context.Context) (string, error)
 	History(context.Context, time.Time, time.Time) ([]model.Transaction, error)
-	Lookup(context.Context, string, time.Time, time.Time) ([]model.Transaction, error)
 }
 type connection struct {
 	config config.Config
@@ -27,7 +27,6 @@ type connection struct {
 }
 
 // One scheduler owns the shared exchange clients, budgets and account verification.
-// An inquiry never queues ahead of an active scan.
 type Poller struct {
 	cfg     *settings.Manager
 	st      *store.Store
@@ -35,12 +34,13 @@ type Poller struct {
 	clients map[string]*connection
 	// 每个平台下一轮补查未确认到账的偏移量，用于有界轮转。
 	pendingOffset map[string]int
+	GRAM          *gram.Monitor
 	// testTransports 仅由端到端测试置位：创建的交易所客户端访问本地模拟服务。
 	testTransports bool
 }
 
 func NewPoller(cfg *settings.Manager, st *store.Store) *Poller {
-	return &Poller{cfg: cfg, st: st, clients: map[string]*connection{}, pendingOffset: map[string]int{}}
+	return &Poller{GRAM: gram.NewMonitor(), cfg: cfg, st: st, clients: map[string]*connection{}, pendingOffset: map[string]int{}}
 }
 
 // UseTestTransports 只用于端到端测试：调度器创建的交易所客户端只访问本地模拟服务，
@@ -57,10 +57,12 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 	}
 
 	cached := p.clients[provider]
-	if cached == nil || cached.config.Binance != cfg.Binance || cached.config.OKX != cfg.OKX || cached.config.Checkout.Binance != cfg.Checkout.Binance || cached.config.Checkout.OKX != cfg.Checkout.OKX {
+	if cached == nil || cached.config.TON != cfg.TON || cached.config.Binance != cfg.Binance || cached.config.OKX != cfg.OKX || cached.config.Checkout.Binance != cfg.Checkout.Binance || cached.config.Checkout.OKX != cfg.Checkout.OKX {
 		var cli source
 		if provider == config.ProviderBinance {
 			cli = binance.New(cfg.Binance.APIKey, cfg.Binance.APISecret, cfg.Binance.BaseURL, cfg.Binance.RecvWindow, cfg.Binance.Limit)
+		} else if provider == config.ProviderTON {
+			cli = gram.New(cfg.TON.BaseURL, cfg.TON.APIKey, cfg.TON.Address)
 		} else {
 			cli = okx.New(cfg.OKX.APIKey, cfg.OKX.APISecret, cfg.OKX.Passphrase, cfg.OKX.BaseURL, cfg.OKX.Limit)
 		}
@@ -78,6 +80,9 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 			return nil, err
 		}
 		want := cfg.Checkout.Binance.UID
+		if provider == config.ProviderTON {
+			want = cfg.TON.Address
+		}
 		if provider == config.ProviderOKX {
 			want = cfg.Checkout.OKX.UID
 		}
@@ -236,73 +241,15 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 	}
 	return nil
 }
-func (p *Poller) Inquiry(ctx context.Context, no, ref string) (string, error) {
-	if len(ref) < 1 || len(ref) > 128 {
-		return "", errors.New("付款编号长度无效")
-	}
-	if !p.mu.TryLock() {
-		return "", errors.New("正在扫描，请稍后查款")
-	}
-	defer p.mu.Unlock()
-	o, err := p.st.ReserveInquiry(ctx, no, ref)
-	if err != nil {
-		return "", err
-	}
-	result := "无法确认该编号，请核对收款平台、编号和订单信息"
-	defer func() {
-		save, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		defer cancel()
-		_ = p.st.InquiryResult(save, no, result)
-	}()
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	cli, err := p.client(ctx, p.cfg.Get(), o.Provider)
-	if err != nil {
-		result = "交易所查询失败，未确认付款"
-		return result, err
-	}
-	rows, err := cli.Lookup(ctx, ref, *o.SelectedAt, minTime(o.ExpiresAt, time.Now()))
-	if err != nil {
-		result = "交易所查询未完整完成，未确认付款"
-		return result, err
-	}
-	if len(rows) != 1 {
-		if len(rows) > 1 {
-			for _, t := range rows {
-				t.State = model.Ambiguous
-				t.Reason = "multiple_reference_candidates"
-				if _, e := p.st.Process(ctx, t, no); e != nil {
-					return result, e
-				}
-			}
-			result = "编号对应多笔资金记录，需要人工核对"
-		}
-		return result, nil
-	}
-	outcome, err := p.st.Process(ctx, rows[0], no)
-	if err != nil {
-		return result, err
-	}
-	switch outcome {
-	case "paid", "already_claimed":
-		result = "已确认到账，正在通知商户"
-	case "other_order":
-		result = "该交易不属于当前订单"
-	default:
-		result = "交易未满足当前订单的付款条件，需要核对"
-	}
-	return result, nil
-}
-func minTime(a, b time.Time) time.Time {
-	if a.Before(b) {
-		return a
-	}
-	return b
-}
 
 // Run 每秒推进付款窗口，并按各平台的查询间隔调度扫描。是否需要请求交易所由 Scan
 // 自身判断，这里不再重复粗略的“有没有订单”判断。
 func (p *Poller) Run(ctx context.Context) {
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	var monitorWG sync.WaitGroup
+	monitorWG.Go(func() { p.monitorGRAM(monitorCtx) })
+	defer func() { stopMonitor(); monitorWG.Wait() }()
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	next := map[string]time.Time{}
@@ -312,7 +259,7 @@ func (p *Poller) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			cfg := p.cfg.Get()
-			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX} {
+			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
 				if !time.Now().Before(next[provider]) {
 					if err := p.Scan(ctx, provider); err != nil && ctx.Err() == nil {
 						slog.Warn("收款扫描未完成", "provider", provider)
@@ -325,4 +272,41 @@ func (p *Poller) Run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// Prices and balances keep updating even when no checkout is waiting for payment.
+func (p *Poller) monitorGRAM(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, balance := range []bool{false, true} {
+		wg.Go(func() {
+			interval := gram.PriceInterval
+			if balance {
+				interval = gram.BalanceInterval
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			var balanceClient *gram.Client
+			var balanceConfig config.TONConfig
+			for {
+				cfg := p.cfg.Get()
+				if cfg.TONEnabled() {
+					if balance {
+						if balanceClient == nil || balanceConfig != cfg.TON {
+							balanceClient = gram.New(cfg.TON.BaseURL, cfg.TON.APIKey, cfg.TON.Address)
+							balanceConfig = cfg.TON
+						}
+						_ = p.GRAM.CheckBalance(ctx, balanceClient)
+					} else {
+						_ = p.GRAM.CheckPrice(ctx)
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		})
+	}
+	wg.Wait()
 }

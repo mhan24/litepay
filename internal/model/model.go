@@ -26,6 +26,8 @@ type Order struct {
 	OutTradeNo    string `gorm:"uniqueIndex;not null"`
 	Name          string
 	OriginUnits   int64 `gorm:"not null;check:origin_units > 0"`
+	RateUSD       string
+	RateAt        *time.Time
 	PayUnits      int64
 	Precision     int
 	Provider      string
@@ -92,13 +94,6 @@ type NotifyLog struct {
 	Success    bool
 	Error      string
 	CreatedAt  time.Time
-}
-type PaymentInquiry struct {
-	TradeNo       string `gorm:"primaryKey"`
-	Reference     string
-	Result        string
-	Attempts      int
-	LastAttemptAt time.Time
 }
 type ScanCursor struct {
 	Provider     string `gorm:"primaryKey"`

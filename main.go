@@ -1,4 +1,4 @@
-// LitePay: a development-stage BEpusdt gateway for Binance / OKX internal payments.
+// LitePay: a development-stage BEpusdt gateway for exchange payments and native GRAM.
 package main
 
 import (

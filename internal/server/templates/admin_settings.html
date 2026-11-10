@@ -7,6 +7,7 @@
 <title>设置 · LitePay 管理后台</title>
 {{template "theme_head" .}}
 {{template "admin_css" .}}
+<style>.currency-toggles{display:flex;gap:20px;flex-wrap:wrap}.section-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--line)}.section-actions .actions{margin-left:auto}@media(max-width:640px){.section-actions .actions{width:100%;margin-left:0}.section-actions .btn{flex:1}}</style>
 </head>
 <body>
 {{template "admin_nav" .}}
@@ -26,13 +27,15 @@
   {{end}}
 
   <nav class="settings-nav" aria-label="设置分组" hidden>
-    <button type="button" data-settings-view="checkout" aria-pressed="true">收款信息</button>
-    <button type="button" data-settings-view="keys" aria-pressed="false">平台密钥</button>
+    <button type="button" data-settings-view="binance" aria-pressed="true">币安</button>
+    <button type="button" data-settings-view="okx" aria-pressed="false">欧易</button>
+    <button type="button" data-settings-view="ton" aria-pressed="false">GRAM</button>
+    <button type="button" data-settings-view="checkout" aria-pressed="false">收银台</button>
     <button type="button" data-settings-view="orders" aria-pressed="false">订单规则</button>
     <button type="button" data-settings-view="merchant" aria-pressed="false">商户回调</button>
     <button type="button" data-settings-view="account" aria-pressed="false">管理员</button>
   </nav>
-  <form data-settings-account method="post" action="{{adminPath}}/settings/account">
+  <form data-settings-account data-settings-panel="account" method="post" action="{{adminPath}}/settings/account">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <section data-settings-group="account" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>管理员账号</h2><span class="hint">修改后请重新登录</span></div>
@@ -47,7 +50,7 @@
       </div>
     </section>
   </form>
-  <form data-settings-site method="post" action="{{adminPath}}/settings/site">
+  <form data-settings-site data-settings-panel="account" method="post" action="{{adminPath}}/settings/site">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <section data-settings-group="account" class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>访问入口</h2><span class="hint">保存后立即生效，请重新登录</span></div>
@@ -62,113 +65,57 @@
       </div>
     </section>
   </form>
-  <form data-settings-payment method="post" action="{{adminPath}}/settings">
+  <form data-settings-panel="binance" method="post" action="{{adminPath}}/settings">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
-
-    <section data-settings-group="checkout" class="card" style="margin-bottom:12px">
-      <div class="card-h"><h2>收银台</h2><span class="hint">先选平台，再选币种</span></div>
-      <div class="card-b">
-        <p class="section-desc">仅支持 USDT 与 USDC。付款人先选择 Binance 或 OKX，再选择币种；订单只确认所选平台和币种的站内转账。</p>
-        <div class="form-grid">
-          <div class="field">
-            <label>开放币种</label>
-            {{range .KnownCurrencies}}
-            <label class="switch"><input type="checkbox" name="checkout_currencies" value="{{.}}" {{if hasStr $.Currencies .}}checked{{end}}><span>{{.}}</span></label>
-            {{end}}
-          </div>
-          <div class="field full">
-            <label>收银台提示</label>
-            <input class="input" name="checkout_note" value="{{.Cfg.Checkout.Note}}" placeholder="例如：请复制完整金额，已付款请勿重复转账">
-            <label class="switch"><input type="checkbox" name="clear_checkout_note"><span>清除收银台提示</span></label>
-          </div>
-        </div>
-      </div>
+    <input type="hidden" name="settings_scope" value="binance">
+    <section class="card" style="margin-bottom:12px"><div class="card-h"><h2>币安 · Binance</h2><span class="badge {{if .BinanceOn}}b-ok{{else}}b-gray{{end}}">{{if .BinanceOn}}可收款{{else}}未启用收款{{end}}</span></div>
+<div class="card-b"><p class="section-desc">收款 UID 必须与本平台 API 所属账户一致。API 只需读取权限；密钥留空保留原值。</p><div data-section-fields><div class="form-grid">
+<div class="field"><label for="setting-binance_uid">收款 UID</label><input id="setting-binance_uid" class="input" name="binance_uid" value="{{.Cfg.Checkout.Binance.UID}}" autocomplete="off"></div>
+<div class="field"><label>开放币种</label><div class="currency-toggles">{{range .KnownCurrencies}}<label class="switch"><input type="checkbox" name="binance_currencies" value="{{.}}" {{if hasStr $.BinanceCurrencies .}}checked{{end}}><span>{{.}}</span></label>{{end}}</div></div>
+<div class="field"><label for="setting-binance_api_key">API Key</label><input id="setting-binance_api_key" class="input" name="binance_api_key" type="password" value="" placeholder="{{.BinanceKey}}" autocomplete="new-password"></div>
+<div class="field"><label for="setting-binance_api_secret">API Secret</label><input id="setting-binance_api_secret" class="input" name="binance_api_secret" type="password" value="" placeholder="{{if .Cfg.Binance.APISecret}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"></div>
+<div class="field"><label for="setting-binance_poll_interval">到账查询间隔（秒）</label><input id="setting-binance_poll_interval" class="input" type="number" name="binance_poll_interval" value="{{.Cfg.Binance.PollInterval}}" min="2" max="60"></div>
+<div class="field"><label for="setting-binance_lookback">回看窗口（分钟）</label><input id="setting-binance_lookback" class="input" type="number" name="binance_lookback" value="{{.Cfg.Binance.LookbackBuffer}}" min="1" max="60"></div>
+</div></div></div>      <div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验币安并保存</button><button class="btn btn-primary" type="submit">保存币安配置</button></div></div></div>
     </section>
-
-    <section data-settings-group="checkout" class="card" style="margin-bottom:12px">
-      <div class="card-h"><h2>收款 UID</h2><span class="hint">站内转账唯一收款标识</span></div>
-      <div class="card-b">
-        <p class="section-desc">更换 API 凭据或 UID 时，保存前会联网核对所属账户；不一致或核验失败将拒绝保存。收款 UID 必须与对应只读 API 所属账户一致。收银台只展示和复制 UID，所有付款信息都以当前订单页为准。</p>
-        <div class="form-grid">
-          <div class="field">
-            <label>Binance 收款 UID</label>
-            <input class="input" name="binance_uid" value="{{.Cfg.Checkout.Binance.UID}}" placeholder="Binance 账户 UID">
-            <span class="hint">用于展示、转账与收款账户校验。</span>
-            <label class="switch"><input type="checkbox" name="clear_binance_uid"><span>清除 Binance UID</span></label>
-          </div>
-          <div class="field">
-            <label>OKX 收款 UID</label>
-            <input class="input" name="okx_uid" value="{{.Cfg.Checkout.OKX.UID}}" placeholder="OKX 账户 UID">
-            <span class="hint">系统会通过 OKX 账户接口核对 UID。</span>
-            <label class="switch"><input type="checkbox" name="clear_okx_uid"><span>清除 OKX UID</span></label>
-          </div>
-        </div>
-      </div>
+  </form>
+  <form data-settings-panel="okx" method="post" action="{{adminPath}}/settings">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+    <input type="hidden" name="settings_scope" value="okx">
+    <section class="card" style="margin-bottom:12px"><div class="card-h"><h2>欧易 · OKX</h2><span class="badge {{if .OKXOn}}b-ok{{else}}b-gray{{end}}">{{if .OKXOn}}可收款{{else}}未启用收款{{end}}</span></div>
+<div class="card-b"><p class="section-desc">收款 UID 必须与本平台 API 所属账户一致。API 只需读取权限；密钥留空保留原值。</p><div data-section-fields><div class="form-grid">
+<div class="field"><label for="setting-okx_uid">收款 UID</label><input id="setting-okx_uid" class="input" name="okx_uid" value="{{.Cfg.Checkout.OKX.UID}}" autocomplete="off"></div>
+<div class="field"><label>开放币种</label><div class="currency-toggles">{{range .KnownCurrencies}}<label class="switch"><input type="checkbox" name="okx_currencies" value="{{.}}" {{if hasStr $.OKXCurrencies .}}checked{{end}}><span>{{.}}</span></label>{{end}}</div></div>
+<div class="field"><label for="setting-okx_api_key">API Key</label><input id="setting-okx_api_key" class="input" name="okx_api_key" type="password" value="" placeholder="{{.OKXKey}}" autocomplete="new-password"></div>
+<div class="field"><label for="setting-okx_api_secret">API Secret</label><input id="setting-okx_api_secret" class="input" name="okx_api_secret" type="password" value="" placeholder="{{if .Cfg.OKX.APISecret}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"></div>
+<div class="field"><label for="setting-okx_passphrase">API Passphrase</label><input id="setting-okx_passphrase" class="input" name="okx_passphrase" type="password" value="" placeholder="{{if .Cfg.OKX.Passphrase}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"><span class="hint">创建此 API Key 时设置的口令。</span></div>
+<div class="field"><label for="setting-okx_poll_interval">到账查询间隔（秒）</label><input id="setting-okx_poll_interval" class="input" type="number" name="okx_poll_interval" value="{{.Cfg.OKX.PollInterval}}" min="2" max="60"></div>
+<div class="field"><label for="setting-okx_lookback">回看窗口（分钟）</label><input id="setting-okx_lookback" class="input" type="number" name="okx_lookback" value="{{.Cfg.OKX.LookbackBuffer}}" min="1" max="60"></div>
+</div></div></div>      <div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验欧易并保存</button><button class="btn btn-primary" type="submit">保存欧易配置</button></div></div></div>
     </section>
-
-    <section data-settings-group="keys" class="card" style="margin-bottom:12px">
-      <div class="card-h"><h2>Binance</h2><span class="hint">只读 API · 站内转账</span></div>
-      <div class="card-b">
-        <p class="section-desc">系统只接受 PAY 与 C2C 正向转账，并校验收款 UID、币种和精确金额。请仅授予读取权限并配置 IP 白名单。</p>
-        <div class="form-grid">
-          <div class="field">
-            <label>API Key</label>
-            <input class="input" name="binance_api_key" value="" placeholder="{{.BinanceKey}}" autocomplete="off">
-            <span class="hint">留空保持当前值；勾选下方选项可清除。</span>
-            <label class="switch"><input type="checkbox" name="clear_binance_api_key"><span>清除 Binance API Key</span></label>
-          </div>
-          <div class="field">
-            <label>API Secret</label>
-            <input class="input" type="password" name="binance_api_secret" value="" placeholder="留空保持当前值" autocomplete="new-password">
-            <label class="switch"><input type="checkbox" name="clear_binance_api_secret"><span>清除 Binance API Secret</span></label>
-          </div>
-          <div class="field">
-            <label>查询间隔（秒）</label>
-            <input class="input" type="number" name="binance_poll_interval" value="{{.Cfg.Binance.PollInterval}}" min="2" max="60">
-          </div>
-          <div class="field">
-            <label>回看窗口（分钟）</label>
-            <input class="input" type="number" name="binance_lookback" value="{{.Cfg.Binance.LookbackBuffer}}" min="1" max="60">
-          </div>
-        </div>
-      </div>
+  </form>
+  <form data-settings-panel="ton" method="post" action="{{adminPath}}/settings">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+    <input type="hidden" name="settings_scope" value="ton">
+    <section class="card" style="margin-bottom:12px"><div class="card-h"><h2>GRAM · TON 主网</h2><span class="badge {{if .Cfg.TONEnabled}}b-ok{{else}}b-gray{{end}}">{{if .Cfg.TONEnabled}}可收款{{else}}未启用收款{{end}}</span></div>
+<div class="card-b"><p class="section-desc">行情每 5 秒、余额每 15 秒检测。报价过期或买卖价差超过 0.5% 时暂停新报价；订单换算尾差最多 0.1%。</p><div data-section-fields><div class="form-grid">
+<div class="field"><label for="setting-ton_address">GRAM 收款地址</label><input id="setting-ton_address" class="input" name="ton_address" value="{{.Cfg.TON.Address}}" autocomplete="off"><span class="hint">请确认持有该钱包，公开接口不能证明钱包所有权。</span></div>
+<div class="field"><label>开放币种</label><label class="switch"><input type="checkbox" name="ton_currencies" value="GRAM" {{if hasStr .TONCurrencies "GRAM"}}checked{{end}}><span>GRAM</span></label></div><div class="field"><label for="setting-ton_api_key">Toncenter API Key（可选）</label><input id="setting-ton_api_key" class="input" name="ton_api_key" type="password" value="" placeholder="{{.TONKey}}" autocomplete="new-password"></div>
+<div class="field"><label for="setting-ton_poll_interval">到账查询间隔（秒）</label><input id="setting-ton_poll_interval" class="input" type="number" name="ton_poll_interval" value="{{.Cfg.TON.PollInterval}}" min="2" max="60"></div>
+</div></div><p id="gram-balance" class="hint" role="status">余额等待检测</p><p id="gram-price" class="hint" role="status">GRAM/USD 行情等待检测</p></div>      <div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验 GRAM 并保存</button><button class="btn btn-primary" type="submit">保存 GRAM 配置</button></div></div></div>
     </section>
-
-    <section data-settings-group="keys" class="card" style="margin-bottom:12px">
-      <div class="card-h"><h2>OKX</h2><span class="hint">只读 API · 站内转账</span></div>
-      <div class="card-b">
-        <p class="section-desc">只接受已完成的 OKX 站内转账。链上充值、等待确认的记录和 UID 不一致的转账都不会入账。</p>
-        <div class="form-grid">
-          <div class="field">
-            <label>API Key</label>
-            <input class="input" name="okx_api_key" value="" placeholder="{{.OKXKey}}" autocomplete="off">
-            <span class="hint">留空保持当前值；勾选下方选项可清除。</span>
-            <label class="switch"><input type="checkbox" name="clear_okx_api_key"><span>清除 OKX API Key</span></label>
-          </div>
-          <div class="field">
-            <label>API Secret</label>
-            <input class="input" type="password" name="okx_api_secret" value="" placeholder="留空保持当前值" autocomplete="new-password">
-            <label class="switch"><input type="checkbox" name="clear_okx_api_secret"><span>清除 OKX API Secret</span></label>
-          </div>
-          <div class="field">
-            <label>Passphrase</label>
-            <input class="input" type="password" name="okx_passphrase" value="" placeholder="留空保持当前值" autocomplete="new-password">
-            <label class="switch"><input type="checkbox" name="clear_okx_passphrase"><span>清除 OKX Passphrase</span></label>
-          </div>
-          <div class="field">
-            <label>查询间隔（秒）</label>
-            <input class="input" type="number" name="okx_poll_interval" value="{{.Cfg.OKX.PollInterval}}" min="2" max="60">
-          </div>
-          <div class="field">
-            <label>回看窗口（分钟）</label>
-            <input class="input" type="number" name="okx_lookback" value="{{.Cfg.OKX.LookbackBuffer}}" min="1" max="60">
-          </div>
-        </div>
-      </div>
+  </form>
+  <form data-settings-panel="checkout" method="post" action="{{adminPath}}/settings">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+    <input type="hidden" name="settings_scope" value="checkout">
+    <section class="card"><div class="card-h"><h2>收银台提示</h2></div><div class="card-b"><div class="field"><label for="checkout-note">付款提示</label><input id="checkout-note" class="input" name="checkout_note" value="{{.Cfg.Checkout.Note}}" placeholder="例如：已付款请勿重复转账"></div></div>      <div class="card-b"><div class="section-actions"><div class="actions"><button class="btn btn-primary" type="submit">保存收银台配置</button></div></div></div>
     </section>
-
-    <section data-settings-group="orders" class="card" style="margin-bottom:12px">
-      <div class="card-h"><h2>订单</h2><span class="hint">USD 结算 · 稳定币 1:1</span></div>
+  </form>
+  <form data-settings-panel="orders" method="post" action="{{adminPath}}/settings">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+    <input type="hidden" name="settings_scope" value="orders">
+    <section class="card" style="margin-bottom:12px">
+      <div class="card-h"><h2>订单</h2><span class="hint">USD 订单 · GRAM 按行情换算</span></div>
       <div class="card-b">
         <div class="form-grid">
           <div class="field">
@@ -199,9 +146,13 @@
           </div>
         </div>
       </div>
+      <div class="card-b"><div class="section-actions"><div class="actions"><button class="btn btn-primary" type="submit">保存订单规则配置</button></div></div></div>
     </section>
-
-    <section data-settings-group="merchant" class="card" style="margin-bottom:12px">
+  </form>
+  <form data-settings-panel="merchant" method="post" action="{{adminPath}}/settings">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+    <input type="hidden" name="settings_scope" value="merchant">
+    <section class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>独角数卡</h2><span class="hint">BEpusdt 收银台模式</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -222,7 +173,7 @@
       </div>
     </section>
 
-    <section data-settings-group="merchant" class="card" style="margin-bottom:12px">
+    <section class="card" style="margin-bottom:12px">
       <div class="card-h"><h2>支付结果通知</h2><span class="hint">发送给独角数卡</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -240,42 +191,41 @@
           </div>
         </div>
       </div>
+      <div class="card-b"><div class="section-actions"><div class="actions"><button class="btn btn-primary" type="submit">保存商户回调配置</button></div></div></div>
     </section>
-
-    <div class="card">
-      <div class="sticky-bar">
-        <span class="tip">SQLite · {{.DBPath}}</span>
-        <button class="btn" type="submit" name="verify_accounts" value="on">核验 Key / UID 并保存</button>
-        <button class="btn btn-primary" type="submit">保存全部支付设置</button>
-      </div>
-    </div>
   </form>
-  <form id="rotate-token" method="post" action="{{adminPath}}/settings/token" hidden>
-    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
-  </form>
+  <form id="rotate-token" method="post" action="{{adminPath}}/settings/token" hidden><input type="hidden" name="csrf" value="{{.Base.CSRF}}"></form>
 </main>
 {{template "theme_script" .}}
 <script>
 (function(){
-  var nav=document.querySelector('.settings-nav');
-  if(!nav)return;
-  var panels=document.querySelectorAll('[data-settings-group]');
-  var buttons=nav.querySelectorAll('[data-settings-view]');
-  var payment=document.querySelector('[data-settings-payment]');
-  var account=document.querySelector('[data-settings-account]');
-  var site=document.querySelector('[data-settings-site]');
-  function show(name){
-    panels.forEach(function(panel){panel.hidden=panel.dataset.settingsGroup!==name;});
-    payment.hidden=name==='account';account.hidden=name!=='account';
-    site.hidden=name!=='account';
-    buttons.forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.settingsView===name));});
-  }
-  nav.hidden=false;show(new URLSearchParams(location.search).get('view')==='account'?'account':'checkout');
-  buttons.forEach(function(button){button.addEventListener('click',function(){show(button.dataset.settingsView);});});
-  document.addEventListener('invalid',function(event){
-    var panel=event.target.closest('[data-settings-group]');
-    if(panel&&panel.hidden){show(panel.dataset.settingsGroup);requestAnimationFrame(function(){event.target.focus();});}
-  },true);
+ var nav=document.querySelector('.settings-nav'),panels=document.querySelectorAll('[data-settings-panel]'),buttons=nav.querySelectorAll('[data-settings-view]');
+ function show(name){
+  if(!Array.from(buttons).some(function(b){return b.dataset.settingsView===name}))name='binance';
+  panels.forEach(function(panel){panel.hidden=panel.dataset.settingsPanel!==name});
+  buttons.forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.settingsView===name))});
+  var url=new URL(location.href);url.searchParams.set('view',name);history.replaceState(null,'',url);
+ }
+ nav.hidden=false;show(new URLSearchParams(location.search).get('view')||'binance');
+ buttons.forEach(function(button){button.addEventListener('click',function(){show(button.dataset.settingsView)})});
+ document.querySelectorAll('[data-clear-section]').forEach(function(box){
+  box.addEventListener('change',function(){
+   var form=box.closest('form');
+   form.querySelectorAll('[data-section-fields] input').forEach(function(input){input.disabled=box.checked});
+   form.querySelector('[name="verify_accounts"]').disabled=box.checked;
+  });
+ });
+ var balance=document.getElementById('gram-balance'),price=document.getElementById('gram-price');
+ async function checkGRAM(){
+  try{
+   var response=await fetch('{{adminPath}}/gram/status',{credentials:'same-origin'});if(!response.ok)throw new Error('unavailable');
+   var s=(await response.json()).data;
+   balance.textContent=s.balance_error||(!s.balance_fresh?'余额等待检测或已过期':'余额 '+s.balance_gram+' GRAM · 检测于 '+new Date(s.balance_checked_at).toLocaleTimeString());
+   price.textContent=s.price_fresh?'1 GRAM = '+s.usd_per_gram.replace(/0+$/,'').replace(/\.$/,'')+' USD · 检测于 '+new Date(s.price_checked_at).toLocaleTimeString():(s.price_error||'GRAM/USD 行情未就绪');
+  }catch(error){price.textContent='检测状态读取失败，请稍后重试'}
+  setTimeout(checkGRAM,5000);
+ }
+ checkGRAM();
 })();
 </script>
 </body>

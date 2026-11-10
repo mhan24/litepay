@@ -41,7 +41,7 @@ func TestPayHistoryFieldParsing(t *testing.T) {
 	if e != nil || len(rows) != 7 {
 		t.Fatal(rows, e)
 	}
-	// 收款方 PAY：transactionId 是事件身份，orderId（纯数字）是查款编号，
+	// 收款方 PAY：transactionId 是事件身份，orderId（纯数字）是外部参考编号，
 	// binanceId 是收款 UID。
 	if r := rows[0]; r.EventID != "M_P_71505104267788288" || r.Reference != "463524995526164480" || r.Receiver != "uid" || r.Currency != "USDT" || r.Units != 10010000 || r.State != model.Confirmed || !r.OccurredAt.Equal(time.UnixMilli(100000)) {
 		t.Fatal("pay receiver", r)
@@ -68,15 +68,7 @@ func TestPayHistoryFieldParsing(t *testing.T) {
 	if r := rows[6]; r.State != model.Rejected || r.Reason != "conflicting_amount" || r.Units != 7500000 || r.RawAmount != "0" {
 		t.Fatal("zero total with single asset", r)
 	}
-	found, e := c.Lookup(context.Background(), "M_P_71505104267788288", time.UnixMilli(90000), time.UnixMilli(110000))
-	if e != nil || len(found) != 1 || found[0].EventID != "M_P_71505104267788288" {
-		t.Fatal("transaction id lookup", found, e)
-	}
-	// 用户贴纯数字订单号同样能查到。
-	found, e = c.Lookup(context.Background(), "463524995526164480", time.UnixMilli(90000), time.UnixMilli(110000))
-	if e != nil || len(found) != 1 || found[0].EventID != "M_P_71505104267788288" {
-		t.Fatal("numeric order id lookup", found, e)
-	}
+
 }
 
 // 空窗口的文档化形态只有空数组；data 缺失、null、非数组都不是官方契约允许的响应，

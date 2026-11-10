@@ -258,23 +258,25 @@ func (h *Handlers) redirectLogin(c *gin.Context) {
 
 // AdminBase 所有后台页面共用的头部数据。
 type AdminBase struct {
-	Active  string
-	User    string
-	CSRF    string
-	Flash   string
-	FlashOK bool
-	Title   string
+	Active    string
+	User      string
+	CSRF      string
+	Flash     string
+	FlashOK   bool
+	FlashWarn bool
+	Title     string
 }
 
 func (h *Handlers) adminBase(c *gin.Context, active, title string) AdminBase {
 	flash := c.Query("msg")
 	return AdminBase{
-		Active:  active,
-		Title:   title,
-		User:    c.GetString("admin_user"),
-		CSRF:    c.GetString("admin_csrf"),
-		Flash:   flash,
-		FlashOK: c.Query("t") != "err",
+		Active:    active,
+		Title:     title,
+		User:      c.GetString("admin_user"),
+		CSRF:      c.GetString("admin_csrf"),
+		Flash:     flash,
+		FlashOK:   c.Query("t") != "err",
+		FlashWarn: c.Query("t") == "warn",
 	}
 }
 
@@ -351,21 +353,25 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 	updated := h.cfg.UpdatedAt(c.Request.Context())
 
 	c.HTML(http.StatusOK, "admin_settings.html", gin.H{
-		"Base":            h.adminBase(c, "settings", "设置"),
-		"HasSaved":        !updated.IsZero(),
-		"UpdatedAt":       updated.Format("2006-01-02 15:04:05"),
-		"Cfg":             cfg,
-		"Currencies":      cfg.Checkout.Currencies,
-		"KnownCurrencies": config.SupportedCurrencies,
-		"DelaysJoined":    joinInts(cfg.Notify.RetryDelays),
-		"BEpusdtKeyMask":  maskSecret(cfg.BEpusdt.APIToken),
-		"BinanceKey":      maskSecret(cfg.Binance.APIKey),
-		"BinanceOn":       cfg.BinanceEnabled(),
-		"OKXOn":           cfg.OKXEnabled(),
-		"CollectionOn":    cfg.BinanceEnabled() || cfg.OKXEnabled(),
-		"Provider":        "multi",
-		"OKXKey":          maskSecret(cfg.OKX.APIKey),
-		"DBPath":          cfg.Database.Path,
+		"Base":              h.adminBase(c, "settings", "设置"),
+		"HasSaved":          !updated.IsZero(),
+		"UpdatedAt":         updated.Format("2006-01-02 15:04:05"),
+		"Cfg":               cfg,
+		"Currencies":        cfg.Checkout.Currencies,
+		"KnownCurrencies":   []string{"USDT", "USDC"},
+		"BinanceCurrencies": cfg.ProviderCurrencies(config.ProviderBinance),
+		"OKXCurrencies":     cfg.ProviderCurrencies(config.ProviderOKX),
+		"TONCurrencies":     cfg.ProviderCurrencies(config.ProviderTON),
+		"DelaysJoined":      joinInts(cfg.Notify.RetryDelays),
+		"BEpusdtKeyMask":    maskSecret(cfg.BEpusdt.APIToken),
+		"BinanceKey":        maskSecret(cfg.Binance.APIKey),
+		"BinanceOn":         cfg.BinanceEnabled(),
+		"OKXOn":             cfg.OKXEnabled(),
+		"CollectionOn":      cfg.AnyProviderEnabled(),
+		"Provider":          "multi",
+		"OKXKey":            maskSecret(cfg.OKX.APIKey),
+		"TONKey":            maskSecret(cfg.TON.APIKey),
+		"DBPath":            cfg.Database.Path,
 
 		"BaseURL": cfg.Server.BaseURL,
 	})
@@ -374,23 +380,57 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 // AdminSettingsSave POST /admin/settings
 func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 	p, errs := parseSettingsForm(c)
+	destination := h.adminURL("/admin/settings?msg=")
+	scope := c.PostForm("settings_scope")
+	for _, valid := range []string{"binance", "okx", "ton", "checkout", "orders", "merchant"} {
+		if scope == valid {
+			destination = h.adminURL("/admin/settings?view=" + scope + "&msg=")
+			break
+		}
+	}
 	if len(errs) > 0 {
-		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape(strings.Join(errs, "；"))+"&t=err")
+		c.Redirect(http.StatusSeeOther, destination+url.QueryEscape(strings.Join(errs, "；"))+"&t=err")
 		return
 	}
 
 	operator := c.GetString("admin_user")
-	if err := h.cfg.Update(c.Request.Context(), p, operator); err != nil {
-		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape(err.Error())+"&t=err")
+	checks, err := h.cfg.UpdateWithVerification(c.Request.Context(), p, operator)
+	if err != nil {
+		c.Redirect(http.StatusSeeOther, destination+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
 
 	slog.Info("后台配置已更新", "operator", operator)
 	if p.VerifyAccounts {
-		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape("已完整配置的平台 API Key 与收款 UID 核验通过，配置已保存"))
+		message, partial := verificationMessage(checks)
+		suffix := ""
+		if partial {
+			suffix = "&t=warn"
+		}
+		c.Redirect(http.StatusSeeOther, destination+url.QueryEscape(message)+suffix)
 		return
 	}
-	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape("配置已保存并立即生效"))
+	c.Redirect(http.StatusSeeOther, destination+url.QueryEscape("配置已保存并立即生效"))
+}
+
+func verificationMessage(checks []settings.AccountVerification) (string, bool) {
+	names := map[string]string{config.ProviderBinance: "Binance", config.ProviderOKX: "OKX", config.ProviderTON: "GRAM 余额接口"}
+	parts := []string{"配置已保存"}
+	partial := false
+	for _, check := range checks {
+		name := names[check.Provider]
+		if check.Verified {
+			parts = append(parts, name+" 核验通过")
+			continue
+		}
+		partial = true
+		detail := " 未核验"
+		if len(check.Missing) > 0 {
+			detail += "，需配置：" + strings.Join(check.Missing, "、")
+		}
+		parts = append(parts, name+detail)
+	}
+	return strings.Join(parts, "；"), partial
 }
 
 // AdminAccountSave updates credentials after reauthentication.
@@ -491,32 +531,33 @@ func (h *Handlers) AdminRotateToken(c *gin.Context) {
 
 // parseSettingsForm 解析设置表单，返回补丁与校验错误。
 func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
-	var p settings.Patch
-	p.VerifyAccounts = c.PostForm("verify_accounts") == "on"
+	scope := c.PostForm("settings_scope")
+	p := settings.Patch{}
 	var errs []string
-
-	// A blank field keeps the current value unless its explicit clear checkbox
-	// is selected. This avoids treating "I left it blank" as a destructive edit.
-	editableString := func(key string) *string {
-		v := strings.TrimSpace(c.PostForm(key))
-		if v == "" && c.PostForm("clear_"+key) != "on" {
+	text := func(key string, secret bool) *string {
+		raw, exists := c.GetPostForm(key)
+		if !exists {
 			return nil
 		}
-		return &v
+		raw = strings.TrimSpace(raw)
+		if secret && raw == "" {
+			return nil
+		}
+		return &raw
 	}
-	optInt := func(key string, min, max int) *int {
+	integer := func(key string, low, high int) *int {
 		raw := strings.TrimSpace(c.PostForm(key))
 		if raw == "" {
 			return nil
 		}
-		v, err := strconv.Atoi(raw)
-		if err != nil || v < min || v > max {
-			errs = append(errs, fmt.Sprintf("%s 需为 %d~%d 的整数", key, min, max))
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < low || n > high {
+			errs = append(errs, fmt.Sprintf("%s 需为 %d~%d 的整数", key, low, high))
 			return nil
 		}
-		return &v
+		return &n
 	}
-	optAmount := func(key string) *string {
+	money := func(key string) *string {
 		raw := strings.TrimSpace(c.PostForm(key))
 		if raw == "" {
 			return nil
@@ -527,55 +568,98 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		}
 		return &raw
 	}
-	reselect := c.PostForm("bepusdt_reselect") == "on"
-	p.BEpusdtReselect = &reselect
-
-	{
-		curs := c.PostFormArray("checkout_currencies")
-		p.CheckoutCurrencies = &curs
+	currencies := func(key string) *[]string {
+		v := c.PostFormArray(key)
+		if v == nil {
+			v = []string{}
+		}
+		return &v
 	}
-	p.BinanceUID = editableString("binance_uid")
-	p.CheckoutNote = editableString("checkout_note")
-
-	p.OrderExpireMinutes = optInt("order_expire_minutes", 1, 1440)
-	p.OrderAmountStep = optAmount("order_amount_step")
-	p.OrderMaxOffset = optInt("order_max_offset", 1, 900)
-	p.OrderMinAmount = optAmount("order_min_amount")
-	p.OrderSlotGrace = optInt("order_slot_grace", 0, 3600)
-	p.OrderAmountPrecision = optInt("order_amount_precision", 2, 6)
-
-	p.BinancePollInterval = optInt("binance_poll_interval", 2, 60)
-	p.BinanceLookback = optInt("binance_lookback", 1, 60)
-	p.BinanceAPIKey = editableString("binance_api_key")
-	p.BinanceAPISecret = editableString("binance_api_secret")
-
-	p.OKXAPIKey = editableString("okx_api_key")
-	p.OKXAPISecret = editableString("okx_api_secret")
-	p.OKXPassphrase = editableString("okx_passphrase")
-	p.OKXUID = editableString("okx_uid")
-	p.OKXPollInterval = optInt("okx_poll_interval", 2, 60)
-	p.OKXLookback = optInt("okx_lookback", 1, 60)
-
-	p.NotifyRetryDelays = func() *[]int {
+	clear := c.PostForm("clear_section") == "on"
+	empty := ""
+	none := []string{}
+	defaults := config.Default()
+	switch scope {
+	case config.ProviderBinance:
+		p.BinanceUID = text("binance_uid", false)
+		p.BinanceAPIKey = text("binance_api_key", true)
+		p.BinanceAPISecret = text("binance_api_secret", true)
+		p.BinanceCurrencies = currencies("binance_currencies")
+		p.BinancePollInterval = integer("binance_poll_interval", 2, 60)
+		p.BinanceLookback = integer("binance_lookback", 1, 60)
+		if clear {
+			p.BinanceUID = &empty
+			p.BinanceAPIKey = &empty
+			p.BinanceAPISecret = &empty
+			p.BinanceCurrencies = &none
+			p.BinancePollInterval = &defaults.Binance.PollInterval
+			p.BinanceLookback = &defaults.Binance.LookbackBuffer
+			errs = nil
+		}
+	case config.ProviderOKX:
+		p.OKXUID = text("okx_uid", false)
+		p.OKXAPIKey = text("okx_api_key", true)
+		p.OKXAPISecret = text("okx_api_secret", true)
+		p.OKXPassphrase = text("okx_passphrase", true)
+		p.OKXCurrencies = currencies("okx_currencies")
+		p.OKXPollInterval = integer("okx_poll_interval", 2, 60)
+		p.OKXLookback = integer("okx_lookback", 1, 60)
+		if clear {
+			p.OKXUID = &empty
+			p.OKXAPIKey = &empty
+			p.OKXAPISecret = &empty
+			p.OKXPassphrase = &empty
+			p.OKXCurrencies = &none
+			p.OKXPollInterval = &defaults.OKX.PollInterval
+			p.OKXLookback = &defaults.OKX.LookbackBuffer
+			errs = nil
+		}
+	case config.ProviderTON:
+		p.TONAddress = text("ton_address", false)
+		p.TONAPIKey = text("ton_api_key", true)
+		p.TONCurrencies = currencies("ton_currencies")
+		p.TONPollInterval = integer("ton_poll_interval", 2, 60)
+		if clear {
+			p.TONAddress = &empty
+			p.TONAPIKey = &empty
+			p.TONCurrencies = &none
+			p.TONPollInterval = &defaults.TON.PollInterval
+			errs = nil
+		}
+	case "checkout":
+		p.CheckoutNote = text("checkout_note", false)
+	case "orders":
+		p.OrderExpireMinutes = integer("order_expire_minutes", 1, 1440)
+		p.OrderAmountStep = money("order_amount_step")
+		p.OrderMaxOffset = integer("order_max_offset", 1, 900)
+		p.OrderMinAmount = money("order_min_amount")
+		p.OrderSlotGrace = integer("order_slot_grace", 0, 3600)
+		p.OrderAmountPrecision = integer("order_amount_precision", 2, 6)
+	case "merchant":
+		value := c.PostForm("bepusdt_reselect") == "on"
+		p.BEpusdtReselect = &value
 		raw := strings.TrimSpace(c.PostForm("notify_retry_delays"))
-		if raw == "" {
-			return nil
-		}
-		parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '，' || r == ' ' })
-		out := make([]int, 0, len(parts))
-		for _, v := range parts {
-			n, err := strconv.Atoi(strings.TrimSpace(v))
-			if err != nil || n < 0 || n > 3600 {
-				errs = append(errs, "重试序列需为 0~3600 的整数，用逗号分隔")
-				return nil
+		if raw != "" {
+			var delays []int
+			for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '，' || r == ' ' }) {
+				n, err := strconv.Atoi(part)
+				if err != nil || n < 0 || n > 3600 {
+					errs = append(errs, "重试间隔需为 0~3600 的整数，用逗号分隔")
+					break
+				}
+				delays = append(delays, n)
 			}
-			out = append(out, n)
+			p.NotifyRetryDelays = &delays
 		}
-		return &out
-	}()
-	p.NotifyMaxAttempts = optInt("notify_max_attempts", 1, 10)
-	p.NotifyTimeout = optInt("notify_timeout", 3, 60)
-
+		p.NotifyMaxAttempts = integer("notify_max_attempts", 1, 10)
+		p.NotifyTimeout = integer("notify_timeout", 3, 60)
+	default:
+		errs = append(errs, "设置分区无效，请刷新设置页后重试")
+	}
+	if scope == config.ProviderBinance || scope == config.ProviderOKX || scope == config.ProviderTON {
+		p.VerifyProvider = scope
+		p.VerifyAccounts = !clear && c.PostForm("verify_accounts") == "on"
+	}
 	return p, errs
 }
 
@@ -658,6 +742,17 @@ func (h *Handlers) AdminOrders(c *gin.Context) {
 	}
 	c.HTML(200, "admin_orders.html", gin.H{"Base": h.adminBase(c, "orders", "订单"), "Orders": orders, "Page": page, "Prev": max(1, page-1), "Next": page + 1, "Query": c.Query("q")})
 }
+func (h *Handlers) AdminCloseOrder(c *gin.Context) {
+	no := c.Param("trade_no")
+	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
+	if err := h.st.Cancel(c.Request.Context(), no); err != nil {
+		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
+		return
+	}
+	h.log.Info("管理员关闭订单", "trade_id", no, "operator", c.GetString("admin_user"))
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("订单已关闭"))
+}
+
 func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Param("trade_no"))
 	if err != nil {
@@ -668,14 +763,13 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 	var tx []model.Transaction
 	var logs []model.NotifyLog
 	var tasks []model.Callback
-	var inquiry []model.PaymentInquiry
-	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error, db.Where("trade_no = ?", o.TradeNo).Find(&inquiry).Error} {
+	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error} {
 		if err != nil {
 			h.renderAdminError(c, err)
 			return
 		}
 	}
-	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Inquiries": inquiry})
+	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs})
 }
 func (h *Handlers) AdminIntegration(c *gin.Context) {
 	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken})

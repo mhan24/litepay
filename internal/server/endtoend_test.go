@@ -224,15 +224,8 @@ func selectPayment(t *testing.T, engine http.Handler, no, provider string) {
 	}
 }
 
-// TestEndToEndOKXPaymentLoop 走通一次完整 OKX 支付闭环：商户签名建单 → 收银台 →
-// 选择 OKX → 分配精确金额 → 付款窗口之前的交易不能自动核销 → 交易所未确认与不完整
-// 响应不得核销 → 自助查款按转账单号唯一核销 → 自动扫描不重复创建回调 → BEpusdt
-// 签名回调失败重试且不重复交付 → 订单状态与商户确认相互独立。
-//
-// 时间顺序：建单 → 选定付款方式 → 交易发生（选定之后）→ 交易确认 → 查款 → 回调。
-// 唯一的时间控制：选定付款方式后立即把付款窗口整体前移两分钟，用于跳过查款一分钟的
-// 防滥用延迟；此后不再改动任何业务时间，交易时间落在平移后的窗口之内且晚于选择时刻，
-// 全部核销条件依然真实成立。
+// TestEndToEndOKXPaymentLoop verifies signed checkout, pending deposit rechecks,
+// atomic settlement and idempotent signed merchant callbacks through automatic scanning.
 func TestEndToEndOKXPaymentLoop(t *testing.T) {
 	ctx := context.Background()
 	st, e := store.Open(":memory:")
@@ -304,7 +297,7 @@ func TestEndToEndOKXPaymentLoop(t *testing.T) {
 		t.Fatal("payment method selection failed", o, e)
 	}
 
-	// 时间控制：窗口整体前移两分钟（查款延迟由此跳过），之后不再改动业务时间。
+	// 窗口整体前移两分钟，构造窗口内与窗口外的交易。
 	selected := time.Now().Add(-2 * time.Minute)
 	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", no).Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
 		t.Fatal(e)
@@ -360,14 +353,13 @@ func TestEndToEndOKXPaymentLoop(t *testing.T) {
 		t.Fatal("incomplete response paid the order", fresh.Status)
 	}
 
-	// 自助查款：交易所把同一笔充值置为成功后，付款人以转账单号查款核销。
+	// 同一笔充值完成后，由自动扫描核销。
 	setDeposits(`{"code":"0","msg":"","data":[` + depositRow("dep-1", "wd-1", "2", depositAt) + `,` + depositRow("dep-pre", "wd-pre", "2", selected.Add(-time.Minute)) + `]}`)
-	w := postForm(engine, "/api/order/inquiry", url.Values{"trade_no": {no}, "reference": {"wd-1"}})
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"result":"paid"`) {
-		t.Fatal("inquiry did not settle the order", w.Body.String())
+	if e = poller.Scan(ctx, "okx"); e != nil {
+		t.Fatal(e)
 	}
 
-	// 自动扫描随后读到同一笔交易：只允许确认已核销，不得重复创建回调。
+	// 再次自动扫描不得重复创建回调。
 	if e = poller.Scan(ctx, "okx"); e != nil {
 		t.Fatal(e)
 	}
@@ -393,7 +385,7 @@ func TestEndToEndOKXPaymentLoop(t *testing.T) {
 	if fresh, _ := st.GetByTradeNo(ctx, no); fresh.Status != model.Paid {
 		t.Fatal("merchant acknowledgement state changed the order", fresh.Status)
 	}
-	if w = getRequest(engine, "/api/order/status?order_id="+no); !strings.Contains(w.Body.String(), `"status":"PAID"`) || !strings.Contains(w.Body.String(), `"merchant_confirmed":false`) {
+	if w := getRequest(engine, "/api/order/status?order_id="+no); !strings.Contains(w.Body.String(), `"status":"PAID"`) || !strings.Contains(w.Body.String(), `"merchant_confirmed":false`) {
 		t.Fatal("order status and merchant confirmation are not independent", w.Body.String())
 	}
 	if e = st.DB().Model(&model.Callback{}).Where("order_id = ?", o.ID).Update("next_at", time.Now().Add(-time.Second)).Error; e != nil {
@@ -408,7 +400,7 @@ func TestEndToEndOKXPaymentLoop(t *testing.T) {
 	if received, fulfilled := merchant.counts(); received != 2 || fulfilled != 1 {
 		t.Fatal("callback retried incorrectly", received, fulfilled)
 	}
-	if w = getRequest(engine, "/api/order/status?order_id="+no); !strings.Contains(w.Body.String(), `"merchant_confirmed":true`) {
+	if w := getRequest(engine, "/api/order/status?order_id="+no); !strings.Contains(w.Body.String(), `"merchant_confirmed":true`) {
 		t.Fatal("merchant acknowledgement missing", w.Body.String())
 	}
 	if exchange.count("/api/v5/account/config") == 0 {
@@ -428,9 +420,9 @@ func exchangeSrvURL(t *testing.T, mock *exchangeMock) string {
 
 // TestEndToEndBinancePaymentLoop 用真实 Binance 适配器走通最小闭环：账户 UID 校验 →
 // 商户签名建单 → 收银台选择 Binance USDT → 文档形态的 PAY 收款记录（transactionId
-// 既是事件身份也是查款编号）→ 自动扫描唯一核销 → 再次扫描与查款都不能重复核销 →
+// 作为事件身份）→ 自动扫描唯一核销 → 再次扫描不能重复核销 →
 // BEpusdt 回调只对应这一笔已支付订单。时间顺序与 OKX 闭环相同，且全程不改业务时间
-// （自动扫描没有查款的一分钟延迟，无需时间控制）。
+// 自动扫描无需付款人操作。
 func TestEndToEndBinancePaymentLoop(t *testing.T) {
 	ctx := context.Background()
 	st, e := store.Open(":memory:")
@@ -530,15 +522,15 @@ func TestEndToEndBinancePaymentLoop(t *testing.T) {
 		t.Fatal("second scan duplicated the claim", callbacks)
 	}
 
-	// 查款不能重复核销：已支付订单不能再查款，且不会触发任何交易所查询。
+	// Removed inquiry routes must not reach the exchange or mutate a claim.
 	payCalls := exchange.count("/sapi/v1/pay/transactions")
 	w := postForm(engine, "/api/order/inquiry", url.Values{"trade_no": {no}, "reference": {orderID}})
-	if w.Code == 200 {
-		t.Fatal("inquiry accepted for a paid order", w.Body.String())
+	if w.Code != 404 {
+		t.Fatal("removed inquiry route remains accessible", w.Code)
 	}
 	st.DB().Model(&model.Callback{}).Count(&callbacks)
 	if callbacks != 1 || exchange.count("/sapi/v1/pay/transactions") != payCalls {
-		t.Fatal("rejected inquiry touched claims or the exchange", callbacks)
+		t.Fatal("removed endpoint changed payment state")
 	}
 
 	// BEpusdt 回调只对应这一笔已支付订单：首次不确认、重试确认、之后不再投递。

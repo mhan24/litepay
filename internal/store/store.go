@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/logger"
 
 	"litepay/internal/amount"
+	"litepay/internal/gram"
 	"litepay/internal/model"
 )
 
@@ -51,7 +52,7 @@ func Open(path string) (*Store, error) {
 	if version != 8 && tables > 0 {
 		return fail(errors.New("旧数据库不兼容，请配置一个新的空数据库"))
 	}
-	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.PaymentInquiry{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}); err != nil {
+	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}); err != nil {
 		return fail(err)
 	}
 	if err = db.Exec("PRAGMA user_version=8").Error; err != nil {
@@ -111,7 +112,21 @@ func (s *Store) Create(ctx context.Context, o model.Order) (*model.Order, error)
 
 // Select reserves integer slots. Detached slots stay occupied through their original cooldown.
 func (s *Store) Select(ctx context.Context, no, provider, currency, receiver string, precision int, step, minUnits int64, maxOffset, grace int) (*model.Order, error) {
+	return s.selectPayment(ctx, no, provider, currency, receiver, precision, step, minUnits, maxOffset, grace, 0, gram.Snapshot{})
+}
+
+func (s *Store) SelectGRAM(ctx context.Context, no, receiver string, quote gram.Snapshot, grace int) (*model.Order, error) {
+	return s.selectPayment(ctx, no, "ton", "GRAM", receiver, 6, 1, 1, 99, grace, 1, quote)
+}
+
+func (s *Store) selectPayment(ctx context.Context, no, provider, currency, receiver string, precision int, step, minUnits int64, maxOffset, grace int, quoted int, quote gram.Snapshot) (*model.Order, error) {
 	var o model.Order
+	if provider == "ton" && (currency != "GRAM" || quoted == 0) {
+		return nil, errors.New("GRAM 付款必须使用有效 USD 报价")
+	}
+	if provider != "ton" && ((provider != "binance" && provider != "okx") || (currency != "USDT" && currency != "USDC")) {
+		return nil, errors.New("收款平台与币种不匹配")
+	}
 	if precision < 2 || precision > 6 || step <= 0 || step%amount.Quantum(precision) != 0 || maxOffset < 1 || maxOffset > 900 || minUnits <= 0 {
 		return nil, errors.New("金额配置无效")
 	}
@@ -142,6 +157,18 @@ func (s *Store) Select(ctx context.Context, no, provider, currency, receiver str
 		}
 		q := amount.Quantum(precision)
 		base := max(o.OriginUnits, minUnits)
+		var quoteLimit int64
+		if quoted != 0 {
+			var err error
+			base, err = gram.Quote(o.OriginUnits, quote)
+			if err != nil {
+				return err
+			}
+			quoteLimit, err = gram.MaxQuoteUnits(o.OriginUnits, quote)
+			if err != nil {
+				return err
+			}
+		}
 		base = ((base + q - 1) / q) * q
 		// 创建订单只约束原始金额，应付金额是向上对齐后再按档位递增得到的，可能越过
 		// 商城 float64 验签区间 [0.0001, 1000000)。越界只能整单拒绝：不放宽边界、不截断、
@@ -149,6 +176,10 @@ func (s *Store) Select(ctx context.Context, no, provider, currency, receiver str
 		inRange := 0
 		for i := 0; i <= maxOffset; i++ {
 			units := base + int64(i)*step
+			// Unique-amount offsets may increase a GRAM quote by at most 0.1%.
+			if quoted != 0 && units > quoteLimit {
+				break
+			}
 			if units >= amount.MaxMall {
 				break // 档位随 i 单调递增，越过上限后不再有合法金额
 			}
@@ -163,6 +194,13 @@ func (s *Store) Select(ctx context.Context, no, provider, currency, receiver str
 			}
 			if r.RowsAffected == 0 {
 				continue
+			}
+			o.RateUSD = ""
+			o.RateAt = nil
+			if quoted != 0 {
+				o.RateUSD = quote.USD
+				at := quote.PriceAt
+				o.RateAt = &at
 			}
 			o.Provider = provider
 			o.Currency = currency
@@ -181,28 +219,51 @@ func (s *Store) Select(ctx context.Context, no, provider, currency, receiver str
 	return &o, err
 }
 func (s *Store) Cancel(ctx context.Context, no string) error {
-	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		var o model.Order
-		if e := db.Where("trade_no = ?", no).First(&o).Error; e != nil {
-			return e
+	_, err := s.CancelReference(ctx, no, "")
+	return err
+}
+
+// CancelReference accepts either signed identifier and checks agreement when both are supplied.
+func (s *Store) CancelReference(ctx context.Context, tradeNo, outTradeNo string) (*model.Order, error) {
+	var o model.Order
+	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if tradeNo == "" && outTradeNo == "" {
+			return errors.New("缺少订单号")
 		}
-		if o.Status == model.Canceled {
+		q := db
+		if tradeNo != "" {
+			q = q.Where("trade_no = ?", tradeNo)
+		} else {
+			q = q.Where("out_trade_no = ?", outTradeNo)
+		}
+		if err := q.First(&o).Error; err != nil {
+			return err
+		}
+		if outTradeNo != "" && o.OutTradeNo != outTradeNo {
+			return errors.New("网关订单号与商户订单号不一致")
+		}
+		if o.Status == model.Canceled || o.Status == model.Expired {
 			return nil
 		}
+		if o.Status == model.Paid {
+			return errors.New("已支付订单不能关闭")
+		}
 		if o.Status != model.Pending && o.Status != model.Ready {
-			return errors.New("订单已终结")
+			return errors.New("订单不能关闭")
 		}
-		if e := db.Model(&o).Update("status", model.Canceled).Error; e != nil {
-			return e
+		if err := db.Model(&o).Update("status", model.Canceled).Error; err != nil {
+			return err
 		}
+		o.Status = model.Canceled
 		return db.Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("order_id", nil).Error
 	})
+	return &o, err
 }
 
 // Process records evidence and atomically consumes a unique provider event.
 // expectedTrade is a restriction, never a hint that can override ownership.
 func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade string) (string, error) {
-	if t.EventID == "" || (t.Provider != "binance" && t.Provider != "okx") || t.OccurredAt.IsZero() {
+	if t.EventID == "" || (t.Provider != "binance" && t.Provider != "okx" && t.Provider != "ton") || t.OccurredAt.IsZero() {
 		return "invalid_evidence", errors.New("交易缺少可靠身份或时间")
 	}
 	result := "unmatched"
@@ -251,7 +312,7 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			result = t.State
 			return nil
 		}
-		if t.Units <= 0 || t.Receiver == "" || (t.Currency != "USDT" && t.Currency != "USDC") {
+		if t.Units <= 0 || t.Receiver == "" || ((t.Provider == "ton" && t.Currency != "GRAM") || (t.Provider != "ton" && t.Currency != "USDT" && t.Currency != "USDC")) {
 			return finish("invalid_payment")
 		}
 		var candidates []model.Order
@@ -413,35 +474,6 @@ func (s *Store) PendingResult(ctx context.Context, provider string, recheckErr e
 	return s.db.WithContext(ctx).Save(&cursor).Error
 }
 
-func (s *Store) ReserveInquiry(ctx context.Context, no, ref string) (*model.Order, error) {
-	var o model.Order
-	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		if e := db.Where("trade_no = ?", no).First(&o).Error; e != nil {
-			return e
-		}
-		if o.Status != model.Ready || o.SelectedAt == nil || time.Since(*o.SelectedAt) < time.Minute {
-			return errors.New("当前订单不能查款，选择付款方式一分钟后可查款")
-		}
-		var row model.PaymentInquiry
-		e := db.First(&row, "trade_no = ?", no).Error
-		if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
-			return e
-		}
-		if row.Attempts >= 10 || (!row.LastAttemptAt.IsZero() && time.Since(row.LastAttemptAt) < time.Minute) {
-			return errors.New("查款过于频繁")
-		}
-		row.TradeNo = no
-		row.Reference = ref
-		row.Attempts++
-		row.LastAttemptAt = time.Now()
-		row.Result = "查询中"
-		return db.Save(&row).Error
-	})
-	return &o, err
-}
-func (s *Store) InquiryResult(ctx context.Context, no, result string) error {
-	return s.db.WithContext(ctx).Model(&model.PaymentInquiry{}).Where("trade_no = ?", no).Update("result", result).Error
-}
 func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (*model.Callback, *model.Order, error) {
 	var task model.Callback
 	var o model.Order

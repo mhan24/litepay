@@ -13,6 +13,7 @@ import (
 
 	money "litepay/internal/amount"
 	"litepay/internal/config"
+	"litepay/internal/gram"
 	"litepay/internal/model"
 	"litepay/internal/sign"
 )
@@ -31,6 +32,7 @@ type bepusdtCreateRequest struct {
 }
 
 type bepusdtCancelRequest struct {
+	OrderID   string `json:"order_id"`
 	TradeID   string `json:"trade_id"`
 	Signature string `json:"signature"`
 }
@@ -70,24 +72,26 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 		return
 	}
 	req.TradeID = strings.TrimSpace(req.TradeID)
-	if req.TradeID == "" {
-		h.bepusdtFail(c, "trade_id is required")
+	req.OrderID = strings.TrimSpace(req.OrderID)
+	if req.TradeID == "" && req.OrderID == "" {
+		h.bepusdtFail(c, "trade_id or order_id is required")
 		return
 	}
-	if err := h.st.Cancel(c.Request.Context(), req.TradeID); err != nil {
+	o, err := h.st.CancelReference(c.Request.Context(), req.TradeID, req.OrderID)
+	if err != nil {
 		h.bepusdtFail(c, err.Error())
 		return
 	}
-	h.log.Info("BEpusdt 订单已取消", "trade_id", req.TradeID)
+	h.log.Info("BEpusdt 订单已取消", "trade_id", o.TradeNo)
 	c.JSON(http.StatusOK, bepusdtResponse{
 		StatusCode: 200, Message: "success",
-		Data: gin.H{"trade_id": req.TradeID},
+		Data: gin.H{"trade_id": o.TradeNo, "order_id": o.OutTradeNo},
 	})
 }
 
 func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 	cfg := h.C()
-	if !cfg.BinanceEnabled() && !cfg.OKXEnabled() {
+	if !cfg.AnyProviderEnabled() {
 		h.bepusdtFail(c, "no payment provider is configured")
 		return
 	}
@@ -185,7 +189,11 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 func bepusdtCurrency(cfg *config.Config, req bepusdtCreateRequest) error {
 	for _, currency := range cfg.Checkout.Currencies {
 		if config.IsSupportedCurrency(currency) && currencyAllowedByLimit(req.Currencies, currency) {
-			return nil
+			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
+				if cfg.ProviderEnabled(provider) && cfg.ProviderCurrency(provider, currency) {
+					return nil
+				}
+			}
 		}
 	}
 	return fmt.Errorf("no supported currency matches %q", req.Currencies)
@@ -207,7 +215,7 @@ func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *mod
 		"expiration_time": max(0, int(time.Until(order.ExpiresAt).Seconds())),
 		"payment_url":     cfg.Server.BaseURL + "/pay/" + order.TradeNo,
 		"reselect":        reselect && order.Reselect && order.Status != model.Paid,
-		"network":         bepusdtPaymentMethods(cfg, order),
+		"network":         bepusdtPaymentMethods(cfg, order, h.poller.GRAM.Snapshot()),
 	}
 	c.JSON(http.StatusOK, bepusdtResponse{StatusCode: 200, Message: "success", Data: data, RequestID: ""})
 }
@@ -215,9 +223,9 @@ func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *mod
 // bepusdtPaymentMethods mirrors the cashier method list returned by upstream
 // BEpusdt. Dujiao Next currently ignores this field, but returning the complete
 // contract keeps the cashier response interoperable with other clients.
-func bepusdtPaymentMethods(cfg *config.Config, order *model.Order) []gin.H {
+func bepusdtPaymentMethods(cfg *config.Config, order *model.Order, quotes ...gram.Snapshot) []gin.H {
 	out := make([]gin.H, 0, 4)
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX} {
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
 		if !cfg.ProviderEnabled(provider) {
 			continue
 		}
@@ -225,16 +233,36 @@ func bepusdtPaymentMethods(cfg *config.Config, order *model.Order) []gin.H {
 		if provider == config.ProviderOKX {
 			network = "OKX"
 		}
+		if provider == config.ProviderTON {
+			network = "TON"
+		}
 		for _, currency := range cfg.Checkout.Currencies {
-			if !config.IsSupportedCurrency(currency) ||
+			if !cfg.ProviderCurrency(provider, currency) ||
 				!currencyAllowedByLimit(order.CurrencyLimit, currency) {
 				continue
 			}
+			actual, rate := order.Original(), "1"
+			if provider == config.ProviderTON {
+				if order.Provider == provider && order.RateUSD != "" {
+					actual = order.PayAmount()
+					rate = order.RateUSD
+				} else {
+					if len(quotes) == 0 {
+						continue
+					}
+					units, err := gram.Quote(order.OriginUnits, quotes[0])
+					if err != nil {
+						continue
+					}
+					actual = money.String(units)
+					rate = quotes[0].USD
+				}
+			}
 			out = append(out, gin.H{
 				"amount":            order.Original(),
-				"actual_amount":     order.Original(),
+				"actual_amount":     actual,
 				"fiat":              "USD",
-				"exchange_rate":     "1",
+				"exchange_rate":     rate,
 				"currency":          currency,
 				"network":           network,
 				"token_net_name":    network,

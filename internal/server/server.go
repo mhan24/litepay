@@ -33,7 +33,13 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"externalURL": externalURL,
-		"adminPath":   func() string { return mgr.Get().AdminPath() },
+		"tonURL": func(raw string) template.URL {
+			if strings.HasPrefix(raw, "ton://transfer/") {
+				return template.URL(raw)
+			}
+			return ""
+		},
+		"adminPath": func() string { return mgr.Get().AdminPath() },
 		"hasStr": func(list []string, v string) bool {
 			for _, item := range list {
 				if strings.EqualFold(item, v) {
@@ -110,7 +116,6 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	// ---- 前端订单状态查询接口 ----
 	r.GET("/api/order/status", h.OrderStatus)
 	r.POST("/api/order/payment", h.SelectPayment)
-	r.POST("/api/order/inquiry", h.PaymentInquiry)
 
 	// ---- 运维 ----
 	r.GET("/healthz", h.Health)
@@ -135,8 +140,10 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.GET("", h.AdminDashboard)
 		adm.GET("/orders", h.AdminOrders)
 		adm.GET("/orders/:trade_no", h.AdminOrderDetail)
+		adm.POST("/orders/:trade_no/close", h.AdminCloseOrder)
 		adm.GET("/integration", h.AdminIntegration)
 		adm.GET("/settings", h.AdminSettings)
+		adm.GET("/gram/status", h.GRAMStatus)
 		adm.POST("/settings", h.AdminSettingsSave)
 		adm.POST("/settings/token", h.AdminRotateToken)
 		adm.POST("/settings/account", h.AdminAccountSave)

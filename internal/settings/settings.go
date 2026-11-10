@@ -21,10 +21,9 @@ import (
 	"unicode/utf8"
 
 	"litepay/internal/amount"
-	"litepay/internal/binance"
 	"litepay/internal/config"
+	"litepay/internal/gram"
 	"litepay/internal/model"
-	"litepay/internal/okx"
 	"litepay/internal/store"
 )
 
@@ -33,11 +32,15 @@ type Patch struct {
 	AdminPath         *string `json:"admin_path,omitempty"`
 	StoreURL          *string `json:"store_url,omitempty"`
 	VerifyAccounts    bool    `json:"-"`
+	VerifyProvider    string  `json:"-"`
 	AdminUsername     *string `json:"admin_username,omitempty"`
 	AdminPasswordHash *string `json:"admin_password_hash,omitempty"`
 	BEpusdtReselect   *bool   `json:"bepusdt_reselect,omitempty"`
 
 	// 收款信息
+	BinanceCurrencies  *[]string `json:"binance_currencies,omitempty"`
+	OKXCurrencies      *[]string `json:"okx_currencies,omitempty"`
+	TONCurrencies      *[]string `json:"ton_currencies,omitempty"`
 	CheckoutCurrencies *[]string `json:"checkout_currencies,omitempty"`
 	CheckoutNote       *string   `json:"checkout_note,omitempty"`
 	BinanceUID         *string   `json:"binance_uid,omitempty"`
@@ -64,6 +67,11 @@ type Patch struct {
 	OKXPollInterval *int    `json:"okx_poll_interval,omitempty"`
 	OKXLookback     *int    `json:"okx_lookback,omitempty"`
 
+	// TON 主网
+	TONAddress      *string `json:"ton_address,omitempty"`
+	TONAPIKey       *string `json:"ton_api_key,omitempty"`
+	TONPollInterval *int    `json:"ton_poll_interval,omitempty"`
+
 	// 回调
 	NotifyRetryDelays *[]int `json:"notify_retry_delays,omitempty"`
 	NotifyMaxAttempts *int   `json:"notify_max_attempts,omitempty"`
@@ -89,6 +97,24 @@ func (p Patch) Apply(c *config.Config) {
 	}
 	if p.CheckoutCurrencies != nil {
 		c.Checkout.Currencies = config.NormalizeCurrencies(*p.CheckoutCurrencies)
+		if p.BinanceCurrencies == nil {
+			c.Checkout.BinanceCurrencies = nil
+		}
+		if p.OKXCurrencies == nil {
+			c.Checkout.OKXCurrencies = nil
+		}
+		if p.TONCurrencies == nil {
+			c.Checkout.TONCurrencies = nil
+		}
+	}
+	if p.BinanceCurrencies != nil {
+		c.Checkout.BinanceCurrencies = append([]string{}, (*p.BinanceCurrencies)...)
+	}
+	if p.OKXCurrencies != nil {
+		c.Checkout.OKXCurrencies = append([]string{}, (*p.OKXCurrencies)...)
+	}
+	if p.TONCurrencies != nil {
+		c.Checkout.TONCurrencies = append([]string{}, (*p.TONCurrencies)...)
 	}
 	if p.CheckoutNote != nil {
 		c.Checkout.Note = strings.TrimSpace(*p.CheckoutNote)
@@ -147,6 +173,15 @@ func (p Patch) Apply(c *config.Config) {
 	if p.OKXLookback != nil {
 		c.OKX.LookbackBuffer = *p.OKXLookback
 	}
+	if p.TONAddress != nil {
+		c.TON.Address = strings.TrimSpace(*p.TONAddress)
+	}
+	if p.TONAPIKey != nil {
+		c.TON.APIKey = strings.TrimSpace(*p.TONAPIKey)
+	}
+	if p.TONPollInterval != nil {
+		c.TON.PollInterval = *p.TONPollInterval
+	}
 	if p.NotifyRetryDelays != nil {
 		c.Notify.RetryDelays = append([]int(nil), (*p.NotifyRetryDelays)...)
 	}
@@ -171,9 +206,10 @@ func Snapshot(c *config.Config) Patch {
 		AdminUsername:      s(c.Admin.Username),
 		BEpusdtReselect:    b(c.BEpusdt.Reselect),
 		CheckoutCurrencies: &[]string{},
-		CheckoutNote:       s(c.Checkout.Note),
-		BinanceUID:         s(c.Checkout.Binance.UID),
-		OKXUID:             s(c.Checkout.OKX.UID),
+		BinanceCurrencies:  &c.Checkout.BinanceCurrencies, OKXCurrencies: &c.Checkout.OKXCurrencies, TONCurrencies: &c.Checkout.TONCurrencies,
+		CheckoutNote: s(c.Checkout.Note),
+		BinanceUID:   s(c.Checkout.Binance.UID),
+		OKXUID:       s(c.Checkout.OKX.UID),
 
 		OrderExpireMinutes:   i(c.Order.ExpireMinutes),
 		OrderAmountStep:      s(c.Order.AmountStep),
@@ -193,6 +229,7 @@ func Snapshot(c *config.Config) Patch {
 		OKXPollInterval: i(c.OKX.PollInterval),
 		OKXLookback:     i(c.OKX.LookbackBuffer),
 
+		TONAddress: s(c.TON.Address), TONAPIKey: s(c.TON.APIKey), TONPollInterval: i(c.TON.PollInterval),
 		NotifyRetryDelays: &[]int{},
 		NotifyMaxAttempts: i(c.Notify.MaxAttempts),
 		NotifyTimeout:     i(c.Notify.TimeoutSeconds),
@@ -201,16 +238,17 @@ func Snapshot(c *config.Config) Patch {
 
 // Manager 持有当前生效配置。
 type Manager struct {
-	cur atomic.Pointer[config.Config]
-	st  *store.Store
-	mu  sync.Mutex
+	cur           atomic.Pointer[config.Config]
+	st            *store.Store
+	mu            sync.Mutex
+	verifyAccount func(context.Context, *config.Config, string) error
 }
 
 // New 创建配置管理器。
 func New(cfg *config.Config, st *store.Store) *Manager {
 	base := clone(cfg)
 	normalize(base)
-	m := &Manager{st: st}
+	m := &Manager{st: st, verifyAccount: verifyCollectionAccount}
 	m.cur.Store(clone(base))
 	return m
 }
@@ -303,6 +341,17 @@ func newAPIToken() (string, error) {
 
 // Update 应用补丁：校验 → 持久化 → 原子替换。
 func (m *Manager) Update(ctx context.Context, p Patch, operator string) error {
+	return m.update(ctx, p, operator, nil)
+}
+
+// UpdateWithVerification returns only checks completed for the configuration that was saved.
+func (m *Manager) UpdateWithVerification(ctx context.Context, p Patch, operator string) ([]AccountVerification, error) {
+	var report []AccountVerification
+	err := m.update(ctx, p, operator, &report)
+	return report, err
+}
+
+func (m *Manager) update(ctx context.Context, p Patch, operator string, report *[]AccountVerification) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -316,8 +365,9 @@ func (m *Manager) Update(ctx context.Context, p Patch, operator string) error {
 	current := m.cur.Load()
 	// 只有会改变到账归属或付款窗口的字段需要在待付款期间冻结。API 凭据不改变
 	// 归属（换 Key 仍须通过 UID 核验），必须允许在扫描失败时随时修正。
-	sensitive := current.Checkout.Binance.UID != next.Checkout.Binance.UID || current.Checkout.OKX.UID != next.Checkout.OKX.UID ||
-		current.Order.SlotGraceSeconds != next.Order.SlotGraceSeconds || !reflect.DeepEqual(current.Checkout.Currencies, next.Checkout.Currencies)
+	sensitive := current.TON.Address != next.TON.Address || current.Checkout.Binance.UID != next.Checkout.Binance.UID || current.Checkout.OKX.UID != next.Checkout.OKX.UID ||
+		current.Order.SlotGraceSeconds != next.Order.SlotGraceSeconds || !reflect.DeepEqual(current.Checkout.Currencies, next.Checkout.Currencies) ||
+		!reflect.DeepEqual(current.Checkout.BinanceCurrencies, next.Checkout.BinanceCurrencies) || !reflect.DeepEqual(current.Checkout.OKXCurrencies, next.Checkout.OKXCurrencies) || !reflect.DeepEqual(current.Checkout.TONCurrencies, next.Checkout.TONCurrencies)
 	if sensitive {
 		active, err := m.st.HasActivePayments(ctx)
 		if err != nil {
@@ -328,35 +378,35 @@ func (m *Manager) Update(ctx context.Context, p Patch, operator string) error {
 		}
 	}
 
-	if p.VerifyAccounts && !next.BinanceEnabled() && !next.OKXEnabled() {
-		return fmt.Errorf("请先完整填写至少一个平台的 API 凭据和收款 UID")
+	if p.VerifyProvider != "" && p.VerifyProvider != config.ProviderBinance && p.VerifyProvider != config.ProviderOKX && p.VerifyProvider != config.ProviderTON {
+		return fmt.Errorf("核验平台无效")
+	}
+	if p.VerifyAccounts && p.VerifyProvider != "" && !next.ProviderEnabled(p.VerifyProvider) {
+		for _, check := range verificationTargets(next) {
+			if check.Provider == p.VerifyProvider {
+				return fmt.Errorf("该平台尚未完成收款配置：%s", strings.Join(check.Missing, "、"))
+			}
+		}
+	}
+	if p.VerifyAccounts && !next.AnyProviderEnabled() {
+		return fmt.Errorf("请先完整填写至少一个平台的 API 凭据和收款 UID，或 GRAM 收款地址")
 	}
 	// Verify changed collection accounts before publishing or persisting credentials.
-	if p.VerifyAccounts || current.Binance.APIKey != next.Binance.APIKey || current.Binance.APISecret != next.Binance.APISecret || current.Checkout.Binance.UID != next.Checkout.Binance.UID {
-		if next.BinanceEnabled() {
-			cli := binance.New(next.Binance.APIKey, next.Binance.APISecret, next.Binance.BaseURL, next.Binance.RecvWindow, next.Binance.Limit)
-			uid, err := cli.AccountUID(ctx)
-			if err != nil {
-				// APIError 只携带有界分类与数字码，可以安全透出：没有它无法区分
-				// 网络不可达、IP 白名单和凭据错误（真实验收时靠它定位到 fake-ip DNS）。
-				return fmt.Errorf("Binance 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
-			}
-			if uid != next.Checkout.Binance.UID {
-				return fmt.Errorf("Binance API Key 所属账户与收款 UID 不一致")
-			}
-		}
+	changed := map[string]bool{
+		config.ProviderBinance: current.Binance.APIKey != next.Binance.APIKey || current.Binance.APISecret != next.Binance.APISecret || current.Checkout.Binance.UID != next.Checkout.Binance.UID,
+		config.ProviderOKX:     current.OKX.APIKey != next.OKX.APIKey || current.OKX.APISecret != next.OKX.APISecret || current.OKX.Passphrase != next.OKX.Passphrase || current.Checkout.OKX.UID != next.Checkout.OKX.UID,
+		config.ProviderTON:     !current.TONEnabled() || current.TON.Address != next.TON.Address || current.TON.APIKey != next.TON.APIKey,
 	}
-	if p.VerifyAccounts || current.OKX.APIKey != next.OKX.APIKey || current.OKX.APISecret != next.OKX.APISecret || current.OKX.Passphrase != next.OKX.Passphrase || current.Checkout.OKX.UID != next.Checkout.OKX.UID {
-		if next.OKXEnabled() {
-			cli := okx.New(next.OKX.APIKey, next.OKX.APISecret, next.OKX.Passphrase, next.OKX.BaseURL, next.OKX.Limit)
-			uid, err := cli.AccountUID(ctx)
-			if err != nil {
-				return fmt.Errorf("OKX 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
-			}
-			if uid != next.Checkout.OKX.UID {
-				return fmt.Errorf("OKX API Key 所属账户与收款 UID 不一致")
-			}
+	checks := verificationTargets(next)
+	for i := range checks {
+		check := &checks[i]
+		if !next.ProviderEnabled(check.Provider) || (!(p.VerifyAccounts && (p.VerifyProvider == "" || p.VerifyProvider == check.Provider)) && !changed[check.Provider]) {
+			continue
 		}
+		if err := m.verifyAccount(ctx, next, check.Provider); err != nil {
+			return err
+		}
+		check.Verified = true
 	}
 	// 持久化完整可变配置，保证重启后一致
 	snap := Snapshot(next)
@@ -375,12 +425,23 @@ func (m *Manager) Update(ctx context.Context, p Patch, operator string) error {
 		return fmt.Errorf("保存配置失败: %w", err)
 	}
 	m.cur.Store(next)
+	if report != nil {
+		*report = checks
+		if p.VerifyProvider != "" {
+			for _, check := range checks {
+				if check.Provider == p.VerifyProvider {
+					*report = []AccountVerification{check}
+					break
+				}
+			}
+		}
+	}
 	return nil
 }
 
 // normalize 统一收款币种。
 func normalize(c *config.Config) {
-	c.Checkout.Currencies = config.NormalizeCurrencies(c.Checkout.Currencies)
+	c.NormalizePaymentCurrencies()
 }
 
 // Validate 校验配置合法性。
@@ -394,16 +455,13 @@ func Validate(c *config.Config) error {
 	if len(strings.TrimSpace(c.BEpusdt.APIToken)) < 16 {
 		return fmt.Errorf("BEpusdt API Token 至少 16 位（建议 32 位随机字符串）")
 	}
-	if len(c.Checkout.Currencies) == 0 {
-		return fmt.Errorf("至少启用一个收款币种")
-	}
 	if (c.BinanceEnabled() && strings.TrimSpace(c.Checkout.Binance.UID) == "") ||
 		(c.OKXEnabled() && strings.TrimSpace(c.Checkout.OKX.UID) == "") {
 		return fmt.Errorf("已配置凭据的收款平台必须填写收款 UID")
 	}
 	for _, cur := range c.Checkout.Currencies {
 		if !config.IsSupportedCurrency(cur) {
-			return fmt.Errorf("不支持币种 %s，仅支持 USDT / USDC", cur)
+			return fmt.Errorf("不支持币种 %s，仅支持 USDT / USDC / GRAM", cur)
 		}
 	}
 	if c.Order.ExpireMinutes < 1 || c.Order.ExpireMinutes > 1440 {
@@ -441,6 +499,14 @@ func Validate(c *config.Config) error {
 	if c.OKX.LookbackBuffer < 1 || c.OKX.LookbackBuffer > 60 {
 		return fmt.Errorf("OKX 回看缓冲需在 1~60 分钟之间")
 	}
+	if c.TON.Address != "" {
+		if _, err := gram.ParseAddress(c.TON.Address); err != nil {
+			return err
+		}
+	}
+	if c.TON.PollInterval < 2 || c.TON.PollInterval > 60 {
+		return fmt.Errorf("GRAM 到账查询间隔需在 2~60 秒之间")
+	}
 	if len(c.Notify.RetryDelays) == 0 {
 		return fmt.Errorf("结果通知重试序列不能为空")
 	}
@@ -461,6 +527,15 @@ func Validate(c *config.Config) error {
 func clone(c *config.Config) *config.Config {
 	n := *c
 	n.Checkout.Currencies = append([]string(nil), c.Checkout.Currencies...)
+	if c.Checkout.BinanceCurrencies != nil {
+		n.Checkout.BinanceCurrencies = append([]string{}, c.Checkout.BinanceCurrencies...)
+	}
+	if c.Checkout.OKXCurrencies != nil {
+		n.Checkout.OKXCurrencies = append([]string{}, c.Checkout.OKXCurrencies...)
+	}
+	if c.Checkout.TONCurrencies != nil {
+		n.Checkout.TONCurrencies = append([]string{}, c.Checkout.TONCurrencies...)
+	}
 	n.Notify.RetryDelays = append([]int(nil), c.Notify.RetryDelays...)
 	return &n
 }

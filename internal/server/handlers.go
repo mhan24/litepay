@@ -2,17 +2,22 @@ package server
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"html/template"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/skip2/go-qrcode"
 
 	"litepay/internal/amount"
 	"litepay/internal/config"
+	"litepay/internal/gram"
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/store"
@@ -34,8 +39,6 @@ func (h *Handlers) C() *config.Config { return h.cfg.Get() }
 
 // CashierData 收银台模板数据。
 type CashierData struct {
-	CanInquire       bool
-	InquiryDelay     int
 	NotifyStatus     string
 	Title            string
 	Provider         string
@@ -45,6 +48,9 @@ type CashierData struct {
 	Name             string
 	Amount           string // 精确应付金额，如 10.01
 	Currency         string
+	RateUSD          string
+	TransferURL      string
+	PaymentQR        template.URL
 	OriginMoney      string
 	UID              string
 	HasPayee         bool
@@ -87,7 +93,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 	reselectRequested := cfg.BEpusdt.Reselect && c.Query("reselect") == "1" && o.Reselect &&
 		(o.Status == model.Pending || o.Status == model.Ready)
 	selectedProvider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
-	if selectedProvider != config.ProviderBinance && selectedProvider != config.ProviderOKX {
+	if selectedProvider != config.ProviderBinance && selectedProvider != config.ProviderOKX && selectedProvider != config.ProviderTON {
 		selectedProvider = ""
 	}
 	// 第一步选择收款平台是纯前端过渡页，不写数据库；只有第二步选择币种
@@ -118,6 +124,9 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		providerName = "OKX 站内转账"
 		uid = o.Receiver
 	}
+	if provider == config.ProviderTON {
+		providerName = "TON 主网 · GRAM"
+	}
 	providerSubtitle := "先选择收款平台，再选择币种"
 	if needsCurrency && provider == config.ProviderBinance {
 		providerSubtitle = "选择 Binance 收款币种"
@@ -128,6 +137,9 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 	} else if provider == config.ProviderOKX {
 		providerSubtitle = "UID 站内转账 · 自动确认到账"
 	}
+	if provider == config.ProviderTON {
+		providerSubtitle = "TON 主网链上转账 · 按精确金额确认"
+	}
 	hasPayee := uid != ""
 	canReselect := cfg.BEpusdt.Reselect && o.Reselect &&
 		(o.Status == model.Pending || o.Status == model.Ready) && provider != "" &&
@@ -135,9 +147,21 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 
 	currencyOptions := currencyOptionsFor(cfg, o, provider)
 
+	transferURL := ""
+	var paymentQR template.URL
+	if provider == config.ProviderTON && uid != "" && !needsProvider && !needsCurrency {
+		transferURL = "ton://transfer/" + uid + "?amount=" + strconv.FormatInt(o.PayUnits*1000, 10)
+		// Telegram's receive QR uses the bare address; the wallet link carries the amount.
+		png, err := qrcode.Encode(uid, qrcode.Medium, 480)
+		if err != nil {
+			h.renderError(c, http.StatusInternalServerError, "暂时无法生成转账二维码", "请刷新订单页面后重试。")
+			return
+		}
+		// Only locally encoded PNG bytes enter this trusted data URL.
+		paymentQR = template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png))
+	}
 	data := CashierData{
-		CanInquire:       !needsProvider && !needsCurrency && o.Status == model.Ready,
-		InquiryDelay:     inquiryDelay(o),
+		RateUSD: strings.TrimRight(strings.TrimRight(o.RateUSD, "0"), "."), TransferURL: transferURL, PaymentQR: paymentQR,
 		Title:            providerName,
 		Provider:         provider,
 		ProviderName:     providerName,
@@ -186,16 +210,17 @@ func providerOptions(cfg *config.Config, o *model.Order) []providerOption {
 	return []providerOption{
 		{
 			Key: config.ProviderBinance, Name: "Binance", Logo: "/assets/brand/binance.svg",
-			Subtitle: "UID 站内转账 · USDT / USDC",
-			Enabled:  cfg.BinanceEnabled() && orderCurrencyAllowed(cfg, o, "USDT", "USDC"),
+			Subtitle: "UID 站内转账 · " + strings.Join(cfg.ProviderCurrencies(config.ProviderBinance), " / "),
+			Enabled:  cfg.BinanceEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBinance)...),
 			Selected: strings.EqualFold(o.Provider, config.ProviderBinance),
 		},
 		{
 			Key: config.ProviderOKX, Name: "OKX", Logo: "/assets/brand/okx.svg",
 			Subtitle: "UID 站内转账 · 按精确金额自动确认",
-			Enabled:  cfg.OKXEnabled() && orderCurrencyAllowed(cfg, o, cfg.Checkout.Currencies...),
+			Enabled:  cfg.OKXEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderOKX)...),
 			Selected: strings.EqualFold(o.Provider, config.ProviderOKX),
 		},
+		{Key: config.ProviderTON, Name: "TON / GRAM", Subtitle: "主网转账 · 实时 USD 报价", Logo: "/assets/brand/gram.svg", Enabled: cfg.TONEnabled() && orderCurrencyAllowed(cfg, o, "GRAM"), Selected: o.Provider == config.ProviderTON},
 	}
 }
 
@@ -215,7 +240,7 @@ func providerOptionForQuery(options []providerOption, selected string) []provide
 func currencyOptionsFor(cfg *config.Config, o *model.Order, provider string) []currencyOption {
 	var out []currencyOption
 	for _, currency := range cfg.Checkout.Currencies {
-		if orderCurrencyAllowed(cfg, o, currency) {
+		if cfg.ProviderCurrency(provider, currency) && orderCurrencyAllowed(cfg, o, currency) {
 			out = append(out, currencyOption{Currency: currency, Icon: currencyIcon(currency), Enabled: cfg.ProviderEnabled(provider), Selected: o.Currency == currency})
 		}
 	}
@@ -224,6 +249,8 @@ func currencyOptionsFor(cfg *config.Config, o *model.Order, provider string) []c
 
 func currencyIcon(currency string) string {
 	switch strings.ToUpper(strings.TrimSpace(currency)) {
+	case "GRAM":
+		return "/assets/brand/gram.svg"
 	case "USDT":
 		return "/assets/brand/usdt.svg"
 	case "USDC":
@@ -281,12 +308,6 @@ func (h *Handlers) CashierPage(c *gin.Context) {
 	}
 	h.renderCashier(c, o)
 }
-func inquiryDelay(o *model.Order) int {
-	if o.SelectedAt == nil {
-		return 60
-	}
-	return max(0, int(time.Until(o.SelectedAt.Add(time.Minute)).Seconds())+1)
-}
 func (h *Handlers) SelectPayment(c *gin.Context) {
 	h.cfg.WithPaymentConfig(func() {
 		cfg := h.C()
@@ -294,7 +315,7 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 		provider := strings.ToLower(c.PostForm("provider"))
 		currency := strings.ToUpper(c.PostForm("currency"))
 		o, err := h.st.GetByTradeNo(c.Request.Context(), no)
-		if err != nil || !cfg.ProviderEnabled(provider) || !cfg.CurrencyEnabled(currency) || !currencyAllowedByLimit(o.CurrencyLimit, currency) {
+		if err != nil || !cfg.ProviderEnabled(provider) || !cfg.ProviderCurrency(provider, currency) || !currencyAllowedByLimit(o.CurrencyLimit, currency) {
 			c.JSON(400, gin.H{"code": 1, "msg": "付款方式不可用"})
 			return
 		}
@@ -308,7 +329,12 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 			c.JSON(500, gin.H{"code": 1, "msg": "金额配置无效"})
 			return
 		}
-		_, err = h.st.Select(c.Request.Context(), no, provider, currency, receiver, cfg.Order.AmountPrecision, step, minimum, cfg.Order.MaxOffset, cfg.Order.SlotGraceSeconds)
+		if provider == config.ProviderTON {
+			receiver = cfg.TON.Address
+			_, err = h.st.SelectGRAM(c.Request.Context(), no, receiver, h.poller.GRAM.Snapshot(), cfg.Order.SlotGraceSeconds)
+		} else {
+			_, err = h.st.Select(c.Request.Context(), no, provider, currency, receiver, cfg.Order.AmountPrecision, step, minimum, cfg.Order.MaxOffset, cfg.Order.SlotGraceSeconds)
+		}
 		if err != nil {
 			c.JSON(400, gin.H{"code": 1, "msg": err.Error()})
 			return
@@ -316,28 +342,13 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 		c.JSON(200, gin.H{"code": 0})
 	})
 }
-func (h *Handlers) PaymentInquiry(c *gin.Context) {
-	msg, err := h.poller.Inquiry(c.Request.Context(), c.PostForm("trade_no"), strings.TrimSpace(c.PostForm("reference")))
-	if err != nil {
-		if msg == "" {
-			msg = err.Error()
-		}
-		c.JSON(400, gin.H{"code": 1, "msg": msg})
-		return
-	}
-	result := "unconfirmed"
-	if o, e := h.st.GetByTradeNo(c.Request.Context(), c.PostForm("trade_no")); e == nil && o.Status == model.Paid {
-		result = "paid"
-	}
-	c.JSON(200, gin.H{"code": 0, "msg": msg, "result": result})
-}
 func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 	var cb model.Callback
 	ack := "PENDING"
 	if err := h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil && cb.DeliveredAt != nil {
 		ack = "SUCCESS"
 	}
-	c.HTML(200, "result.html", CashierData{Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), CanInquire: o.Status == model.Ready, InquiryDelay: inquiryDelay(o), Provider: o.Provider, NotifyStatus: ack})
+	c.HTML(200, "result.html", CashierData{Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
 }
 func (h *Handlers) renderError(c *gin.Context, status int, title, detail string) {
 	c.HTML(status, "error.html", gin.H{"Title": title, "Detail": detail})
@@ -368,11 +379,11 @@ func (h *Handlers) Health(c *gin.Context) {
 func (h *Handlers) Ready(c *gin.Context) {
 	ctx := c.Request.Context()
 	cfg := h.C()
-	if !cfg.BinanceEnabled() && !cfg.OKXEnabled() {
+	if !cfg.AnyProviderEnabled() {
 		c.JSON(503, gin.H{"ready": false, "reason": "未配置收款账户"})
 		return
 	}
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX} {
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
 		if !cfg.ProviderEnabled(provider) {
 			continue
 		}
@@ -391,6 +402,10 @@ func (h *Handlers) Ready(c *gin.Context) {
 			return
 		}
 	}
+	if cfg.TONEnabled() && !h.poller.GRAM.Snapshot().Fresh {
+		c.JSON(503, gin.H{"ready": false, "reason": "GRAM/USD 行情检测尚未就绪"})
+		return
+	}
 	h.Health(c)
 }
 func (h *Handlers) Index(c *gin.Context) {
@@ -406,4 +421,17 @@ func generateTradeNo() string {
 		panic(err)
 	}
 	return hex.EncodeToString(b[:])
+}
+
+func (h *Handlers) GRAMStatus(c *gin.Context) {
+	s := h.poller.GRAM.Snapshot()
+	if s.Address != h.C().TON.Address {
+		s.Balance = ""
+		s.BalanceUSD = ""
+		s.BalanceFresh = false
+		s.BalanceAt = time.Time{}
+		s.BalanceError = "等待检测新地址余额"
+		s.Address = h.C().TON.Address
+	}
+	c.JSON(200, gin.H{"code": 0, "data": s, "price_interval_seconds": int(gram.PriceInterval / time.Second), "balance_interval_seconds": int(gram.BalanceInterval / time.Second)})
 }

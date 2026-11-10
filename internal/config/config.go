@@ -33,6 +33,7 @@ type Config struct {
 	BEpusdt  BEpusdtConfig  `yaml:"-"`
 	Binance  BinanceConfig  `yaml:"-"`
 	OKX      OKXConfig      `yaml:"-"`
+	TON      TONConfig      `yaml:"-"`
 	Checkout CheckoutConfig `yaml:"-"`
 	Order    OrderConfig    `yaml:"-"`
 	Notify   NotifyConfig   `yaml:"-"`
@@ -41,13 +42,14 @@ type Config struct {
 const (
 	ProviderBinance = "binance"
 	ProviderOKX     = "okx"
+	ProviderTON     = "ton"
 )
 
-// SupportedCurrencies 是收银台和到账确认逻辑允许的稳定币集合。
-var SupportedCurrencies = []string{"USDT", "USDC"}
+// SupportedCurrencies 是收银台和到账确认逻辑允许的币种集合。
+var SupportedCurrencies = []string{"USDT", "USDC", "GRAM"}
 
-// NormalizeCurrencies 将币种规范为大写、去重，并只保留 USDT/USDC。
-// 空输入保持为空，让后台能够明确拒绝“一个币种都没启用”的配置。
+// NormalizeCurrencies 将币种规范为大写、去重，并只保留 USDT/USDC/GRAM。
+// 空输入保持为空，表示暂不开放收款币种。
 func NormalizeCurrencies(in []string) []string {
 	seen := make(map[string]bool, len(in))
 	out := make([]string, 0, len(in))
@@ -65,7 +67,7 @@ func NormalizeCurrencies(in []string) []string {
 // IsSupportedCurrency 判断币种是否受网关支持。
 func IsSupportedCurrency(currency string) bool {
 	switch strings.ToUpper(strings.TrimSpace(currency)) {
-	case "USDT", "USDC":
+	case "USDT", "USDC", "GRAM":
 		return true
 	default:
 		return false
@@ -113,12 +115,24 @@ type OKXConfig struct {
 	LookbackBuffer int    `yaml:"lookback_buffer_minutes"` // 订单时间回看缓冲（分钟）
 }
 
-// CheckoutConfig 收银台与两个收款平台的展示配置。
+// TONConfig configures read-only native GRAM collection on TON mainnet.
+type TONConfig struct {
+	Address        string
+	APIKey         string
+	BaseURL        string
+	PollInterval   int
+	LookbackBuffer int
+}
+
+// CheckoutConfig 收银台与交易所收款平台的展示配置。
 type CheckoutConfig struct {
-	Currencies []string        `yaml:"currencies"` // 支持的币种，如 ["USDT","USDC"]
-	Note       string          `yaml:"note"`       // 收银台提示文案
-	Binance    ProviderDisplay `yaml:"binance"`
-	OKX        ProviderDisplay `yaml:"okx"`
+	BinanceCurrencies []string        `yaml:"-"`
+	OKXCurrencies     []string        `yaml:"-"`
+	TONCurrencies     []string        `yaml:"-"`
+	Currencies        []string        `yaml:"currencies"` // 支持的币种，如 ["USDT","USDC"]
+	Note              string          `yaml:"note"`       // 收银台提示文案
+	Binance           ProviderDisplay `yaml:"binance"`
+	OKX               ProviderDisplay `yaml:"okx"`
 }
 
 // ProviderDisplay 收款平台展示信息。UID 同时用于展示、转账和到账归属校验。
@@ -176,6 +190,7 @@ func Default() *Config {
 			Limit:          100,
 			LookbackBuffer: 2,
 		},
+		TON:      TONConfig{BaseURL: "https://toncenter.com/api/v2", PollInterval: 5, LookbackBuffer: 2},
 		Checkout: CheckoutConfig{Currencies: []string{"USDT", "USDC"}},
 		Order: OrderConfig{
 			ExpireMinutes:    10,
@@ -344,14 +359,14 @@ func (c *Config) ValidateWebRoutes() error {
 
 // BinanceEnabled 是否同时具备只读查询凭据和站内转账收款 UID。
 func (c *Config) BinanceEnabled() bool {
-	return strings.TrimSpace(c.Binance.APIKey) != "" &&
+	return len(c.ProviderCurrencies(ProviderBinance)) > 0 && strings.TrimSpace(c.Binance.APIKey) != "" &&
 		strings.TrimSpace(c.Binance.APISecret) != "" &&
 		strings.TrimSpace(c.Checkout.Binance.UID) != ""
 }
 
 // OKXEnabled 是否具备 OKX 站内转账到账确认条件。
 func (c *Config) OKXEnabled() bool {
-	return strings.TrimSpace(c.OKX.APIKey) != "" &&
+	return len(c.ProviderCurrencies(ProviderOKX)) > 0 && strings.TrimSpace(c.OKX.APIKey) != "" &&
 		strings.TrimSpace(c.OKX.APISecret) != "" &&
 		strings.TrimSpace(c.OKX.Passphrase) != "" &&
 		strings.TrimSpace(c.Checkout.OKX.UID) != ""
@@ -364,6 +379,8 @@ func (c *Config) ProviderEnabled(provider string) bool {
 		return c.BinanceEnabled()
 	case ProviderOKX:
 		return c.OKXEnabled()
+	case ProviderTON:
+		return c.TONEnabled()
 	default:
 		return false
 	}
@@ -371,6 +388,9 @@ func (c *Config) ProviderEnabled(provider string) bool {
 
 // ProviderInterval 返回指定平台的查询间隔。
 func (c *Config) ProviderInterval(provider string) int {
+	if provider == ProviderTON {
+		return c.TON.PollInterval
+	}
 	if strings.EqualFold(provider, ProviderOKX) {
 		return c.OKX.PollInterval
 	}
@@ -379,6 +399,9 @@ func (c *Config) ProviderInterval(provider string) int {
 
 // ProviderLookback 返回指定通道的订单时间回看缓冲。
 func (c *Config) ProviderLookback(provider string) int {
+	if provider == ProviderTON {
+		return c.TON.LookbackBuffer
+	}
 	if strings.EqualFold(provider, ProviderOKX) {
 		return c.OKX.LookbackBuffer
 	}
@@ -388,7 +411,7 @@ func (c *Config) ProviderLookback(provider string) int {
 // ScanRetention 是补查一笔到账的最长时间：订单有效期、宽限期与回看缓冲之和。
 // 超过这个时间仍未确认的到账不再自动归属订单，只保留证据交人工核对。
 func (c *Config) ScanRetention() time.Duration {
-	return time.Duration(c.Order.ExpireMinutes+max(c.Binance.LookbackBuffer, c.OKX.LookbackBuffer))*time.Minute +
+	return time.Duration(c.Order.ExpireMinutes+max(c.Binance.LookbackBuffer, c.OKX.LookbackBuffer, c.TON.LookbackBuffer))*time.Minute +
 		time.Duration(c.Order.SlotGraceSeconds)*time.Second
 }
 
@@ -411,4 +434,59 @@ func portSuffix(addr string) string {
 		return addr[i:]
 	}
 	return ":8080"
+}
+
+func (c *Config) TONEnabled() bool {
+	return strings.TrimSpace(c.TON.Address) != "" && c.ProviderCurrency(ProviderTON, "GRAM")
+}
+
+// FilterProviderCurrencies keeps each currency within its supported payment channels.
+func FilterProviderCurrencies(provider string, currencies []string) []string {
+	out := []string{}
+	for _, currency := range NormalizeCurrencies(currencies) {
+		if provider == ProviderTON && currency == "GRAM" || (provider == ProviderBinance || provider == ProviderOKX) && (currency == "USDT" || currency == "USDC") {
+			out = append(out, currency)
+		}
+	}
+	return out
+}
+
+func (c *Config) ProviderCurrencies(provider string) []string {
+	var currencies []string
+	switch provider {
+	case ProviderBinance:
+		currencies = c.Checkout.BinanceCurrencies
+	case ProviderOKX:
+		currencies = c.Checkout.OKXCurrencies
+	case ProviderTON:
+		currencies = c.Checkout.TONCurrencies
+	default:
+		return nil
+	}
+	if currencies == nil {
+		currencies = c.Checkout.Currencies
+	}
+	return FilterProviderCurrencies(provider, currencies)
+}
+
+func (c *Config) ProviderCurrency(provider, currency string) bool {
+	for _, v := range c.ProviderCurrencies(provider) {
+		if v == currency {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizePaymentCurrencies resolves legacy shared settings and keeps the public union derived.
+func (c *Config) NormalizePaymentCurrencies() {
+	c.Checkout.BinanceCurrencies = c.ProviderCurrencies(ProviderBinance)
+	c.Checkout.OKXCurrencies = c.ProviderCurrencies(ProviderOKX)
+	c.Checkout.TONCurrencies = c.ProviderCurrencies(ProviderTON)
+	combined := append(append(append([]string{}, c.Checkout.BinanceCurrencies...), c.Checkout.OKXCurrencies...), c.Checkout.TONCurrencies...)
+	c.Checkout.Currencies = NormalizeCurrencies(combined)
+}
+
+func (c *Config) AnyProviderEnabled() bool {
+	return c.BinanceEnabled() || c.OKXEnabled() || c.TONEnabled()
 }

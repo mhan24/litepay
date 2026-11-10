@@ -67,5 +67,5 @@ body{padding-left:88px}
 {{end}}
 
 {{define "admin_flash"}}
-{{if .Base.Flash}}<div class="flash {{if .Base.FlashOK}}ok{{else}}err{{end}}">{{.Base.Flash}}</div>{{end}}
+{{if .Base.Flash}}<div class="{{if .Base.FlashWarn}}banner{{else}}flash {{if .Base.FlashOK}}ok{{else}}err{{end}}{{end}}" role="status">{{.Base.Flash}}</div>{{end}}
 {{end}}

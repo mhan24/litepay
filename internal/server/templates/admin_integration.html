@@ -33,7 +33,7 @@
       </div>
     </section>
 
-    <p class="section-desc">仅支持 USD 订单与 USDT / USDC 站内转账。成功支付回调 status=2，商户须验签并以订单号幂等处理，返回 success 或 ok。网关不发送过期回调；商城按自身订单期限关单。</p>
+    <p class="section-desc">支持 USD 订单；USDT / USDC 使用站内转账，GRAM 使用 TON 主网转账。GRAM 回调 amount 为 USD，actual_amount 为 GRAM。成功支付回调 status=2，商户须验签并以订单号幂等处理，返回 success 或 ok。网关不发送过期回调；商城按自身订单期限关单。</p>
 
     <form method="post" action="{{adminPath}}/settings/token">
       <input type="hidden" name="csrf" value="{{.Base.CSRF}}">

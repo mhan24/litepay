@@ -124,19 +124,6 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 	}
 	return out, nil
 }
-func (c *Client) Lookup(ctx context.Context, ref string, start, end time.Time) ([]model.Transaction, error) {
-	rows, err := c.History(ctx, start, end)
-	if err != nil {
-		return nil, err
-	}
-	out := []model.Transaction{}
-	for _, t := range rows {
-		if t.EventID == ref || t.Reference == ref {
-			out = append(out, t)
-		}
-	}
-	return out, nil
-}
 
 type asset struct {
 	Currency exchange.Text `json:"currency"`
@@ -195,7 +182,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 		}
 		// 交易历史的商户订单号是 orderId（实测为纯数字，如 463524995526164480，即用户在
 		// App 账单里可复制的编号）；transactionId 是带字母前缀的事件身份。事件归属只用
-		// transactionId；orderId 作为外部查询编号，查款时两者都接受。
+		// transactionId；orderId 作为外部查询编号，用于后台核对编号。
 		reference := string(d.ID)
 		if d.OrderID != "" {
 			reference = string(d.OrderID)

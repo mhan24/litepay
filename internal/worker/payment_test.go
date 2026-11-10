@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -39,9 +38,6 @@ func (f *fixture) History(_ context.Context, start, end time.Time) ([]model.Tran
 	}
 	return f.inWindow(start, end), f.err
 }
-func (f *fixture) Lookup(_ context.Context, _ string, start, end time.Time) ([]model.Transaction, error) {
-	return f.inWindow(start, end), f.err
-}
 
 // inWindow 模拟交易所按查询时间窗口返回记录：窗口外的流水不会被读到。
 func (f *fixture) inWindow(start, end time.Time) []model.Transaction {
@@ -53,7 +49,7 @@ func (f *fixture) inWindow(start, end time.Time) []model.Transaction {
 	}
 	return out
 }
-func TestScanInquiryAndSignedCallback(t *testing.T) {
+func TestScanAndSignedCallback(t *testing.T) {
 	ctx := context.Background()
 	st, e := store.Open(":memory:")
 	if e != nil {
@@ -108,10 +104,6 @@ func TestScanInquiryAndSignedCallback(t *testing.T) {
 	f := &fixture{rows: []model.Transaction{{Provider: "binance", EventID: "parent-event", Reference: "app-order", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: time.Now(), State: model.Confirmed}}}
 	p := NewPoller(mgr, st)
 	p.clients["binance"] = &connection{config: *mgr.Get(), source: f}
-	msg, e := p.Inquiry(ctx, "b", "app-order")
-	if e != nil || !strings.Contains(msg, "不属于") {
-		t.Fatal(msg, e)
-	}
 	// Failed/partial exchange reads never advance the cursor or pay an order.
 	f.err = errors.New("incomplete history")
 	if e = p.Scan(ctx, "binance"); e == nil {

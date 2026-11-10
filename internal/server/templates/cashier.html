@@ -16,12 +16,14 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
 .payment-panel{padding:32px}.payment-panel>h2{margin:0 0 24px;font-size:16px;font-weight:550}.channel{display:flex;align-items:center;gap:12px;margin-bottom:28px}.channel-icon{width:32px;height:32px;display:grid;place-items:center}.channel-icon img,.brand-icon{width:100%;height:100%;object-fit:contain}.channel-copy{flex:1;min-width:0}.channel-copy strong{display:block;font-size:14px;font-weight:550}.channel-copy span{display:block;font-size:12px;color:var(--muted);margin-top:3px}.channel-state{font-size:12px;color:var(--muted)}
 :root[data-theme=dark] img[src*="okx"]{filter:invert(1)}.badge{display:inline-flex;white-space:nowrap;padding:4px 8px;background:var(--surface-3);color:var(--muted);font-size:12px;border-radius:4px;font-weight:450}
 .amount-box{padding:24px;background:var(--surface-2);border-radius:6px}.amount-label{display:flex;justify-content:space-between;gap:12px;font-size:14px}.amount-label span:last-child{font-size:12px;color:var(--muted)}.amount-row{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:16px}.amount{font-size:40px;font-weight:550;letter-spacing:-1.2px;line-height:1.1;overflow-wrap:anywhere}.amount-token{width:28px;height:28px;object-fit:contain}.amount-row .copy{margin-left:auto}.amount-sub{margin-top:16px;font-size:12px;line-height:1.6;color:var(--muted)}
-.pay-focus{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:16px;padding:20px 0;margin-top:20px;border-bottom:1px solid var(--line)}.pay-focus .label{font-size:12px;color:var(--muted)}.pay-focus .value{display:flex;gap:8px;align-items:center;font-size:16px;font-weight:500;margin-top:6px;overflow-wrap:anywhere}.pay-focus .value img{width:22px;height:22px;object-fit:contain}.pay-focus .uid{font-family:var(--font-mono);font-size:22px}.amount-box .pay-focus{margin-top:12px!important;padding:16px 0 0;border-top:1px solid var(--line);border-bottom:0}.currency{font-size:16px;font-weight:500}
+.pay-focus{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:16px;padding:20px 0;margin-top:20px;border-bottom:1px solid var(--line)}.pay-focus .label{font-size:12px;color:var(--muted)}.pay-focus .value{display:flex;gap:8px;align-items:center;font-size:16px;font-weight:500;margin-top:6px;overflow-wrap:anywhere}.pay-focus .value img{width:22px;height:22px;object-fit:contain}.pay-focus .uid{font-family:var(--font-mono);font-size:22px}.pay-focus>div{min-width:0}.pay-focus .uid.address{font-size:14px;line-height:1.6}.amount-box .pay-focus{margin-top:12px!important;padding:16px 0 0;border-top:1px solid var(--line);border-bottom:0}.currency{font-size:16px;font-weight:500}
 .warn{display:flex;align-items:flex-start;gap:10px;margin-top:20px;font-size:13px;line-height:1.7;color:var(--muted)}.warn svg{flex:none;margin-top:3px}.warn b{font-weight:550;color:var(--text)}.pay-note{margin-top:12px;font-size:13px;color:var(--muted);line-height:1.7}.pay-note b{color:var(--text);font-weight:500}.pay-note.error{color:var(--danger);background:var(--danger-soft);padding:12px;border-radius:6px}
 .choice-title{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:16px}.choice-title h2{margin:0;font-size:16px;font-weight:550}.choice-title>span{font-size:12px;color:var(--muted)}.provider-list,.currency-list{display:grid;gap:12px}.provider-btn,.currency-btn{width:100%;display:flex;align-items:center;gap:16px;text-align:left;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--text);padding:20px 16px;cursor:pointer;transition:background var(--motion-fast),border-color var(--motion-fast)}.provider-btn:hover:not(:disabled),.currency-btn:hover:not(:disabled){background:var(--surface-2);border-color:var(--text)}.provider-btn:active,.currency-btn:active{transform:translateY(1px)}.provider-btn.selected,.currency-btn.selected{border-color:var(--text);background:var(--surface-2)}.provider-btn:disabled,.currency-btn:disabled{color:var(--muted);background:var(--surface-2);border-style:dashed;cursor:not-allowed}.loading{opacity:.7;pointer-events:none}.choice-icon{width:32px;height:32px;flex:none}.choice-icon img{width:100%;height:100%;object-fit:contain}.choice-body{flex:1;min-width:0}.choice-name{display:block;font-size:16px;font-weight:500}.choice-sub{display:block;font-size:12px;color:var(--muted);line-height:1.6;margin-top:4px}.choice-arrow{font-size:22px;color:var(--muted)}
 .copy{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--text);padding:8px 12px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;transition:background var(--motion-fast)}.copy:hover{background:var(--surface-3)}.copy:active{transform:translateY(1px)}.copy.done{color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)}.reselect{display:inline-block;border:0;background:none;color:var(--muted);font-size:13px;padding:10px 0;margin-top:16px;cursor:pointer;text-underline-offset:4px}.reselect:hover{color:var(--text);text-decoration:underline}
 .timer{margin-top:24px}.timer-head{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:var(--muted);margin-bottom:12px}.clock{font-weight:550;color:var(--text);font-variant-numeric:tabular-nums}.urgent{color:var(--danger)}.bar{height:3px;background:var(--surface-3);overflow:hidden;border-radius:2px}.bar-inner{height:100%;width:100%;background:var(--text);transition:width .9s linear}.bar-inner.urgent{background:var(--danger)}.status{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--muted);margin-top:16px}.dot{height:6px;width:6px;border-radius:50%;background:var(--muted);flex:none}.foot{margin-top:28px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:4px;overflow-wrap:anywhere}.page-tip{margin:20px 0 0;font-size:12px;color:var(--muted);text-align:center}
 .overlay{position:fixed;inset:0;z-index:50;display:none;padding:24px;background:var(--overlay);align-items:center;justify-content:center}.overlay.show{display:flex}.ov-card{width:100%;max-width:360px;border-radius:8px;background:var(--surface);padding:32px;text-align:center;box-shadow:0 16px 48px #0003}.ov-card h2{font-size:20px;font-weight:550}.ov-card p{font-size:14px;color:var(--muted)}.check circle,.check path{fill:none;stroke:var(--ok);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.check.expired circle,.check.expired path{stroke:var(--warn)}
+.wallet-scan{display:grid;grid-template-columns:240px minmax(0,1fr);gap:24px;align-items:center;margin-top:24px}.wallet-scan[hidden]{display:none}.wallet-scan img{display:block;width:240px;max-width:100%;height:auto;background:#fff;border-radius:6px}.wallet-scan h2{margin:0 0 12px;font-size:16px;font-weight:550}.wallet-scan p{margin:0;font-size:14px;line-height:1.8;color:var(--text)}.wallet-scan .scan-check{margin-top:12px;font-size:12px;color:var(--muted)}
+@media(max-width:1100px){.wallet-scan{grid-template-columns:1fr;justify-items:center;gap:16px}.wallet-scan>div{width:100%}}
 @media(max-width:900px){.card{grid-template-columns:280px minmax(0,1fr)}.receipt-aside,.payment-panel{padding:24px}.amount-row .copy{margin-left:0}.amount{font-size:36px}}
 @media(max-width:640px){body{padding:20px 16px 32px}.checkout-brand{margin-bottom:20px}.card{grid-template-columns:1fr}.receipt-aside{padding:24px;border-right:0;border-bottom:1px solid var(--line)}.receipt-aside h1{font-size:24px}.receipt-aside>p{display:none}.stage-transfer .order-total{display:none}.order-meta{gap:12px}.order-meta .row{flex-direction:row;justify-content:space-between;gap:20px}.order-meta .v{text-align:right;max-width:70%}.order-total{margin:20px 0 0;padding:16px 0 0;border-bottom:0;display:flex;justify-content:space-between;align-items:center}.order-total strong{font-size:22px;letter-spacing:-.5px}.order-total small{font-size:12px}.order-total span{font-size:13px}.receipt-help{display:none}.payment-panel{padding:24px}.amount-box{padding:20px}.amount-row{gap:8px}.amount-token{width:24px;height:24px}.amount{font-size:36px}.copy{min-height:44px}.amount-row .copy{margin-left:auto}.amount-label{flex-wrap:wrap;gap:4px}.pay-focus{gap:12px}.pay-focus .uid{font-size:20px}.channel-state{display:none}.page-tip{line-height:1.7}.provider-btn,.currency-btn{padding:18px 14px}}
 @media(max-width:360px){.payment-panel,.receipt-aside{padding:20px}.amount{font-size:32px}.amount-row .copy{margin-left:0}}
@@ -36,7 +38,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   <section class="card" aria-label="订单付款">
     <aside class="receipt-aside">
       <h1>{{if .NeedsProvider}}选择付款方式{{else if .NeedsCurrency}}选择付款币种{{else}}确认付款信息{{end}}</h1>
-      <p>使用 Binance 或 OKX 站内转账。付款前，请核对币种、金额和收款 UID。</p>
+      <p>选择付款方式后，请核对币种、完整金额和收款账户。</p>
       <div class="order-meta">
         <div class="row"><span class="k">商品</span><span class="v">{{if .Name}}{{.Name}}{{else}}订单 {{.OutTradeNo}}{{end}}</span></div>
         <div class="row"><span class="k">商户订单号</span><span class="v mono">{{.OutTradeNo}}</span></div>
@@ -48,7 +50,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if not .NeedsProvider}}
     <div class="channel">
       <span class="channel-icon">
-        {{if eq .Provider "binance"}}<img src="/assets/brand/binance.svg" alt="">{{else if eq .Provider "okx"}}<img src="/assets/brand/okx.svg" alt="">{{else}}LP{{end}}
+        {{if eq .Provider "binance"}}<img src="/assets/brand/binance.svg" alt="">{{else if eq .Provider "okx"}}<img src="/assets/brand/okx.svg" alt="">{{else if eq .Provider "ton"}}<img src="/assets/brand/gram.svg" alt="">{{else}}LP{{end}}
       </span>
       <span class="channel-copy">
         <strong>{{.ProviderName}}</strong>
@@ -89,7 +91,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
         <span class="choice-body">
           <span class="choice-name">{{.Currency}}</span>
           <span class="choice-sub">
-            {{if eq $.Provider "okx"}}OKX 站内转账 · 按订单金额核对{{else if eq $.Provider "binance"}}Binance 站内转账 · 按订单金额核对{{else}}按订单金额核对{{end}}
+            {{if eq $.Provider "okx"}}OKX 站内转账 · 按订单金额核对{{else if eq $.Provider "binance"}}Binance 站内转账 · 按订单金额核对{{else if eq $.Provider "ton"}}TON 主网 · 按实时 USD 报价锁定金额{{else}}按订单金额核对{{end}}
             {{if not .Enabled}} · 当前不可用{{end}}
           </span>
         </span>
@@ -104,7 +106,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     <div class="amount-box">
       <div class="amount-label"><span>应付金额</span><span>含订单识别尾数</span></div>
       <div class="amount-row">
-        {{if eq .Currency "USDT"}}<img class="amount-token" src="/assets/brand/usdt.svg" alt="">{{else if eq .Currency "USDC"}}<img class="amount-token" src="/assets/brand/usdc.svg" alt="">{{end}}
+        {{if eq .Currency "GRAM"}}<img class="amount-token" src="/assets/brand/gram.svg" alt="">{{else if eq .Currency "USDT"}}<img class="amount-token" src="/assets/brand/usdt.svg" alt="">{{else if eq .Currency "USDC"}}<img class="amount-token" src="/assets/brand/usdc.svg" alt="">{{end}}
         <span class="amount" id="amount">{{.Amount}}</span>
         <button class="copy" type="button" data-copy="{{.Amount}}" id="copy-amount">复制金额</button>
       </div>
@@ -116,10 +118,21 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
             <span class="currency">{{.Currency}}</span>
           </div>
         </div>
-        <span class="badge" style="margin:0">站内转账</span>
+        <span class="badge" style="margin:0">{{if eq .Provider "ton"}}TON 主网{{else}}站内转账{{end}}</span>
       </div>
-      <div class="amount-sub">订单金额 ${{.OriginMoney}} USD · 1 {{.Currency}} = 1 USD</div>
+      <div class="amount-sub">订单金额 ${{.OriginMoney}} USD · 1 {{.Currency}} = {{if eq .Provider "ton"}}{{.RateUSD}}{{else}}1{{end}} USD{{if eq .Provider "ton"}} · 已锁定本单应付数量{{end}}</div>
     </div>
+
+    {{if .PaymentQR}}
+    <div class="wallet-scan" id="telegram-wallet-scan" aria-labelledby="wallet-scan-title">
+      <img id="gram-payment-qr" src="{{.PaymentQR}}" width="240" height="240" alt="本单 GRAM 收款地址二维码">
+      <div>
+        <h2 id="wallet-scan-title">Telegram 钱包扫码付款</h2>
+        <p>打开 Telegram（电报）→ 钱包 → 右上角「扫一扫」，扫描二维码进行转账。</p>
+        <p class="scan-check">扫码后请复制上方完整金额 {{.Amount}} GRAM，并核对收款地址后确认转账。</p>
+      </div>
+    </div>
+    {{end}}
 
     <div class="warn">
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -131,14 +144,19 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if .HasPayee}}
     <div class="pay-focus">
       <div>
-        <span class="label">收款 UID</span>
-        <div class="value uid">{{.UID}}</div>
+        <span class="label">{{if eq .Provider "ton"}}收款地址{{else}}收款 UID{{end}}</span>
+        <div class="value uid{{if eq .Provider "ton"}} address{{end}}">{{.UID}}</div>
       </div>
-      <button class="copy" type="button" data-copy="{{.UID}}">复制 UID</button>
+      <button class="copy" type="button" data-copy="{{.UID}}">复制{{if eq .Provider "ton"}}地址{{else}} UID{{end}}</button>
     </div>
-    <div class="pay-note">在 <b>{{if eq .Provider "okx"}}OKX{{else}}Binance{{end}}</b> 向此 UID 发起<b>站内转账</b>，币种选择 <b>{{.Currency}}</b>，金额填写 <b>{{.Amount}}</b>。</div>
+    {{if eq .Provider "ton"}}
+    <div class="pay-note">使用 TON 主网向此地址发送 <b>{{.Amount}} GRAM</b>，手续费另付。请勿转入 Jetton 代币。</div>
+    <a class="copy" id="gram-open-wallet" href="{{tonURL .TransferURL}}">打开钱包付款</a>
     {{else}}
-    <div class="pay-note error">商户尚未配置收款 UID，请稍后重试或联系商户。</div>
+    <div class="pay-note">在 <b>{{if eq .Provider "okx"}}OKX{{else}}Binance{{end}}</b> 向此 UID 发起<b>站内转账</b>，币种选择 <b>{{.Currency}}</b>，金额填写 <b>{{.Amount}}</b>。</div>
+    {{end}}
+    {{else}}
+    <div class="pay-note error">商户尚未配置收款账户，请稍后重试或联系商户。</div>
     {{end}}
 
     <div class="timer">
@@ -158,7 +176,6 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{end}}
     {{end}}{{end}}
 
-    {{template "payment_inquiry" .}}
     <div class="foot">
       <span>订单编号 <span class="mono">{{.TradeNo}}</span></span>
       <span>下单时间 {{.CreatedAt}} · 请在 {{.ExpiredAt}} 前付款</span>
@@ -178,7 +195,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     </svg>
     <h2 id="ov-title">支付成功</h2>
     <p id="ov-desc">正在跳转回商户页面…</p>
-    <a id="ov-review" href="/pay/{{.TradeNo}}" hidden style="display:none;margin-top:20px;font-size:14px;text-underline-offset:4px">查看订单及查款</a>
+    <a id="ov-review" href="/pay/{{.TradeNo}}" hidden style="display:none;margin-top:20px;font-size:14px;text-underline-offset:4px">查看订单状态</a>
   </div>
 </div>
 
@@ -248,6 +265,8 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   });
 
   var PROVIDER = {{.Provider}};
+  var PAY_AMOUNT = {{.Amount}};
+  var CURRENCY = {{.Currency}};
   var NEEDS_PROVIDER = {{if .NeedsProvider}}true{{else}}false{{end}};
   var NEEDS_CURRENCY = {{if .NeedsCurrency}}true{{else}}false{{end}};
 
@@ -316,14 +335,22 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
         if (d.status === 'PAID') { onPaid(d); }
         else if (d.status === 'EXPIRED') { onExpired(); }
         else if (d.status === 'CANCELED') { onCanceled(); }
-        else if (d.provider && d.provider !== PROVIDER) { window.location.reload(); }
+        else if (d.provider && (d.provider !== PROVIDER || d.currency !== CURRENCY || d.amount !== PAY_AMOUNT)) { window.location.reload(); }
       })
       .catch(function () { /* 网络抖动忽略，下次继续 */ });
+  }
+
+  function hideWalletPayment() {
+    var scan = document.getElementById('telegram-wallet-scan');
+    var wallet = document.getElementById('gram-open-wallet');
+    if (scan) scan.hidden = true;
+    if (wallet) wallet.style.display = 'none';
   }
 
   function onPaid(d) {
     if (finished || !showPayment) return;
     finished = true;
+    hideWalletPayment();
     statusEl.textContent = d.merchant_confirmed ? '付款已确认，商户已接收通知' : '付款已确认，正在通知商户，请勿重复付款';
     document.getElementById('ov-title').textContent = '支付成功';
     document.getElementById('ov-desc').textContent = '正在跳转回商户页面…';
@@ -338,6 +365,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   function onExpired() {
     if (finished || !showPayment) return;
     finished = true;
+    hideWalletPayment();
     clockEl.textContent = '00:00';
     barEl.style.width = '0%';
     statusEl.textContent = '付款窗口已结束，已付款请勿重复下单或转账';
@@ -352,6 +380,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   function onCanceled() {
     if (finished || !showPayment) return;
     finished = true;
+    hideWalletPayment();
     statusEl.textContent = '订单已取消，请返回商户页面';
     var icon = document.getElementById('ov-icon');
     icon.classList.add('expired');
