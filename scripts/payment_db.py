@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -31,11 +32,12 @@ def validate(path):
         if db.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('foreign key check failed')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (8, 9, 10, 11, 12, 13):
+        if version not in (8, 9, 10, 11, 12, 13, 14):
             raise ValueError('unsupported payment schema')
         tables = BASE_TABLES + (NEW_TABLES if version >= 9 else ())
         tables += ATTEMPT_TABLES if version >= 10 else ()
         tables += ('integration_healths', 'history_coverages') if version >= 12 else ()
+        tables += ('gateway_recoveries', 'cancellation_intents') if version >= 14 else ()
         counts = {name: db.execute('SELECT count(*) FROM ' + name).fetchone()[0] for name in tables}
         problems = [
             "SELECT count(*) FROM orders o WHERE o.status='PAID' AND ((SELECT count(*) FROM transactions t WHERE t.order_id=o.id AND t.state='confirmed')<>1 OR (SELECT count(*) FROM callbacks c WHERE c.order_id=o.id)<>1)",
@@ -74,6 +76,14 @@ def validate(path):
             ]
         if version >= 13:
             problems += ["SELECT count(*) FROM scan_cursors WHERE historical_turn IS NULL OR historical_turn<0 OR historical_turn>7"]
+        if version >= 14:
+            if db.execute('SELECT count(*) FROM gateway_recoveries WHERE id=1').fetchone()[0] != 1:
+                raise ValueError('missing recovery generation')
+            problems += [
+                "SELECT count(*) FROM gateway_recoveries WHERE id<>1 OR length(generation)<>32 OR generation GLOB '*[^0-9a-f]*' OR acknowledged NOT IN (0,1)",
+                "SELECT count(*) FROM integration_healths WHERE missing<0",
+                "SELECT count(*) FROM cancellation_intents i WHERE i.trade_no='' OR i.out_trade_no='' OR EXISTS(SELECT 1 FROM orders o WHERE o.trade_no=i.trade_no OR o.out_trade_no=i.out_trade_no)",
+            ]
         if any(db.execute(sql).fetchone()[0] for sql in problems):
             raise ValueError('payment evidence, reservation, or recovery invariants failed')
         for (payload,) in db.execute('SELECT payload FROM settings'):
@@ -150,6 +160,16 @@ def restore(source, target):
                 # SQLite may legitimately change page organization. Verify logical data instead.
                 if fingerprint(source) != fingerprint(staged):
                     raise ValueError('restored database differs from backup')
+            # A restored gateway must revalidate independent merchant cancellation receipts.
+            recovered = sqlite3.connect(staged)
+            try:
+                if recovered.execute('PRAGMA user_version').fetchone()[0] >= 14:
+                    recovered.execute("UPDATE gateway_recoveries SET generation=?,acknowledged=0,reason='SQLite backup restore',created_at=? WHERE id=1",
+                                      (secrets.token_hex(16), datetime.datetime.now(datetime.timezone.utc).isoformat(' ')))
+                    recovered.commit()
+            finally:
+                recovered.close()
+            fsync_file(staged)
             os.replace(staged, target)
             fsync_dir(target.parent)
         return validate(target)
@@ -157,11 +177,13 @@ def restore(source, target):
         os.close(lock_fd)
 
 
-def fingerprint(path):
+def fingerprint(path, exclude_recovery=False):
     db = connect(path)
     try:
         digest = hashlib.sha256()
         for line in db.iterdump():
+            if exclude_recovery and line.startswith('INSERT INTO \"gateway_recoveries\"'):
+                continue
             digest.update(line.encode())
         return digest.hexdigest()
     finally:
@@ -173,7 +195,7 @@ def drill(source):
         backup, restored = Path(directory) / 'backup.db', Path(directory) / 'restored.db'
         snapshot(source, backup)
         result = restore(backup, restored)
-        if fingerprint(backup) != fingerprint(restored):
+        if fingerprint(backup, exclude_recovery=True) != fingerprint(restored, exclude_recovery=True):
             raise ValueError('orders, evidence, cursors, credentials, or task state changed during recovery')
         result['drill'] = 'passed'
         return result

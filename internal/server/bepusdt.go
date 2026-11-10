@@ -73,6 +73,10 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 	}
 	req.TradeID = strings.TrimSpace(req.TradeID)
 	req.OrderID = strings.TrimSpace(req.OrderID)
+	if len(req.TradeID) > 128 || len(req.OrderID) > 128 {
+		h.bepusdtFail(c, "order reference is too long")
+		return
+	}
 	if req.TradeID == "" && req.OrderID == "" {
 		h.bepusdtFail(c, "trade_id or order_id is required")
 		return
@@ -90,6 +94,10 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 }
 
 func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
+	if h.recoveryBlocked(c) {
+		h.bepusdtFail(c, "恢复核对尚未完成，暂停接单")
+		return
+	}
 	cfg := h.C()
 	if !cfg.AnyProviderEnabled() {
 		h.bepusdtFail(c, "no payment provider is configured")

@@ -32,16 +32,17 @@ func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
 		h.bepusdtFail(c, "invalid source")
 		return
 	}
-	counts := make([]int64, 3)
-	for i, key := range []string{"pending", "failures", "conflicts"} {
+	counts := make([]int64, 4)
+	for i, key := range []string{"pending", "failures", "conflicts", "missing"} {
 		counts[i], err = strconv.ParseInt(text(key), 10, 64)
 		if err != nil || counts[i] < 0 || counts[i] > 100000000 {
 			h.bepusdtFail(c, "invalid count")
 			return
 		}
 	}
-	report := model.IntegrationHealth{Name: "dujiao_cancel_sync", Source: source, ReportedAt: stamp, Healthy: text("healthy") == "true", Pending: counts[0], Failures: counts[1], Conflicts: counts[2]}
-	if err = h.st.SaveIntegrationHealth(c.Request.Context(), report); err != nil {
+	generation := text("generation")
+	report := model.IntegrationHealth{Generation: generation, Missing: counts[3], Name: "dujiao_cancel_sync", Source: source, ReportedAt: stamp, Healthy: text("healthy") == "true", Pending: counts[0], Failures: counts[1], Conflicts: counts[2]}
+	if err = h.st.AcknowledgeRecovery(c.Request.Context(), generation, text("replay_complete") == "true", report); err != nil {
 		h.bepusdtFail(c, "health write failed")
 		return
 	}
@@ -54,5 +55,37 @@ func (h *Handlers) AdminOperations(c *gin.Context) {
 		return
 	}
 	health, _ := h.st.IntegrationHealth(c.Request.Context())
-	c.JSON(200, gin.H{"queues": stats, "cancel_sync": health, "binance": h.poller.BinanceUsage(), "cancel_sync_required": h.C().Server.CancelSyncRequired})
+	c.JSON(200, gin.H{"recovery": func() any { r, _ := h.st.Recovery(c.Request.Context()); return r }(), "queues": stats, "cancel_sync": health, "binance": h.poller.BinanceUsage(), "cancel_sync_required": h.C().Server.CancelSyncRequired})
+}
+
+func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
+	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
+	if err != nil {
+		h.bepusdtFail(c, "invalid generation request")
+		return
+	}
+	body, err := decodeBEpusdtJSON(raw)
+	if err != nil || !sign.BEpusdtVerifyGeneric(body, h.C().BEpusdt.APIToken) {
+		h.bepusdtFail(c, "signature verification failed")
+		return
+	}
+	stamp, _ := body["timestamp"].(string)
+	at, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil || at < time.Now().Unix()-60 || at > time.Now().Unix()+10 {
+		h.bepusdtFail(c, "stale generation request")
+		return
+	}
+	r, err := h.st.Recovery(c.Request.Context())
+	if err != nil {
+		h.bepusdtFail(c, "recovery state unavailable")
+		return
+	}
+	c.JSON(200, bepusdtResponse{StatusCode: 200, Message: "success", Data: gin.H{"generation": r.Generation, "replay_required": !r.Acknowledged}})
+}
+func (h *Handlers) recoveryBlocked(c *gin.Context) bool {
+	if !h.C().Server.CancelSyncRequired {
+		return false
+	}
+	ready, err := h.st.RecoveryReady(c.Request.Context())
+	return err != nil || !ready
 }

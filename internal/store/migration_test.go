@@ -198,3 +198,50 @@ func TestVersion12FairSchedulingIsAdditive(t *testing.T) {
 		t.Fatal(cursor, err)
 	}
 }
+
+func TestVersion13RecoveryMigrationPreservesClaimsAndRequiresHandshake(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "schema13.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "v13-evidence")
+	if _, err = s.Process(ctx, evidence(o, "v13-confirmed"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB().Create(&model.IntegrationHealth{Name: "dujiao_cancel_sync", Healthy: true, Source: "sqlite", ReportedAt: time.Now().Unix(), ReceivedAt: time.Now(), LastSuccessAt: time.Now()}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"generation", "missing"} {
+		if err = s.DB().Migrator().DropColumn(&model.IntegrationHealth{}, column); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.DB().Migrator().DropTable(&model.GatewayRecovery{}, &model.CancellationIntent{})
+	s.DB().Exec("PRAGMA user_version=13")
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	fresh, err := s.GetByTradeNo(ctx, o.TradeNo)
+	if err != nil || fresh.Status != model.Paid {
+		t.Fatal(fresh, err)
+	}
+	var transactions, callbacks int64
+	s.DB().Model(&model.Transaction{}).Where("order_id=?", o.ID).Count(&transactions)
+	s.DB().Model(&model.Callback{}).Where("order_id=?", o.ID).Count(&callbacks)
+	if transactions != 1 || callbacks != 1 {
+		t.Fatal("migration lost payment ownership", transactions, callbacks)
+	}
+	r, err := s.Recovery(ctx)
+	if err != nil || r.Acknowledged || len(r.Generation) != 32 {
+		t.Fatal(r, err)
+	}
+	health, err := s.IntegrationHealth(ctx)
+	if err != nil || health.Generation != "" || health.Missing != 0 {
+		t.Fatal(health, err)
+	}
+}

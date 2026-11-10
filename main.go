@@ -29,6 +29,7 @@ func main() {
 }
 func run() error {
 	cfgPath := flag.String("config", "config.yaml", "启动配置路径")
+	recoverReason := flag.String("recover-reason", "", "手工恢复数据库后填写原因，生成新的取消核对代际")
 	flag.Parse()
 	// SQLite and configuration files created by this process are private by default.
 	syscall.Umask(0077)
@@ -51,6 +52,11 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+	if strings.TrimSpace(*recoverReason) != "" {
+		if err = st.BeginRecovery(context.Background(), strings.TrimSpace(*recoverReason)); err != nil {
+			return err
+		}
+	}
 	mgr := settings.New(cfg, st)
 	if err = mgr.Load(context.Background()); err != nil {
 		return err

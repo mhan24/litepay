@@ -13,6 +13,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 
 	"litepay/internal/amount"
@@ -83,10 +84,10 @@ func Open(path string) (*Store, error) {
 	if err = db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables).Error; err != nil {
 		return fail(err)
 	}
-	if version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13 && tables > 0 {
+	if version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13 && version != 14 && tables > 0 {
 		return fail(errors.New("旧数据库不兼容，请配置一个新的空数据库"))
 	}
-	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}, &model.IntegrationHealth{}, &model.HistoryCoverage{}); err != nil {
+	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}, &model.IntegrationHealth{}, &model.HistoryCoverage{}, &model.GatewayRecovery{}, &model.CancellationIntent{}); err != nil {
 		return fail(err)
 	}
 	if err = migratePaymentAttempts(db); err != nil {
@@ -106,7 +107,10 @@ func Open(path string) (*Store, error) {
 			return fail(err)
 		}
 	}
-	if err = db.Exec("PRAGMA user_version=13").Error; err != nil {
+	if err = initializeRecovery(db); err != nil {
+		return fail(err)
+	}
+	if err = db.Exec("PRAGMA user_version=14").Error; err != nil {
 		return fail(err)
 	}
 	if path != ":memory:" {
@@ -167,6 +171,13 @@ func (s *Store) Create(ctx context.Context, o model.Order) (*model.Order, error)
 			} else if !errors.Is(e, gorm.ErrRecordNotFound) {
 				return e
 			}
+		}
+		var canceled int64
+		if err := db.Model(&model.CancellationIntent{}).Where("out_trade_no=? OR trade_no=?", o.OutTradeNo, o.TradeNo).Count(&canceled).Error; err != nil {
+			return err
+		}
+		if canceled > 0 {
+			return errors.New("商户订单已取消，禁止重新创建")
 		}
 		o.Status = model.Pending
 		return db.Create(&o).Error
@@ -308,18 +319,40 @@ func (s *Store) CancelReference(ctx context.Context, tradeNo, outTradeNo string)
 			q = q.Where("out_trade_no = ?", outTradeNo)
 		}
 		if err := q.First(&o).Error; err != nil {
-			return err
+			if !errors.Is(err, gorm.ErrRecordNotFound) || tradeNo == "" || outTradeNo == "" {
+				return err
+			}
+			var occupied int64
+			if e := db.Model(&model.Order{}).Where("trade_no=? OR out_trade_no=?", tradeNo, outTradeNo).Count(&occupied).Error; e != nil {
+				return e
+			}
+			if occupied > 0 {
+				return errors.New("网关订单号与商户订单号不一致")
+			}
+			intent := model.CancellationIntent{TradeNo: tradeNo, OutTradeNo: outTradeNo, CreatedAt: time.Now()}
+			if e := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&intent).Error; e != nil {
+				return e
+			}
+			var saved model.CancellationIntent
+			if e := db.First(&saved, "out_trade_no=?", outTradeNo).Error; e != nil {
+				return e
+			}
+			if saved.TradeNo != tradeNo {
+				return errors.New("网关订单号与商户订单号不一致")
+			}
+			o = model.Order{TradeNo: tradeNo, OutTradeNo: outTradeNo, Status: model.Canceled}
+			return nil
 		}
 		if outTradeNo != "" && o.OutTradeNo != outTradeNo {
 			return errors.New("网关订单号与商户订单号不一致")
 		}
-		if o.Status == model.Canceled || o.Status == model.Expired {
+		if o.Status == model.Canceled {
 			return nil
 		}
 		if o.Status == model.Paid {
 			return errors.New("已支付订单不能关闭")
 		}
-		if o.Status != model.Pending && o.Status != model.Ready {
+		if o.Status != model.Pending && o.Status != model.Ready && o.Status != model.Expired {
 			return errors.New("订单不能关闭")
 		}
 		if err := db.Model(&o).Update("status", model.Canceled).Error; err != nil {

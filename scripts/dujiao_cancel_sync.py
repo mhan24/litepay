@@ -78,7 +78,7 @@ def eligible(rows, gateway):
 def enqueue(state, rows, gateway, now):
     for payment_id, trade_id, order_id, _ in eligible(rows, gateway):
         # Keys contain identities only. API credentials are fetched again before sending.
-        state.execute("INSERT INTO cancellations VALUES(?,?,?,?,'queued',0,?,?) ON CONFLICT(gateway,payment_id,trade_id,order_id) DO UPDATE SET outcome='queued',next_at=excluded.next_at,updated_at=excluded.updated_at WHERE cancellations.outcome='merchant_changed'",
+        state.execute("INSERT INTO cancellations VALUES(?,?,?,?,'queued',0,?,?) ON CONFLICT(gateway,payment_id,trade_id,order_id) DO UPDATE SET outcome='queued',next_at=excluded.next_at,updated_at=excluded.updated_at WHERE cancellations.outcome='merchant_changed' OR (cancellations.outcome IN ('closed','reviewed_missing','missing_gateway','paid_conflict') AND EXISTS(SELECT 1 FROM gateway_epochs e WHERE e.gateway=cancellations.gateway AND NOT EXISTS(SELECT 1 FROM epoch_receipts r WHERE r.gateway=cancellations.gateway AND r.payment_id=cancellations.payment_id AND r.trade_id=cancellations.trade_id AND r.order_id=cancellations.order_id AND r.generation=e.generation)))",
                       (gateway, payment_id, trade_id, order_id, now, now))
 
 
@@ -177,7 +177,37 @@ def journal(path):
         CREATE TABLE IF NOT EXISTS discovery_orders(gateway TEXT NOT NULL,order_id INTEGER NOT NULL,
             after_payment_id INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(gateway,order_id));
     """)
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS gateway_epochs(gateway TEXT PRIMARY KEY,generation TEXT NOT NULL,audit_id INTEGER NOT NULL DEFAULT 0,scanned INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS epoch_receipts(gateway TEXT,payment_id INTEGER,trade_id TEXT,order_id TEXT,generation TEXT,outcome TEXT,updated_at REAL,
+            PRIMARY KEY(gateway,payment_id,trade_id,order_id,generation));
+        CREATE TABLE IF NOT EXISTS missing_reviews(id INTEGER PRIMARY KEY,gateway TEXT,payment_id INTEGER,trade_id TEXT,order_id TEXT,generation TEXT,operator TEXT,reason TEXT,created_at REAL);
+    """)
     return db
+
+
+def queue_status(state, gateway):
+    counts = dict(state.execute("SELECT outcome,count(*) FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry','missing_gateway','paid_conflict') GROUP BY outcome", (gateway,)))
+    missing = counts.get('missing_gateway', 0)
+    conflicts = counts.get('paid_conflict', 0)
+    failures = counts.get('retry', 0) + missing
+    pending = counts.get('queued', 0) + counts.get('retry', 0)
+    pending += state.execute('SELECT count(*) FROM discovery_orders WHERE gateway=?', (gateway,)).fetchone()[0]
+    epoch = state.execute('SELECT generation,scanned FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
+    return {'pending': pending, 'failures': failures, 'missing': missing, 'conflicts': conflicts,
+            'generation': epoch[0] if epoch else '', 'replay_complete': bool(epoch and epoch[1] and pending == 0 and failures == 0 and conflicts==0)}
+
+
+def replay_generation(source, state, gateway, now):
+    epoch = state.execute('SELECT generation,audit_id,scanned FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
+    if not epoch or epoch[2]:
+        return
+    ids = [r[0] for r in source_query(source, 'SELECT id FROM payments WHERE id>? ORDER BY id LIMIT ?', (epoch[1], AUDIT_PAYMENT_BATCH)).fetchall()]
+    rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
+    with state:
+        enqueue(state, rows, gateway, now)
+        state.execute('UPDATE gateway_epochs SET audit_id=?,scanned=? WHERE gateway=? AND generation=?',
+                      (ids[-1] if ids else epoch[1], int(len(ids)<AUDIT_PAYMENT_BATCH), gateway, epoch[0]))
 
 
 def sync_once(database, state, gateway, sender=cancel, now=None):
@@ -186,6 +216,7 @@ def sync_once(database, state, gateway, sender=cancel, now=None):
         state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
     source = source_connect(database)
     try:
+        replay_generation(source, state, gateway, now)
         discover(source, state, gateway, now)
         due = state.execute("SELECT payment_id,trade_id,order_id,attempts FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry') AND next_at<=? ORDER BY next_at,updated_at,payment_id LIMIT ?",
                             (gateway, now, SEND_BATCH)).fetchall()
@@ -216,6 +247,9 @@ def sync_once(database, state, gateway, sender=cancel, now=None):
         with state:
             state.execute('UPDATE cancellations SET outcome=?,attempts=?,next_at=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?',
                           (outcome, attempts, next_at, now) + key)
+        if outcome in ('closed', 'missing_gateway', 'paid_conflict'):
+            with state:
+                state.execute("INSERT OR REPLACE INTO epoch_receipts SELECT ?,?,?,?,generation,?,? FROM gateway_epochs WHERE gateway=?", key+(outcome,now,gateway))
         if outcome != 'retry':
             logging.log(logging.ERROR if outcome == 'paid_conflict' else logging.INFO,
                         'payment_id=%s outcome=%s', payment_id, outcome)
@@ -225,7 +259,7 @@ def sync_once(database, state, gateway, sender=cancel, now=None):
     return processed
 
 
-def report_health(database, state, gateway, healthy):
+def gateway_token(database, gateway):
     source = source_connect(database)
     try:
         configs = source.execute("SELECT config_json FROM payment_channels WHERE provider_type='bepusdt'").fetchall()
@@ -235,24 +269,96 @@ def report_health(database, state, gateway, healthy):
             if str(cfg.get('gateway_url', '')).rstrip('/') == gateway and cfg.get('auth_token'):
                 tokens.add(cfg['auth_token'])
         if len(tokens) != 1:
-            raise ValueError('one consistent gateway token is required for health reports')
+            raise ValueError('one consistent gateway token is required for signed reports')
+        return next(iter(tokens))
     finally:
         source.close()
-    counts = dict(state.execute("SELECT outcome,count(*) FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry','paid_conflict') GROUP BY outcome", (gateway,)))
-    conflicts = counts.get('paid_conflict', 0)
-    failures = counts.get('retry', 0)
-    pending = counts.get('queued', 0) + failures
-    pending += state.execute('SELECT count(*) FROM discovery_orders WHERE gateway=?', (gateway,)).fetchone()[0]
-    body = {'source': 'postgresql' if str(database).startswith(('postgresql://', 'postgres://')) else 'sqlite',
-            'timestamp': str(int(time.time())), 'healthy': 'true' if healthy else 'false',
-            'pending': str(pending), 'failures': str(failures), 'conflicts': str(conflicts)}
-    token = next(iter(tokens))
+
+
+def signed_post(gateway, path, body, token):
+    body = dict(body)
     body['signature'] = hashlib.md5(('&'.join(k+'='+body[k] for k in sorted(body)) + token).encode()).hexdigest()
-    req = urllib.request.Request(gateway+'/api/v1/order/cancel-sync-status', data=json.dumps(body).encode(),
+    req = urllib.request.Request(gateway+path, data=json.dumps(body).encode(),
                                  headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 LitePay-CancelSync/1.0'})
     with urllib.request.build_opener(NoRedirect).open(req, timeout=3) as response:
-        if json.loads(response.read(4096)).get('status_code') != 200:
-            raise ValueError('health report rejected')
+        result = json.loads(response.read(4096))
+        if result.get('status_code') != 200:
+            raise ValueError('signed request rejected')
+        return result
+
+
+def check_generation(database, state, gateway):
+    result = signed_post(gateway, '/api/v1/order/cancel-sync-generation', {'timestamp': str(int(time.time()))}, gateway_token(database, gateway))
+    data = result.get('data') or {}
+    generation = data.get('generation', '')
+    if len(generation) != 32 or any(c not in '0123456789abcdef' for c in generation):
+        raise ValueError('invalid recovery generation')
+    with state:
+        state.execute("INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?) ON CONFLICT(gateway) DO UPDATE SET generation=excluded.generation,audit_id=0,scanned=0 WHERE gateway_epochs.generation<>excluded.generation", (gateway, generation))
+
+
+def report_health(database, state, gateway, healthy):
+    status = queue_status(state, gateway)
+    body = {'source': 'postgresql' if str(database).startswith(('postgresql://', 'postgres://')) else 'sqlite',
+            'timestamp': str(int(time.time())), 'healthy': 'true' if healthy and status['failures']==0 else 'false',
+            'pending': str(status['pending']), 'failures': str(status['failures']), 'conflicts': str(status['conflicts']),
+            'missing': str(status['missing']), 'generation': status['generation'], 'replay_complete': 'true' if status['replay_complete'] else 'false'}
+    return signed_post(gateway, '/api/v1/order/cancel-sync-status', body, gateway_token(database, gateway))
+
+
+def review_missing(database, state, gateway, trade_id, reason):
+    import getpass
+    if not reason.strip() or len(reason)>300:
+        raise ValueError('a review reason (1-300 characters) is required')
+    rows = state.execute("SELECT payment_id,trade_id,order_id FROM cancellations WHERE gateway=? AND trade_id=? AND outcome='missing_gateway'", (gateway,trade_id)).fetchall()
+    if len(rows)!=1:
+        raise ValueError('exactly one unresolved missing task must match')
+    pid,tid,oid=rows[0]
+    source=source_connect(database)
+    try:
+        valid=list(eligible(payment_rows(source,'p.id=?',(pid,)),gateway))
+    finally:
+        source.close()
+    if len(valid)!=1 or valid[0][:3]!=(pid,tid,oid):
+        raise ValueError('merchant cancellation no longer matches; recheck merchant state')
+    result=cancel(gateway,tid,oid,valid[0][3])
+    if result not in ('missing_gateway','closed'):
+        raise ValueError('gateway result changed; recheck payment before review')
+    outcome='reviewed_missing' if result=='missing_gateway' else 'closed'
+    epoch=state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?',(gateway,)).fetchone()
+    generation=epoch[0] if epoch else ''
+    with state:
+        state.execute('INSERT INTO missing_reviews(gateway,payment_id,trade_id,order_id,generation,operator,reason,created_at) VALUES(?,?,?,?,?,?,?,?)',(gateway,pid,tid,oid,generation,getpass.getuser(),reason.strip(),time.time()))
+        state.execute("UPDATE cancellations SET outcome=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",(outcome,time.time(),gateway,pid,tid,oid))
+        if generation:
+            state.execute("INSERT OR REPLACE INTO epoch_receipts VALUES(?,?,?,?,?,?,?)",(gateway,pid,tid,oid,generation,outcome,time.time()))
+
+
+def run_cycle(database, state, gateway, report=False, now=None):
+    healthy=True;reported=True
+    try:
+        if report:
+            check_generation(database,state,gateway)
+        sync_once(database,state,gateway,now=now)
+    except Exception as error:
+        healthy=False
+        logging.error('sync failed error_type=%s',type(error).__name__)
+    status=queue_status(state,gateway)
+    now=time.time() if now is None else now
+
+    if report:
+        try:
+            report_health(database,state,gateway,healthy)
+        except Exception as error:
+            reported=False
+            logging.error('health report failed error_type=%s',type(error).__name__)
+    success=healthy and reported and status['failures']==0 and status['conflicts']==0 and status['pending']==0 and (not report or status['replay_complete'])
+    state.execute('CREATE TABLE IF NOT EXISTS health(id INTEGER PRIMARY KEY,last_attempt REAL,last_success REAL)')
+    with state:
+        state.execute('INSERT INTO health VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET last_attempt=excluded.last_attempt,last_success=CASE WHEN excluded.last_success>0 THEN excluded.last_success ELSE last_success END',(now,now if success else 0))
+    if healthy:
+        systemd_notify('WATCHDOG=1')
+    return success
 
 
 def systemd_notify(message):
@@ -269,6 +375,7 @@ def systemd_notify(message):
 
 
 def main():
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     sources = parser.add_mutually_exclusive_group(required=True)
     sources.add_argument('--database', help='SQLite database path')
@@ -276,6 +383,8 @@ def main():
     parser.add_argument('--state', required=True)
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--review-missing', help='Gateway trade ID requiring audited operator review')
+    parser.add_argument('--reason', default='', help='Required factual review reason')
     parser.add_argument('--report-health', action='store_true')
     parser.add_argument('--rescan-history', action='store_true', help='Restart bounded historical discovery without clearing deduplication or retries')
     args = parser.parse_args()
@@ -295,29 +404,19 @@ def main():
         with state:
             state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
             state.execute("UPDATE discovery SET canceled_at='',order_id=0,audit_payment_id=0,next_audit=0 WHERE gateway=?", (gateway,))
-    next_report = 0
+    if args.review_missing:
+        try:
+            review_missing(database,state,gateway,args.review_missing,args.reason)
+        except Exception as error:
+            parser.exit(1,'Missing-order review failed: '+type(error).__name__+'; verify merchant cancellation and gateway response.\n')
+        return
     systemd_notify('READY=1')
     while True:
-        healthy = True
-        try:
-            sync_once(database, state, gateway)
-        except Exception as error:
-            healthy = False
-            logging.error('sync failed error_type=%s', type(error).__name__)
-        now = time.time()
-        state.execute('INSERT INTO health VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET last_attempt=excluded.last_attempt,last_success=CASE WHEN excluded.last_success>0 THEN excluded.last_success ELSE last_success END', (now, now if healthy else 0))
-        state.commit()
-        if args.report_health and now >= next_report:
-            try:
-                report_health(database, state, gateway, healthy)
-                next_report = now + 15
-            except Exception as error:
-                logging.error('health report failed error_type=%s', type(error).__name__)
-        if healthy:
-            systemd_notify('WATCHDOG=1')
+        success=run_cycle(database,state,gateway,args.report_health)
         if args.once:
-            raise SystemExit(0 if healthy else 1)
+            raise SystemExit(0 if success else 1)
         time.sleep(5)
+
 
 
 if __name__ == '__main__':

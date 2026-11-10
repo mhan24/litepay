@@ -120,6 +120,12 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	lock.Lock()
 	defer lock.Unlock()
 	cfg := p.cfg.Get()
+	if cfg.Server.CancelSyncRequired {
+		ready, err := p.st.RecoveryReady(ctx)
+		if err != nil || !ready {
+			return err
+		}
+	}
 	if !cfg.ProviderEnabled(provider) {
 		return nil
 	}
@@ -285,6 +291,12 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if p.cfg.Get().Server.CancelSyncRequired {
+				ready, err := p.st.RecoveryReady(ctx)
+				if err != nil || !ready {
+					continue
+				}
+			}
 			if err := p.st.Expire(ctx, p.cfg.Get().Order.SlotGraceSeconds); err != nil && ctx.Err() == nil {
 				slog.Error("订单过期状态写入失败")
 			}

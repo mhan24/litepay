@@ -182,11 +182,40 @@ class FairQueueDBTest(QueueDBTest):
     def test_fair_scheduler_progress_is_backed_up_and_validated(self):
         self.db.execute('UPDATE scan_cursors SET historical_turn=3')
         self.db.commit()
-        self.assertEqual(tool.drill(self.path)['schema'], 13)
+        self.assertEqual(tool.drill(self.path)['schema'], self.expected_schema)
         self.db.execute('UPDATE scan_cursors SET historical_turn=8')
         self.db.commit()
         with self.assertRaises(ValueError):
             tool.validate(self.path)
+
+
+class RecoveryDBTest(FairQueueDBTest):
+    expected_schema = 14
+
+    def setUp(self):
+        super().setUp()
+        self.db.executescript("""PRAGMA user_version=14;
+            ALTER TABLE orders ADD COLUMN trade_no TEXT;
+            ALTER TABLE orders ADD COLUMN out_trade_no TEXT;
+            CREATE TABLE gateway_recoveries(id INTEGER PRIMARY KEY,generation TEXT,acknowledged INTEGER,reason TEXT,created_at TEXT);
+            INSERT INTO gateway_recoveries VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1,'initial','2026-11-10');
+            ALTER TABLE integration_healths ADD COLUMN missing INTEGER DEFAULT 0;
+            CREATE TABLE cancellation_intents(out_trade_no TEXT PRIMARY KEY,trade_no TEXT,created_at TEXT);
+            INSERT INTO cancellation_intents VALUES('canceled-mall','canceled-gateway','2026-11-10');
+        """)
+        self.db.commit()
+
+    def test_wal_consistent_snapshot_and_restore_preserve_recovery_state(self):
+        backup, restored = self.root / 'backup.db', self.root / 'restored.db'
+        tool.snapshot(self.path, backup)
+        tool.restore(backup, restored)
+        self.assertEqual(tool.fingerprint(backup,exclude_recovery=True),tool.fingerprint(restored,exclude_recovery=True))
+        with sqlite3.connect(restored) as recovered:
+            generation,acknowledged=recovered.execute('SELECT generation,acknowledged FROM gateway_recoveries').fetchone()
+            self.assertNotEqual(generation,'a'*32)
+            self.assertEqual(acknowledged,0)
+            self.assertEqual(recovered.execute('SELECT count(*) FROM cancellation_intents').fetchone()[0],1)
+        self.assertEqual(tool.drill(self.path)['drill'],'passed')
 
 
 if __name__ == '__main__':

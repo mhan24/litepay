@@ -301,6 +301,10 @@ func currencyAllowedByLimit(limit string, currency string) bool {
 }
 
 func (h *Handlers) CashierPage(c *gin.Context) {
+	if h.recoveryBlocked(c) {
+		h.renderError(c, 503, "收款暂时暂停", "正在核对恢复后的商城取消记录，请稍后刷新，勿继续转账。")
+		return
+	}
 	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Param("trade_no"))
 	if err != nil {
 		h.renderError(c, 404, "未找到订单", "请返回商户页面核对订单。")
@@ -313,6 +317,10 @@ func (h *Handlers) CashierPage(c *gin.Context) {
 	h.renderCashier(c, o)
 }
 func (h *Handlers) SelectPayment(c *gin.Context) {
+	if h.recoveryBlocked(c) {
+		c.JSON(503, gin.H{"code": 1, "msg": "恢复核对尚未完成，暂不接受付款"})
+		return
+	}
 	h.cfg.WithPaymentConfig(func() {
 		cfg := h.C()
 		no := c.PostForm("trade_no")
@@ -373,7 +381,11 @@ func (h *Handlers) OrderStatus(c *gin.Context) {
 	if err = h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil {
 		ack = cb.DeliveredAt != nil
 	}
-	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": o.PaymentPhase(time.Now()), "accepting_payment": time.Now().Before(o.ExpiresAt) && (o.Status == model.Pending || o.Status == model.Ready), "merchant_review_required": cb.State == "merchant_review"}})
+	phase := o.PaymentPhase(time.Now())
+	if h.recoveryBlocked(c) && (o.Status == model.Pending || o.Status == model.Ready) {
+		phase = "settling"
+	}
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": !h.recoveryBlocked(c) && time.Now().Before(o.ExpiresAt) && (o.Status == model.Pending || o.Status == model.Ready), "merchant_review_required": cb.State == "merchant_review"}})
 }
 func (h *Handlers) Health(c *gin.Context) {
 	if err := h.st.Ping(c.Request.Context()); err != nil {
@@ -390,7 +402,7 @@ func (h *Handlers) Ready(c *gin.Context) {
 	cfg := h.C()
 	if cfg.Server.CancelSyncRequired {
 		health, err := h.st.IntegrationHealth(ctx)
-		if err != nil || !health.Healthy || health.Failures > 0 || time.Since(health.ReceivedAt) > 45*time.Second || time.Since(health.LastSuccessAt) > time.Minute {
+		if err != nil || h.recoveryBlocked(c) || !health.Healthy || health.Failures > 0 || health.Missing > 0 || time.Since(health.ReceivedAt) > 45*time.Second || time.Since(health.LastSuccessAt) > time.Minute {
 			c.JSON(503, gin.H{"ready": false, "reason": "商城取消同步异常或心跳过期"})
 			return
 		}

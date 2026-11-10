@@ -190,6 +190,8 @@ type SigningKey struct {
 }
 
 type IntegrationHealth struct {
+	Generation    string `gorm:"not null;default:''"`
+	Missing       int64  `gorm:"not null;default:0"`
 	Name          string `gorm:"primaryKey"`
 	Source        string
 	ReportedAt    int64
@@ -199,6 +201,21 @@ type IntegrationHealth struct {
 	Pending       int64
 	Failures      int64
 	Conflicts     int64
+}
+
+type GatewayRecovery struct {
+	ID           uint   `gorm:"primaryKey"`
+	Generation   string `gorm:"not null"`
+	Acknowledged bool   `gorm:"not null;default:false"`
+	Reason       string
+	CreatedAt    time.Time
+}
+
+// An authenticated merchant cancellation also fences a delayed future creation.
+type CancellationIntent struct {
+	OutTradeNo string `gorm:"primaryKey"`
+	TradeNo    string `gorm:"uniqueIndex"`
+	CreatedAt  time.Time
 }
 
 type PaymentRecovery struct {

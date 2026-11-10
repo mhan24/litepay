@@ -37,6 +37,12 @@ func (n *Notifier) UseTestTransport() {
 }
 func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	cfg := n.cfg.Get()
+	if cfg.Server.CancelSyncRequired {
+		ready, err := n.st.RecoveryReady(ctx)
+		if err != nil || !ready {
+			return false, err
+		}
+	}
 	task, o, err := n.st.ReserveCallback(ctx, cfg.Notify.MaxAttempts, cfg.Notify.TimeoutSeconds)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil

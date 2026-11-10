@@ -111,6 +111,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	r.POST("/api/v1/order/create-order", h.BEpusdtCreateOrder)
 	r.POST("/api/v1/order/cancel-transaction", h.BEpusdtCancelOrder)
 	r.POST("/api/v1/order/cancel-sync-status", h.CancelSyncHeartbeat)
+	r.POST("/api/v1/order/cancel-sync-generation", h.CancelSyncGeneration)
 
 	// ---- 收银台 ----
 	r.GET("/pay/:trade_no", h.LimitPublicRead, h.CashierPage)

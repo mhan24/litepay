@@ -71,6 +71,7 @@ for i,no in enumerate(['bridge-cancel','bridge-paid'],1):
  db.execute('INSERT INTO orders VALUES(?,?,NULL,?,NULL)',(i,'canceled','2026-11-10'))
  db.execute('INSERT INTO payments VALUES(?,?,1,?,?,NULL,NULL,?,?,?)',(i,i,'bepusdt','expired',no,no,gateway+'/pay/'+no))
 db.commit();state=s.journal(str(path.parent/'journal.db'))
+s.check_generation(path,state,gateway)
 assert s.sync_once(path,state,gateway)==2
 assert dict(state.execute('SELECT trade_id,outcome FROM cancellations'))=={'bridge-cancel':'closed','bridge-paid':'paid_conflict'}
 assert s.sync_once(path,state,gateway)==0

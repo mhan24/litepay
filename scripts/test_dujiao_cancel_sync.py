@@ -285,6 +285,111 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed', now=40), 1)
         self.assertEqual(self.state.execute('SELECT outcome FROM cancellations').fetchone()[0], 'closed')
 
+    def test_three_missing_results_remain_an_unhealthy_persistent_exception(self):
+        self.add(1)
+        for at in (10,15,25):
+            sync.sync_once(self.path,self.state,self.gateway,lambda *a:'missing_gateway',now=at)
+        status=sync.queue_status(self.state,self.gateway)
+        self.assertEqual(status['missing'],1)
+        self.assertEqual(status['failures'],1)
+        with patch.object(sync,'signed_post',return_value={'status_code':200}) as post:
+            sync.report_health(self.path,self.state,self.gateway,True)
+        body=post.call_args[0][2]
+        self.assertEqual(body['healthy'],'false')
+        self.assertEqual(body['missing'],'1')
+        self.assertEqual(body['failures'],'1')
+
+    def test_gateway_generation_replays_closed_receipts_and_survives_restart(self):
+        self.add(1)
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:'closed',now=10)
+        self.state.execute("INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)",(self.gateway,'a'*32));self.state.commit()
+        calls=[]
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:calls.append(a[1]) or 'closed',now=15)
+        self.assertEqual(calls,['trade1'])
+        self.assertTrue(sync.queue_status(self.state,self.gateway)['replay_complete'])
+        with patch.object(sync,'signed_post',return_value={'status_code':200,'data':{'generation':'b'*32}}):
+            sync.check_generation(self.path,self.state,self.gateway)
+        self.assertFalse(sync.queue_status(self.state,self.gateway)['replay_complete'])
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:calls.append(a[1]) or 'closed',now=20)
+        self.assertEqual(calls,['trade1','trade1'])
+        self.assertTrue(sync.queue_status(self.state,self.gateway)['replay_complete'])
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:self.fail('duplicate current generation'),now=25)
+        self.assertEqual(self.state.execute('SELECT count(*) FROM epoch_receipts').fetchone()[0],2)
+
+    def test_once_cycle_returns_failure_for_all_timeouts_and_reporting_failure(self):
+        self.add(1)
+        original=sync.sync_once
+        def timeout_cycle(database,state,gateway,now=None):
+            return original(database,state,gateway,lambda *a:(_ for _ in ()).throw(TimeoutError()),now=now)
+        with patch.object(sync,'sync_once',side_effect=timeout_cycle):
+            self.assertFalse(sync.run_cycle(self.path,self.state,self.gateway,False,now=10))
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['failures'],1)
+        with patch.object(sync,'check_generation'),patch.object(sync,'report_health',side_effect=TimeoutError()):
+            self.assertFalse(sync.run_cycle(self.path,self.state,self.gateway,True,now=11))
+
+    def test_once_cli_uses_cycle_exit_status(self):
+        args=['sync','--database',str(self.path),'--state',str(Path(self.tmp.name)/'cli.db'),'--gateway',self.gateway,'--once','--report-health']
+        with patch.object(sys,'argv',args),patch.object(sync,'run_cycle',return_value=False):
+            with self.assertRaises(SystemExit) as status:
+                sync.main()
+        self.assertEqual(status.exception.code,1)
+        with patch.object(sys,'argv',args),patch.object(sync,'run_cycle',return_value=True):
+            with self.assertRaises(SystemExit) as status:
+                sync.main()
+        self.assertEqual(status.exception.code,0)
+
+    def test_once_cli_actual_timeout_writes_retry_and_exits_nonzero(self):
+        self.add(1)
+        path=Path(self.tmp.name)/'timeout-cli.db'
+        args=['sync','--database',str(self.path),'--state',str(path),'--gateway',self.gateway,'--once']
+        opener=Mock();opener.open.side_effect=TimeoutError()
+        with patch.object(sys,'argv',args),patch.object(sync.urllib.request,'build_opener',return_value=opener):
+            with self.assertRaises(SystemExit) as status:
+                sync.main()
+        self.assertEqual(status.exception.code,1)
+        with sqlite3.connect(path) as state:
+            self.assertEqual(state.execute('SELECT outcome FROM cancellations').fetchone()[0],'retry')
+
+    def test_once_cli_actual_health_report_timeout_exits_nonzero(self):
+        self.add(1)
+        path=Path(self.tmp.name)/'report-cli.db'
+        args=['sync','--database',str(self.path),'--state',str(path),'--gateway',self.gateway,'--once','--report-health']
+        class Response:
+            def __init__(self,data):self.data=data
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def read(self,limit):return json.dumps(self.data).encode()
+        class Opener:
+            def open(self,request,timeout):
+                if request.full_url.endswith('/cancel-sync-generation'):
+                    return Response({'status_code':200,'data':{'generation':'a'*32}})
+                if request.full_url.endswith('/cancel-transaction'):
+                    body=json.loads(request.data)
+                    return Response({'status_code':200,'data':{'trade_id':body['trade_id'],'order_id':body['order_id']}})
+                raise TimeoutError()
+        with patch.object(sys,'argv',args),patch.object(sync.urllib.request,'build_opener',return_value=Opener()):
+            with self.assertRaises(SystemExit) as status:
+                sync.main()
+        self.assertEqual(status.exception.code,1)
+        with sqlite3.connect(path) as state:
+            self.assertEqual(state.execute('SELECT outcome FROM cancellations').fetchone()[0],'closed')
+
+    def test_manual_missing_review_is_audited_and_invalidated_by_new_generation(self):
+        self.add(1)
+        self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)',(self.gateway,'a'*32));self.state.commit()
+        for at in (10,15,25):sync.sync_once(self.path,self.state,self.gateway,lambda *a:'missing_gateway',now=at)
+        with self.assertRaises(ValueError):sync.review_missing(self.path,self.state,self.gateway,'trade1','')
+        with patch.object(sync,'cancel',return_value='missing_gateway'):
+            sync.review_missing(self.path,self.state,self.gateway,'trade1','Verified canceled merchant order and absent gateway reference')
+        self.assertEqual(self.state.execute('SELECT count(*) FROM missing_reviews').fetchone()[0],1)
+        self.assertEqual(self.state.execute('SELECT outcome FROM cancellations').fetchone()[0],'reviewed_missing')
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['missing'],0)
+        with patch.object(sync,'signed_post',return_value={'status_code':200,'data':{'generation':'b'*32}}):
+            sync.check_generation(self.path,self.state,self.gateway)
+        calls=[]
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:calls.append(a[1]) or 'closed',now=30)
+        self.assertEqual(calls,['trade1'])
+
 
 if __name__ == '__main__':
     unittest.main()
