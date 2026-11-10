@@ -31,7 +31,7 @@ def validate(path):
         if db.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('foreign key check failed')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (8, 9, 10, 11, 12):
+        if version not in (8, 9, 10, 11, 12, 13):
             raise ValueError('unsupported payment schema')
         tables = BASE_TABLES + (NEW_TABLES if version >= 9 else ())
         tables += ATTEMPT_TABLES if version >= 10 else ()
@@ -72,6 +72,8 @@ def validate(path):
                 "SELECT count(*) FROM history_coverages c LEFT JOIN historical_scans h ON h.id=c.scan_id WHERE h.id IS NULL OR h.automatic<>1 OR c.provider<>h.provider OR c.receiver<>h.receiver OR c.\"from\"<h.\"from\" OR c.\"to\">h.\"to\" OR c.\"from\">=c.\"to\" OR c.observed_at IS NULL OR c.observed_at<h.created_at",
                 "SELECT count(*) FROM integration_healths WHERE name<>'dujiao_cancel_sync' OR pending<0 OR failures<0 OR conflicts<0 OR reported_at<0",
             ]
+        if version >= 13:
+            problems += ["SELECT count(*) FROM scan_cursors WHERE historical_turn IS NULL OR historical_turn<0 OR historical_turn>7"]
         if any(db.execute(sql).fetchone()[0] for sql in problems):
             raise ValueError('payment evidence, reservation, or recovery invariants failed')
         for (payload,) in db.execute('SELECT payload FROM settings'):

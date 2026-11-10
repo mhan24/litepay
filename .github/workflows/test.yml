@@ -18,3 +18,7 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Expiry capacity benchmarks
         run: go test ./internal/store -run '^$' -bench 'BenchmarkExpire' -benchtime=1x
+      - name: Production image startup contract
+        run: |
+          docker build -t litepay:ci .
+          sh scripts/test_container.sh litepay:ci

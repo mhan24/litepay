@@ -49,7 +49,7 @@ docker build -t litepay:dev .
 
 小额真实收款的人工验收步骤见 `docs/acceptance-real-payment.md`；该清单目前只记录离线与只读已验证项，真实资金闭环尚未执行。
 
-Dockerfile 以非 root 用户运行。自行挂载配置及可写数据目录。仓库提供 `scripts/payment_db.py` 用于一致性备份、完整性检查、恢复与离线演练；生产部署和回滚按 [支付运维](docs/operations.md) 操作。模拟测试通过不能替代真实交易所字段、只读权限、到账延迟及商城幂等交付的实际验收。
+Dockerfile 以非 root 用户运行，内置 `config.production.yaml` 强制生产校验；未填写 HTTPS `base_url` 和商户 `notify_hosts` 时拒绝启动。将配置完成的文件只读挂载至 `/app/config.yaml`，数据目录挂载至 `/app/data`。`config.example.yaml` 仅用于显式的本地开发。仓库提供 `scripts/payment_db.py` 用于一致性备份、完整性检查、恢复与离线演练；生产部署和回滚按 [支付运维](docs/operations.md) 操作。模拟测试通过不能替代真实交易所字段、只读权限、到账延迟及商城幂等交付的实际验收。
 
 ## 平台配置与关闭订单
 

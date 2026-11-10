@@ -32,8 +32,24 @@ def source_connect(database):
     return sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
 
 
-def candidates(source, gateway):
-    rows = source.execute("""
+# Source reads are bounded; the journal commits discoveries and cursors together.
+RECENT_ORDER_BATCH = 200
+DISCOVERY_ORDER_BATCH = 50
+ORDER_PAYMENT_BATCH = 50
+AUDIT_PAYMENT_BATCH = 500
+AUDIT_INTERVAL = 30
+SEND_BATCH = 50
+
+
+def source_query(source, sql, params=()):
+    # psycopg uses %s, sqlite uses ?. SQL text never includes user-provided values.
+    if not isinstance(source, sqlite3.Connection):
+        sql = sql.replace('?', '%s')
+    return source.execute(sql, params)
+
+
+def payment_rows(source, predicate, params, limit=None):
+    sql = """
         SELECT p.id, p.provider_ref, p.gateway_order_no, p.pay_url, c.config_json
         FROM payments p JOIN orders o ON o.id = p.order_id
         JOIN payment_channels c ON c.id = p.channel_id
@@ -41,18 +57,86 @@ def candidates(source, gateway):
           AND o.canceled_at IS NOT NULL AND o.deleted_at IS NULL
           AND p.provider_type = 'bepusdt' AND p.status IN ('pending', 'expired', 'failed')
           AND p.paid_at IS NULL AND p.deleted_at IS NULL
-          AND c.provider_type = 'bepusdt'
-        ORDER BY p.id DESC
-    """).fetchall()
+          AND c.provider_type = 'bepusdt' AND """ + predicate + ' ORDER BY p.id'
+    if limit is not None:
+        sql += ' LIMIT ?'
+        params = tuple(params) + (limit,)
+    return source_query(source, sql, params).fetchall()
+
+
+def eligible(rows, gateway):
     for payment_id, trade_id, order_id, pay_url, raw in rows:
         cfg = raw if isinstance(raw, dict) else json.loads(raw or '{}')
         if str(cfg.get('gateway_url', '')).rstrip('/') != gateway:
             continue
-        # A channel can be repointed. Never send its historical orders to the new host.
         if urllib.parse.urlsplit(pay_url or '').netloc != urllib.parse.urlsplit(gateway).netloc:
             continue
         if trade_id and order_id and cfg.get('auth_token'):
             yield payment_id, trade_id, order_id, cfg['auth_token']
+
+
+def enqueue(state, rows, gateway, now):
+    for payment_id, trade_id, order_id, _ in eligible(rows, gateway):
+        # Keys contain identities only. API credentials are fetched again before sending.
+        state.execute("INSERT OR IGNORE INTO cancellations VALUES(?,?,?,?,'queued',0,?,?)",
+                      (gateway, payment_id, trade_id, order_id, now, now))
+
+
+def discover(source, state, gateway, now):
+    progress = state.execute('SELECT canceled_at,order_id,audit_payment_id,max_payment_id,next_audit FROM discovery WHERE gateway=?', (gateway,)).fetchone()
+    stamp, order_id, audit_id, maximum, next_audit = progress
+    current_max = source_query(source, 'SELECT COALESCE(MAX(id),0) FROM payments').fetchone()[0]
+    if current_max < maximum:
+        # A restored or truncated source can move behind persisted IDs. Retained terminal
+        # journal entries deduplicate rediscovery; every queued send is revalidated.
+        stamp, order_id, audit_id, next_audit = '', 0, 0, 0
+    if stamp:
+        # Separate equality and greater-than seeks: SQLite can otherwise scan every
+        # row sharing a cancellation timestamp even with a composite index.
+        orders = source_query(source, 'SELECT canceled_at,id FROM orders WHERE canceled_at=? AND id>? ORDER BY id LIMIT ?',
+                              (stamp, order_id, RECENT_ORDER_BATCH)).fetchall()
+        if len(orders) < RECENT_ORDER_BATCH:
+            orders += source_query(source, 'SELECT canceled_at,id FROM orders WHERE canceled_at>? ORDER BY canceled_at,id LIMIT ?',
+                                   (stamp, RECENT_ORDER_BATCH-len(orders))).fetchall()
+    else:
+        orders = source_query(source, 'SELECT canceled_at,id FROM orders WHERE canceled_at IS NOT NULL ORDER BY canceled_at,id LIMIT ?',
+                              (RECENT_ORDER_BATCH,)).fetchall()
+
+    with state:
+        for at, oid in orders:
+            state.execute('INSERT OR IGNORE INTO discovery_orders VALUES(?,?,0)', (gateway, oid))
+        if orders:
+            stamp, order_id = str(orders[-1][0]), orders[-1][1]
+        state.execute('UPDATE discovery SET canceled_at=?,order_id=?,max_payment_id=? WHERE gateway=?',
+                      (stamp, order_id, current_max, gateway))
+        if current_max < maximum:
+            state.execute('UPDATE discovery SET audit_payment_id=0,next_audit=0 WHERE gateway=?', (gateway,))
+    # Recently canceled orders expand into payment identities in bounded, resumable pages.
+    tasks = state.execute('SELECT order_id,after_payment_id FROM discovery_orders WHERE gateway=? ORDER BY order_id LIMIT ?',
+                          (gateway, DISCOVERY_ORDER_BATCH)).fetchall()
+    for oid, after in tasks:
+        ids = [r[0] for r in source_query(source, 'SELECT id FROM payments WHERE order_id=? AND id>? ORDER BY id LIMIT ?',
+                                        (oid, after, ORDER_PAYMENT_BATCH)).fetchall()]
+        rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
+        with state:
+            enqueue(state, rows, gateway, now)
+            if len(ids) < ORDER_PAYMENT_BATCH:
+                state.execute('DELETE FROM discovery_orders WHERE gateway=? AND order_id=?', (gateway, oid))
+            else:
+                state.execute('UPDATE discovery_orders SET after_payment_id=? WHERE gateway=? AND order_id=?', (ids[-1], gateway, oid))
+    # A slower cyclic sweep catches backdated cancellations, late payment metadata and
+    # restored snapshots even when neither cancellation timestamps nor IDs advance.
+    if now >= next_audit:
+        ids = [r[0] for r in source_query(source, 'SELECT id FROM payments WHERE id>? ORDER BY id LIMIT ?',
+                                        (audit_id, AUDIT_PAYMENT_BATCH)).fetchall()]
+        rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
+        with state:
+            enqueue(state, rows, gateway, now)
+            audit_id = ids[-1] if len(ids) == AUDIT_PAYMENT_BATCH else 0
+            state.execute('UPDATE discovery SET audit_payment_id=?,next_audit=? WHERE gateway=?',
+                          (audit_id, now+AUDIT_INTERVAL, gateway))
+
+
 
 
 def cancel(gateway, trade_id, order_id, token):
@@ -85,32 +169,42 @@ def journal(path):
         order_id TEXT NOT NULL, outcome TEXT NOT NULL, attempts INTEGER NOT NULL,
         next_at REAL NOT NULL, updated_at REAL NOT NULL,
         PRIMARY KEY(gateway, payment_id, trade_id, order_id))''')
+    db.executescript("""
+        CREATE INDEX IF NOT EXISTS cancellations_due ON cancellations(gateway,outcome,next_at,updated_at);
+        CREATE TABLE IF NOT EXISTS discovery(gateway TEXT PRIMARY KEY,canceled_at TEXT NOT NULL DEFAULT '',
+            order_id INTEGER NOT NULL DEFAULT 0,audit_payment_id INTEGER NOT NULL DEFAULT 0,
+            max_payment_id INTEGER NOT NULL DEFAULT 0,next_audit REAL NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS discovery_orders(gateway TEXT NOT NULL,order_id INTEGER NOT NULL,
+            after_payment_id INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(gateway,order_id));
+    """)
     return db
 
 
 def sync_once(database, state, gateway, sender=cancel, now=None):
     now = time.time() if now is None else now
-    # Finish the snapshot read before making external calls: never hold a DB lock over HTTP.
+    with state:
+        state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
     source = source_connect(database)
     try:
-        pending = list(candidates(source, gateway))
+        discover(source, state, gateway, now)
+        due = state.execute("SELECT payment_id,trade_id,order_id,attempts FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry') AND next_at<=? ORDER BY next_at,updated_at,payment_id LIMIT ?",
+                            (gateway, now, SEND_BATCH)).fetchall()
+        ids = [r[0] for r in due]
+        rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
+        active = {(gateway, pid, tid, oid): token for pid, tid, oid, token in eligible(rows, gateway)}
     finally:
         source.close()
-    active = {(gateway, row[0], row[1], row[2]) for row in pending}
-    for key in state.execute("SELECT gateway,payment_id,trade_id,order_id FROM cancellations WHERE gateway=? AND outcome='retry'", (gateway,)).fetchall():
-        if key not in active:
-            state.execute("UPDATE cancellations SET outcome='merchant_changed',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?", (now,) + key)
-    state.commit()
     processed = 0
     deadline = time.monotonic() + 5
-    for payment_id, trade_id, order_id, token in pending:
+    for payment_id, trade_id, order_id, previous_attempts in due:
         key = (gateway, payment_id, trade_id, order_id)
-        previous = state.execute('SELECT outcome,attempts,next_at FROM cancellations WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?', key).fetchone()
-        if previous and (previous[0] != 'retry' or previous[2] > now):
+        if key not in active:
+            with state:
+                state.execute("UPDATE cancellations SET outcome='merchant_changed',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?", (now,) + key)
             continue
-        attempts = previous[1] + 1 if previous else 1
+        attempts = previous_attempts + 1
         try:
-            outcome = sender(gateway, trade_id, order_id, token)
+            outcome = sender(gateway, trade_id, order_id, active[key])
             if outcome not in ('closed', 'paid_conflict', 'missing_gateway'):
                 raise ValueError('invalid cancellation outcome')
             if outcome == 'missing_gateway' and attempts < 3:
@@ -119,14 +213,14 @@ def sync_once(database, state, gateway, sender=cancel, now=None):
             outcome = 'retry'
             logging.warning('payment_id=%s cancellation retry error_type=%s', payment_id, type(error).__name__)
         next_at = now + min(300, 5 * 2 ** min(attempts - 1, 6))
-        state.execute('INSERT OR REPLACE INTO cancellations VALUES (?,?,?,?,?,?,?,?)',
-                      key + (outcome, attempts, next_at, now))
-        state.commit()
+        with state:
+            state.execute('UPDATE cancellations SET outcome=?,attempts=?,next_at=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?',
+                          (outcome, attempts, next_at, now) + key)
         if outcome != 'retry':
             logging.log(logging.ERROR if outcome == 'paid_conflict' else logging.INFO,
                         'payment_id=%s outcome=%s', payment_id, outcome)
         processed += 1
-        if processed >= 50 or time.monotonic() >= deadline:
+        if time.monotonic() >= deadline:
             break
     return processed
 
@@ -144,11 +238,14 @@ def report_health(database, state, gateway, healthy):
             raise ValueError('one consistent gateway token is required for health reports')
     finally:
         source.close()
-    pending, conflicts = state.execute("SELECT count(*),coalesce(sum(outcome='paid_conflict'),0) FROM cancellations WHERE gateway=? AND outcome IN ('retry','paid_conflict')", (gateway,)).fetchone()
-    failures = pending - conflicts
+    counts = dict(state.execute("SELECT outcome,count(*) FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry','paid_conflict') GROUP BY outcome", (gateway,)))
+    conflicts = counts.get('paid_conflict', 0)
+    failures = counts.get('retry', 0)
+    pending = counts.get('queued', 0) + failures
+    pending += state.execute('SELECT count(*) FROM discovery_orders WHERE gateway=?', (gateway,)).fetchone()[0]
     body = {'source': 'postgresql' if str(database).startswith(('postgresql://', 'postgres://')) else 'sqlite',
             'timestamp': str(int(time.time())), 'healthy': 'true' if healthy else 'false',
-            'pending': str(failures), 'failures': str(failures), 'conflicts': str(conflicts)}
+            'pending': str(pending), 'failures': str(failures), 'conflicts': str(conflicts)}
     token = next(iter(tokens))
     body['signature'] = hashlib.md5(('&'.join(k+'='+body[k] for k in sorted(body)) + token).encode()).hexdigest()
     req = urllib.request.Request(gateway+'/api/v1/order/cancel-sync-status', data=json.dumps(body).encode(),
@@ -180,6 +277,7 @@ def main():
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--report-health', action='store_true')
+    parser.add_argument('--rescan-history', action='store_true', help='Restart bounded historical discovery without clearing deduplication or retries')
     args = parser.parse_args()
     database = args.database or os.environ.get(args.database_url_env, '')
     if not database:
@@ -193,6 +291,10 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     state = journal(args.state)
     state.execute('CREATE TABLE IF NOT EXISTS health(id INTEGER PRIMARY KEY,last_attempt REAL,last_success REAL)')
+    if args.rescan_history:
+        with state:
+            state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
+            state.execute("UPDATE discovery SET canceled_at='',order_id=0,audit_payment_id=0,next_audit=0 WHERE gateway=?", (gateway,))
     next_report = 0
     systemd_notify('READY=1')
     while True:

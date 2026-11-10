@@ -174,3 +174,27 @@ func TestVersion11HistoricalCheckpointMigration(t *testing.T) {
 		t.Fatal(automatic, retained)
 	}
 }
+
+func TestVersion12FairSchedulingIsAdditive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "schema12.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	s.DB().Create(&model.ScanCursor{Provider: "binance", ScannedUntil: now, LastSuccess: now, LastError: "retained"})
+	if err = s.DB().Migrator().DropColumn(&model.ScanCursor{}, "historical_turn"); err != nil {
+		t.Fatal(err)
+	}
+	s.DB().Exec("PRAGMA user_version=12")
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cursor, err := s.Cursor(context.Background(), "binance")
+	if err != nil || cursor.HistoricalTurn != 0 || !cursor.ScannedUntil.Equal(now) || cursor.LastError != "retained" {
+		t.Fatal(cursor, err)
+	}
+}

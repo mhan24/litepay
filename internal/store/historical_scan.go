@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"litepay/internal/model"
 )
 
@@ -49,7 +50,27 @@ func (s *Store) RequestHistoricalScan(ctx context.Context, no, operator, reason 
 }
 func (s *Store) NextHistoricalScan(ctx context.Context, provider string) (model.HistoricalScan, error) {
 	var q model.HistoricalScan
-	err := s.db.WithContext(ctx).Where("provider = ? AND state = ?", provider, "pending").Order("priority DESC,updated_at,id").First(&q).Error
+	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		cursor := model.ScanCursor{Provider: provider}
+		if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&cursor).Error; err != nil {
+			return err
+		}
+		if err := db.First(&cursor, "provider=?", provider).Error; err != nil {
+			return err
+		}
+		// Slots bound waiting by dispatches, including failed or paginated work.
+		// The schedule survives restarts and is independent for each provider.
+		schedule := [8]int{2, 2, 2, 1, 2, 2, 2, 0}
+		preferred := schedule[cursor.HistoricalTurn%len(schedule)]
+		err := db.Where("provider=? AND state='pending' AND priority=?", provider, preferred).Order("updated_at,id").First(&q).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			err = db.Where("provider=? AND state='pending'", provider).Order("priority DESC,updated_at,id").First(&q).Error
+		}
+		if err != nil {
+			return err
+		}
+		return db.Model(&model.ScanCursor{}).Where("provider=?", provider).Update("historical_turn", (cursor.HistoricalTurn+1)%len(schedule)).Error
+	})
 	return q, err
 }
 func (s *Store) HistoricalScanFailure(ctx context.Context, q model.HistoricalScan, blocked bool) error {

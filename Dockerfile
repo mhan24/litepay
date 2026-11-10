@@ -15,8 +15,9 @@ RUN apk add --no-cache ca-certificates tzdata \
 ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=builder --chown=litepay:litepay --chmod=0755 /out/litepay /app/litepay
-COPY --chown=litepay:litepay --chmod=0400 config.example.yaml /app/config.yaml
+COPY --chown=litepay:litepay --chmod=0400 config.production.yaml /app/config.yaml
 VOLUME ["/app/data"]
 EXPOSE 8080
 USER 10001:10001
-ENTRYPOINT ["/bin/sh", "-c", "umask 077; exec /app/litepay -config /app/config.yaml"]
+ENTRYPOINT ["/app/litepay"]
+CMD ["-config", "/app/config.yaml"]

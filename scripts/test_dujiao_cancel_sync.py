@@ -23,9 +23,11 @@ class SyncTest(unittest.TestCase):
         self.gateway = 'https://pay.example.com'
         self.db = sqlite3.connect(self.path)
         self.addCleanup(self.db.close)
-        self.db.executescript('''CREATE TABLE orders(id,status,paid_at,canceled_at,deleted_at);
-            CREATE TABLE payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url);
-            CREATE TABLE payment_channels(id,provider_type,config_json);''')
+        self.db.executescript('''CREATE TABLE orders(id INTEGER PRIMARY KEY,status,paid_at,canceled_at,deleted_at);
+            CREATE TABLE payments(id INTEGER PRIMARY KEY,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url);
+            CREATE TABLE payment_channels(id INTEGER PRIMARY KEY,provider_type,config_json);
+            CREATE INDEX orders_cancel_cursor ON orders(canceled_at);
+            CREATE INDEX payments_order_cursor ON payments(order_id);''')
         self.db.execute('INSERT INTO payment_channels VALUES (1,?,?)', ('bepusdt', json.dumps({'gateway_url': self.gateway, 'auth_token': 'private'})))
         self.state = sync.journal(':memory:')
         self.addCleanup(self.state.close)
@@ -128,6 +130,147 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(body['source'], 'sqlite')
         self.assertEqual(body['failures'], '0')
         self.assertEqual(timeout, 3)
+
+    def test_persistent_discovery_and_retries_survive_stop_and_journal_restore(self):
+        self.add(1)
+        journal_path = Path(self.tmp.name) / 'journal.db'
+        state = sync.journal(journal_path)
+        try:
+            sync.sync_once(self.path, state, self.gateway, lambda *a: (_ for _ in ()).throw(TimeoutError()), now=10)
+            saved = sqlite3.connect(Path(self.tmp.name) / 'saved.db')
+            state.backup(saved)
+            saved.close()
+            state.close()
+            # Both the cancellation and its retry survive a restored journal snapshot.
+            self.add(2)
+            self.db.execute("UPDATE orders SET canceled_at='2026-01-02' WHERE id=2")
+            self.db.commit()
+            state = sync.journal(Path(self.tmp.name) / 'saved.db')
+            calls = []
+            sync.sync_once(self.path, state, self.gateway, lambda *a: calls.append(a[1]) or 'closed', now=15)
+            self.assertEqual(set(calls), {'trade1', 'trade2'})
+            self.assertEqual(state.execute("SELECT count(*) FROM cancellations WHERE outcome='closed'").fetchone()[0], 2)
+            state.close()
+            state = sync.journal(Path(self.tmp.name) / 'saved.db')
+            self.assertEqual(sync.sync_once(self.path, state, self.gateway, lambda *a: self.fail('duplicate'), now=20), 0)
+        finally:
+            state.close()
+
+    def test_backdated_cancellation_and_late_payment_metadata_are_discovered(self):
+        # Advance both the recent cursor and the historical sweep past a pending order.
+        self.add(1, order_status='pending_payment')
+        self.add(2)
+        self.db.execute("UPDATE orders SET canceled_at=NULL WHERE id=1")
+        self.db.execute("UPDATE orders SET canceled_at='2026-02-01' WHERE id=2")
+        self.db.commit()
+        sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed', now=10)
+        # Backfill an old cancellation with an older ID and timestamp, without touching
+        # payment IDs. It must be found by the durable cyclic sweep.
+        self.db.execute("UPDATE orders SET status='canceled',canceled_at='2025-01-01' WHERE id=1")
+        self.db.execute("UPDATE payments SET provider_ref='' WHERE id=1")
+        self.db.commit()
+        self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed', now=40), 0)
+        self.db.execute("UPDATE payments SET provider_ref='late-trade' WHERE id=1")
+        self.db.commit()
+        calls = []
+        sync.sync_once(self.path, self.state, self.gateway, lambda *a: calls.append(a[1]) or 'closed', now=70)
+        self.assertEqual(calls, ['late-trade'])
+
+    def test_source_restore_rewinds_discovery_without_losing_retry_identity_checks(self):
+        self.add(100)
+        sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed', now=10)
+        self.db.execute('DELETE FROM payments')
+        self.db.execute('DELETE FROM orders')
+        self.db.commit()
+        self.add(1)
+        self.db.execute("UPDATE orders SET canceled_at='2020-01-01'")
+        self.db.commit()
+        calls = []
+        sync.sync_once(self.path, self.state, self.gateway, lambda *a: calls.append(a[1]) or 'closed', now=15)
+        self.assertEqual(calls, ['trade1'])
+        self.assertEqual(self.state.execute('SELECT max_payment_id FROM discovery').fetchone()[0], 1)
+
+    def test_discovery_cursor_and_queue_commit_atomically(self):
+        self.add(1)
+        with patch.object(sync, 'enqueue', side_effect=RuntimeError('disk failed')):
+            with self.assertRaises(RuntimeError):
+                sync.sync_once(self.path, self.state, self.gateway, lambda *a: self.fail('should not send'))
+        self.assertEqual(self.state.execute('SELECT after_payment_id FROM discovery_orders').fetchone()[0], 0)
+        self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed'), 1)
+
+    def test_large_order_expansion_is_resumable_and_bounded(self):
+        self.add(1)
+        self.db.executemany("INSERT INTO payments VALUES(?,1,1,'bepusdt','expired',NULL,NULL,?,?,?)",
+                            [(i, 't'+str(i), 'o'+str(i), self.gateway+'/pay/a') for i in range(2, 122)])
+        self.db.commit()
+        # Disable the independent audit just for this test: exercise order pagination.
+        self.state.execute("INSERT INTO discovery(gateway,next_audit) VALUES(?,100000)", (self.gateway,))
+        self.state.commit()
+        calls = []
+        for n in range(3):
+            sync.sync_once(self.path, self.state, self.gateway, lambda *a: calls.append(a[1]) or 'closed', now=n+1)
+            self.assertLessEqual(len(calls), (n+1)*sync.ORDER_PAYMENT_BATCH)
+        self.assertEqual(len(calls), 121)
+        self.assertEqual(len(set(calls)), 121)
+        self.assertEqual(self.state.execute('SELECT count(*) FROM discovery_orders').fetchone()[0], 0)
+
+    def test_hundred_thousand_closed_records_do_not_expand_steady_state_work(self):
+        import time
+        start = time.perf_counter()
+        n = 100000
+        self.db.executemany("INSERT INTO orders VALUES(?,'canceled',NULL,'2026-01-01',NULL)", ((i,) for i in range(1, n+1)))
+        self.db.executemany("INSERT INTO payments VALUES(?,?,1,'bepusdt','expired',NULL,NULL,?,?,?)",
+                            ((i, i, 't'+str(i), 'o'+str(i), self.gateway+'/pay/a') for i in range(1, n+1)))
+        self.db.commit()
+        self.state.executemany("INSERT INTO cancellations VALUES(?,?,?,?,'closed',1,0,0)",
+                               ((self.gateway, i, 't'+str(i), 'o'+str(i)) for i in range(1, n+1)))
+        self.state.execute("INSERT INTO discovery VALUES(?,'2026-01-01',?,0,?,0)", (self.gateway, n, n))
+        self.state.commit()
+        metrics = {'instructions': 0, 'source_rows': 0}
+        original = sync.source_connect
+        def connect(path):
+            c = original(path)
+            def count():
+                metrics['instructions'] += 100
+                if metrics['instructions'] > 100000:
+                    self.fail('source work grew with synchronized history')
+                return 0
+            c.set_progress_handler(count, 100)
+            c.set_trace_callback(lambda sql: None)
+            return c
+        original_query = sync.source_query
+        class Cursor:
+            def __init__(self, cursor): self.cursor = cursor
+            def fetchall(self):
+                rows = self.cursor.fetchall();metrics['source_rows'] += len(rows);return rows
+            def fetchone(self):
+                row = self.cursor.fetchone();metrics['source_rows'] += int(row is not None);return row
+        with patch.object(sync, 'source_connect', side_effect=connect), patch.object(sync, 'source_query', side_effect=lambda *args: Cursor(original_query(*args))):
+            self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: self.fail('duplicate'), now=10), 0)
+        self.assertLessEqual(metrics['source_rows'], 1001)
+        self.assertLess(metrics['instructions'], 100000)
+        print('100k synchronized cancellations: source rows=%s SQLite VM instructions=%s elapsed=%.3fs (includes fixture setup)' % (metrics['source_rows'], metrics['instructions'], time.perf_counter()-start))
+
+    def test_stop_during_large_equal_timestamp_backlog_never_skips_or_resends(self):
+        n = 1500
+        self.db.executemany("INSERT INTO orders VALUES(?,'canceled',NULL,'2026-01-01',NULL)", ((i,) for i in range(1, n+1)))
+        self.db.executemany("INSERT INTO payments VALUES(?,?,1,'bepusdt','expired',NULL,NULL,?,?,?)",
+                            ((i, i, 't'+str(i), 'o'+str(i), self.gateway+'/pay/a') for i in range(1, n+1)))
+        self.db.commit()
+        path = Path(self.tmp.name) / 'resume.db'
+        state = sync.journal(path)
+        calls = []
+        try:
+            for step in range(35):
+                sync.sync_once(self.path, state, self.gateway, lambda *a: calls.append(a[1]) or 'closed', now=10+step*5)
+                # Restart after every discovery/send batch; there is no in-memory cursor.
+                state.close()
+                state = sync.journal(path)
+            self.assertEqual(len(calls), n)
+            self.assertEqual(len(set(calls)), n)
+            self.assertEqual(state.execute('SELECT count(*) FROM discovery_orders').fetchone()[0], 0)
+        finally:
+            state.close()
 
 
 if __name__ == '__main__':

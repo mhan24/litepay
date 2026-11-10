@@ -109,10 +109,11 @@ type NotifyLog struct {
 	CreatedAt  time.Time
 }
 type ScanCursor struct {
-	Provider     string `gorm:"primaryKey"`
-	ScannedUntil time.Time
-	LastSuccess  time.Time
-	LastError    string
+	HistoricalTurn int    `gorm:"not null;default:0"`
+	Provider       string `gorm:"primaryKey"`
+	ScannedUntil   time.Time
+	LastSuccess    time.Time
+	LastError      string
 	// 未确认到账的补查是独立的一路：它不推进 ScannedUntil，失败只记录在这里。
 	PendingError string
 	PendingAt    time.Time
@@ -216,13 +217,13 @@ type PaymentRecovery struct {
 type HistoricalScan struct {
 	CoverageAfter time.Time
 	RequiredAfter time.Time
-	Priority      int   `gorm:"not null;default:0"`
+	Priority      int   `gorm:"not null;default:0;index:idx_hist_dispatch,priority:3"`
 	ChunkMillis   int64 `gorm:"not null;default:3600000"`
 	Automatic     bool  `gorm:"not null;default:false;index:idx_final_pass,priority:1;index:idx_hist_auto,priority:1"`
 	ID            uint  `gorm:"primaryKey;index:idx_hist_auto,priority:4"`
 	OrderID       uint  `gorm:"index"`
 	AttemptID     uint
-	Provider      string `gorm:"index:idx_final_pass,priority:2;index:idx_hist_pending,priority:1;index:idx_hist_auto,priority:2"`
+	Provider      string `gorm:"index:idx_final_pass,priority:2;index:idx_hist_dispatch,priority:1;index:idx_hist_pending,priority:1;index:idx_hist_auto,priority:2"`
 	Receiver      string `gorm:"index:idx_final_pass,priority:3;index:idx_hist_auto,priority:3"`
 	From          time.Time
 	To            time.Time
@@ -232,12 +233,12 @@ type HistoricalScan struct {
 	Hash          string
 	OldestAt      time.Time
 	Pages         int
-	State         string `gorm:"index:idx_final_pass,priority:4;index:idx_hist_pending,priority:2"`
+	State         string `gorm:"index:idx_final_pass,priority:4;index:idx_hist_dispatch,priority:2;index:idx_hist_pending,priority:2"`
 	LastError     string
 	Operator      string
 	Reason        string
 	CreatedAt     time.Time `gorm:"index:idx_final_pass,priority:5"`
-	UpdatedAt     time.Time `gorm:"index:idx_hist_pending,priority:3"`
+	UpdatedAt     time.Time `gorm:"index:idx_hist_pending,priority:3;index:idx_hist_dispatch,priority:4"`
 }
 
 // Real, completed API coverage. Reusing it never refreshes ObservedAt.

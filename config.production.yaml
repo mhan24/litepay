@@ -1,0 +1,19 @@
+# Mount a configured copy at /app/config.yaml before running the container.
+# Empty production prerequisites deliberately cause startup to fail.
+server:
+  production: true
+  addr: "0.0.0.0:8080"
+  base_url: ""
+  notify_hosts: []
+  trusted_proxies: []
+  callback_workers: 8
+  merchant_key_versions: false
+  cancel_sync_required: false
+database:
+  path: "/app/data/litepay.db"
+admin:
+  path: "/admin"
+  username: "admin"
+  password: ""
+  session_hours: 12
+log_level: "info"

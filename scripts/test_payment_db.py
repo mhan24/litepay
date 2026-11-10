@@ -164,8 +164,26 @@ class QueueDBTest(CapacityDBTest):
         self.db.execute("INSERT INTO historical_scans(id,order_id,attempt_id,cursor,\"from\",\"to\",operator,reason,automatic,provider,receiver,created_at) VALUES(99,1,1,'2026-11-10 01:00','2026-11-10 00:00','2026-11-10 01:00','system','final',1,'okx','receiver','2026-11-12 02:00')")
         self.db.execute("INSERT INTO history_coverages VALUES(99,'okx','receiver','2026-11-10 00:00','2026-11-10 01:00','2026-11-12 02:00')")
         self.db.commit()
-        self.assertEqual(tool.drill(self.path)['schema'], 12)
+        self.assertEqual(tool.drill(self.path)['schema'], self.expected_schema)
         self.db.execute("UPDATE history_coverages SET observed_at='2026-11-12 01:00'")
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+
+
+class FairQueueDBTest(QueueDBTest):
+    expected_schema = 13
+
+    def setUp(self):
+        super().setUp()
+        self.db.executescript("PRAGMA user_version=13; ALTER TABLE scan_cursors ADD COLUMN historical_turn INTEGER NOT NULL DEFAULT 0;")
+        self.db.commit()
+
+    def test_fair_scheduler_progress_is_backed_up_and_validated(self):
+        self.db.execute('UPDATE scan_cursors SET historical_turn=3')
+        self.db.commit()
+        self.assertEqual(tool.drill(self.path)['schema'], 13)
+        self.db.execute('UPDATE scan_cursors SET historical_turn=8')
         self.db.commit()
         with self.assertRaises(ValueError):
             tool.validate(self.path)
