@@ -272,6 +272,19 @@ class SyncTest(unittest.TestCase):
         finally:
             state.close()
 
+    def test_reeligible_order_after_source_restore_requeues_unattempted_cancellation(self):
+        self.add(1)
+        sync.sync_once(self.path, self.state, self.gateway, lambda *a: (_ for _ in ()).throw(TimeoutError()), now=10)
+        self.db.execute("UPDATE orders SET status='pending_payment'")
+        self.db.commit()
+        sync.sync_once(self.path, self.state, self.gateway, lambda *a: self.fail('inactive order sent'), now=15)
+        self.assertEqual(self.state.execute('SELECT outcome FROM cancellations').fetchone()[0], 'merchant_changed')
+        # A restored snapshot can make the same source identity canceled again.
+        self.db.execute("UPDATE orders SET status='canceled'")
+        self.db.commit()
+        self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed', now=40), 1)
+        self.assertEqual(self.state.execute('SELECT outcome FROM cancellations').fetchone()[0], 'closed')
+
 
 if __name__ == '__main__':
     unittest.main()

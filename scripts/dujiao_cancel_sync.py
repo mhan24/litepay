@@ -78,7 +78,7 @@ def eligible(rows, gateway):
 def enqueue(state, rows, gateway, now):
     for payment_id, trade_id, order_id, _ in eligible(rows, gateway):
         # Keys contain identities only. API credentials are fetched again before sending.
-        state.execute("INSERT OR IGNORE INTO cancellations VALUES(?,?,?,?,'queued',0,?,?)",
+        state.execute("INSERT INTO cancellations VALUES(?,?,?,?,'queued',0,?,?) ON CONFLICT(gateway,payment_id,trade_id,order_id) DO UPDATE SET outcome='queued',next_at=excluded.next_at,updated_at=excluded.updated_at WHERE cancellations.outcome='merchant_changed'",
                       (gateway, payment_id, trade_id, order_id, now, now))
 
 
