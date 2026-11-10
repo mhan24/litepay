@@ -4,6 +4,8 @@
 # 都保存在 SQLite 中，首次启动后请在 /admin/settings 配置。
 
 server:
+  # 本机开发显式关闭；生产必须为 true，并配置 HTTPS 与商户主机白名单。
+  production: false
   # 访问根地址时跳转到商店；留空返回 404。
   store_url: ""
   addr: "0.0.0.0:8080"
@@ -11,7 +13,7 @@ server:
   # 生产环境只填写实际反向代理的固定 IP/CIDR；默认忽略转发 IP 头。
   # Caddy 容器重建后如 IP 改变，必须同步更新此值。
   trusted_proxies: []
-  # base_url 使用 HTTPS 时，回调仅允许这些精确主机名且必须使用 HTTPS。
+  # production 为 true 时必须填写；回调仅允许精确主机名和 HTTPS。
   notify_hosts: []
 
 database:

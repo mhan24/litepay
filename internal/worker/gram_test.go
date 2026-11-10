@@ -46,10 +46,19 @@ func TestGRAMScanLocksQuoteAndDeliversOnce(t *testing.T) {
 	}
 	raw := response.Result[0]
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/masterchainInfo" {
+			json.NewEncoder(w).Encode(map[string]any{"last": map[string]any{"workchain": -1, "seqno": 100}})
+			return
+		}
+		if r.URL.Path == "/api/v3/transactions" {
+			json.NewEncoder(w).Encode(map[string]any{"transactions": []any{map[string]any{"account": address, "hash": raw.ID["hash"], "lt": raw.ID["lt"], "now": raw.Utime, "mc_block_seqno": 99, "block_ref": map[string]any{"workchain": 0, "shard": "8000000000000000", "seqno": 1}}}})
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": []any{raw}})
 	}))
 	defer srv.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.TON.Address = address
 	cfg.TON.BaseURL = srv.URL
 	cfg.Checkout.Currencies = []string{"GRAM"}
@@ -125,6 +134,7 @@ func TestGRAMScanLocksQuoteAndDeliversOnce(t *testing.T) {
 	raw.ID["hash"] = base64.StdEncoding.EncodeToString(root.Hash())
 	raw.ID["lt"] = strconv.FormatUint(tx.LT, 10)
 	st.DB().Model(&model.Order{}).Where("provider = ?", "ton").Update("selected_at", time.Now().Add(-time.Second))
+	syncAttemptFixture(t, st)
 	p := NewPoller(mgr, st)
 	p.UseTestTransports()
 	for range 2 {

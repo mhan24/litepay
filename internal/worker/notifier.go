@@ -48,7 +48,11 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	payload := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "amount": json.Number(o.Original()), "actual_amount": json.Number(amount.String(o.PayUnits)), "token": o.Receiver, "block_transaction_id": tx.EventID, "status": 2}
-	payload["signature"] = sign.BEpusdtSignGeneric(payload, cfg.BEpusdt.APIToken)
+	key, err := n.st.CallbackKey(ctx, *task)
+	if err != nil {
+		return true, err
+	}
+	payload["signature"] = sign.BEpusdtSignGeneric(payload, key)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return true, err

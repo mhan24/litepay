@@ -36,6 +36,7 @@ func TestSettingsFormScopeAndSectionClear(t *testing.T) {
 		t.Fatalf("wrong scope: %+v", p)
 	}
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Checkout.Binance.UID = "keep"
 	cfg.Binance.APISecret = "keep-secret"
 	cfg.OKX.APISecret = "clear"
@@ -56,6 +57,7 @@ func TestOrderCloseAuthenticationSignaturesAndPaidProtection(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Admin.Password = "local-test-password"
 	mgr := settings.New(cfg, st)
 	if err = mgr.Load(ctx); err != nil {
@@ -154,6 +156,7 @@ func TestOrderCloseAuthenticationSignaturesAndPaidProtection(t *testing.T) {
 
 func TestCashierUsesProviderCurrenciesAndMerchantLimits(t *testing.T) {
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"

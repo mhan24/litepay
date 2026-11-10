@@ -57,6 +57,7 @@ func TestScanAndSignedCallback(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -101,6 +102,7 @@ func TestScanAndSignedCallback(t *testing.T) {
 	}
 	selected := time.Now().Add(-2 * time.Minute)
 	st.DB().Model(&model.Order{}).Where("trade_no IN ?", []string{"a", "b"}).Update("selected_at", selected)
+	syncAttemptFixture(t, st)
 	f := &fixture{rows: []model.Transaction{{Provider: "binance", EventID: "parent-event", Reference: "app-order", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: time.Now(), State: model.Confirmed}}}
 	p := NewPoller(mgr, st)
 	p.clients["binance"] = &connection{config: *mgr.Get(), source: f}
@@ -158,6 +160,7 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -263,6 +266,7 @@ func TestFirstScanCoversOldPaymentWindow(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -281,6 +285,7 @@ func TestFirstScanCoversOldPaymentWindow(t *testing.T) {
 	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "old").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, st)
 	paidAt := selected.Add(30 * time.Second)
 	f := &fixture{rows: []model.Transaction{{Provider: "binance", EventID: "old-event", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: paidAt, State: model.Confirmed}}}
 	p := NewPoller(mgr, st)
@@ -309,6 +314,7 @@ func TestPendingDepositStaysReadableAfterCursorAdvances(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.OKX.APIKey = "key"
 	cfg.OKX.APISecret = "secret"
 	cfg.OKX.Passphrase = "pass"
@@ -327,6 +333,7 @@ func TestPendingDepositStaysReadableAfterCursorAdvances(t *testing.T) {
 	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "okx-order").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, st)
 	deposit := model.Transaction{Provider: "okx", EventID: "dep-1", Reference: "wd-1", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: selected.Add(20 * time.Second), State: model.Unconfirmed}
 	f := &fixture{rows: []model.Transaction{deposit}}
 	p := NewPoller(mgr, st)
@@ -375,6 +382,7 @@ func TestOldPendingDepositDoesNotBlockNewPayment(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -394,6 +402,7 @@ func TestOldPendingDepositDoesNotBlockNewPayment(t *testing.T) {
 	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "new").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, st)
 	// 90 分钟前创建、至今仍未确认的充值：远早于当前游标，但仍在补查期内。
 	old := model.Transaction{Provider: "binance", EventID: "old-pending", Reference: "old", Receiver: "receiver", Currency: "USDT", Units: 5000000, OccurredAt: time.Now().Add(-90 * time.Minute), State: model.Unconfirmed}
 	if _, e = st.Process(ctx, old, ""); e != nil {
@@ -409,7 +418,10 @@ func TestOldPendingDepositDoesNotBlockNewPayment(t *testing.T) {
 			t.Fatal(e)
 		}
 		if o, _ := st.GetByTradeNo(ctx, "new"); o.Status == model.Paid {
-			break
+			cursor, _ := st.Cursor(ctx, "binance")
+			if !cursor.ScannedUntil.Before(payment.OccurredAt) {
+				break
+			}
 		}
 	}
 	o, e := st.GetByTradeNo(ctx, "new")
@@ -443,6 +455,7 @@ func TestPendingRecheckRotatesAcrossRecords(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -504,6 +517,7 @@ func TestPendingRecheckFailureIsRecorded(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -521,6 +535,7 @@ func TestPendingRecheckFailureIsRecorded(t *testing.T) {
 	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", "d").Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(12 * time.Minute)}).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, st)
 	// 到账时间早于增量回看窗口，只能由补查读到。
 	deposit := model.Transaction{Provider: "binance", EventID: "late-event", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: selected.Add(2 * time.Minute), State: model.Unconfirmed}
 	if _, e = st.Process(ctx, deposit, ""); e != nil {

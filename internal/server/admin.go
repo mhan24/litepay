@@ -353,25 +353,26 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 	updated := h.cfg.UpdatedAt(c.Request.Context())
 
 	c.HTML(http.StatusOK, "admin_settings.html", gin.H{
-		"Base":              h.adminBase(c, "settings", "设置"),
-		"HasSaved":          !updated.IsZero(),
-		"UpdatedAt":         updated.Format("2006-01-02 15:04:05"),
-		"Cfg":               cfg,
-		"Currencies":        cfg.Checkout.Currencies,
-		"KnownCurrencies":   []string{"USDT", "USDC"},
-		"BinanceCurrencies": cfg.ProviderCurrencies(config.ProviderBinance),
-		"OKXCurrencies":     cfg.ProviderCurrencies(config.ProviderOKX),
-		"TONCurrencies":     cfg.ProviderCurrencies(config.ProviderTON),
-		"DelaysJoined":      joinInts(cfg.Notify.RetryDelays),
-		"BEpusdtKeyMask":    maskSecret(cfg.BEpusdt.APIToken),
-		"BinanceKey":        maskSecret(cfg.Binance.APIKey),
-		"BinanceOn":         cfg.BinanceEnabled(),
-		"OKXOn":             cfg.OKXEnabled(),
-		"CollectionOn":      cfg.AnyProviderEnabled(),
-		"Provider":          "multi",
-		"OKXKey":            maskSecret(cfg.OKX.APIKey),
-		"TONKey":            maskSecret(cfg.TON.APIKey),
-		"DBPath":            cfg.Database.Path,
+		"Base":               h.adminBase(c, "settings", "设置"),
+		"HasSaved":           !updated.IsZero(),
+		"UpdatedAt":          updated.Format("2006-01-02 15:04:05"),
+		"Cfg":                cfg,
+		"PendingNotifyCount": h.pendingNotifyCount(c),
+		"Currencies":         cfg.Checkout.Currencies,
+		"KnownCurrencies":    []string{"USDT", "USDC"},
+		"BinanceCurrencies":  cfg.ProviderCurrencies(config.ProviderBinance),
+		"OKXCurrencies":      cfg.ProviderCurrencies(config.ProviderOKX),
+		"TONCurrencies":      cfg.ProviderCurrencies(config.ProviderTON),
+		"DelaysJoined":       joinInts(cfg.Notify.RetryDelays),
+		"BEpusdtKeyMask":     maskSecret(cfg.BEpusdt.APIToken),
+		"BinanceKey":         maskSecret(cfg.Binance.APIKey),
+		"BinanceOn":          cfg.BinanceEnabled(),
+		"OKXOn":              cfg.OKXEnabled(),
+		"CollectionOn":       cfg.AnyProviderEnabled(),
+		"Provider":           "multi",
+		"OKXKey":             maskSecret(cfg.OKX.APIKey),
+		"TONKey":             maskSecret(cfg.TON.APIKey),
+		"DBPath":             cfg.Database.Path,
 
 		"BaseURL": cfg.Server.BaseURL,
 	})
@@ -525,7 +526,7 @@ func (h *Handlers) AdminRotateToken(c *gin.Context) {
 	}
 	slog.Info("BEpusdt API Token 已轮换", "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther,
-		h.adminURL("/admin/integration?msg=")+url.QueryEscape("API Token 已轮换；请立即更新独角数卡")+
+		h.adminURL("/admin/integration?msg=")+url.QueryEscape("API Token 已轮换；历史订单通知保留原密钥版本，商城须兼容旧版本。请更新新订单使用的 Token")+
 			"&token_rotated=1")
 }
 
@@ -774,16 +775,19 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 	var tasks []model.Callback
 	var recoveries []model.CallbackRecovery
 	var checks []model.ConfirmationTask
-	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&recoveries).Error, db.Where("order_id = ?", o.ID).Find(&checks).Error} {
+	var attempts []model.PaymentAttempt
+	var paymentRecoveries []model.PaymentRecovery
+	var history []model.HistoricalScan
+	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&recoveries).Error, db.Where("order_id = ?", o.ID).Find(&checks).Error, db.Where("order_id = ?", o.ID).Order("id").Find(&attempts).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&paymentRecoveries).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&history).Error} {
 		if err != nil {
 			h.renderAdminError(c, err)
 			return
 		}
 	}
-	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts})
+	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts, "PaymentAttempts": attempts, "PaymentRecoveries": paymentRecoveries, "HistoricalScans": history})
 }
 func (h *Handlers) AdminIntegration(c *gin.Context) {
-	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken})
+	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken, "PendingNotifyCount": h.pendingNotifyCount(c)})
 }
 
 func (h *Handlers) AdminRetryNotify(c *gin.Context) {
@@ -795,4 +799,34 @@ func (h *Handlers) AdminRetryNotify(c *gin.Context) {
 	}
 	h.log.Warn("管理员重新通知商城", "trade_id", no, "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("通知已重新入队，将使用原订单号发送"))
+}
+
+func (h *Handlers) pendingNotifyCount(c *gin.Context) int64 {
+	var n int64
+	if err := h.st.DB().WithContext(c.Request.Context()).Model(&model.Callback{}).Where("delivered_at IS NULL").Count(&n).Error; err != nil {
+		return -1
+	}
+	return n
+}
+
+func (h *Handlers) AdminReconcilePayment(c *gin.Context) {
+	no := c.Param("trade_no")
+	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
+	err := h.st.ReconcilePayment(c.Request.Context(), no, c.PostForm("provider"), strings.TrimSpace(c.PostForm("event_id")), c.GetString("admin_user"), c.PostForm("reason"))
+	if err != nil {
+		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
+		return
+	}
+	h.log.Warn("管理员按已验证到账证据补单", "trade_id", no, "operator", c.GetString("admin_user"))
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("补单已核销并创建通知任务"))
+}
+
+func (h *Handlers) AdminHistoricalScan(c *gin.Context) {
+	no := c.Param("trade_no")
+	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
+	if err := h.st.RequestHistoricalScan(c.Request.Context(), no, c.GetString("admin_user"), c.PostForm("reason")); err != nil {
+		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
+		return
+	}
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("历史到账补扫已排队，关闭订单只记录证据，不会自动补单"))
 }

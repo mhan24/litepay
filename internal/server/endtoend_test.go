@@ -268,6 +268,7 @@ func TestEndToEndOKXPaymentLoop(t *testing.T) {
 	}
 
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.OKX.APIKey = "key"
 	cfg.OKX.APISecret = "secret"
 	cfg.OKX.Passphrase = "pass"
@@ -302,6 +303,7 @@ func TestEndToEndOKXPaymentLoop(t *testing.T) {
 	if e = st.DB().Model(&model.Order{}).Where("trade_no = ?", no).Updates(map[string]any{"selected_at": selected, "expires_at": selected.Add(10 * time.Minute)}).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, st)
 
 	// 交易发生在选定付款方式之后：dep-1 在窗口内，dep-pre 在窗口之前（已确认）。
 	depositAt := time.Now()
@@ -461,6 +463,7 @@ func TestEndToEndBinancePaymentLoop(t *testing.T) {
 		},
 	}}
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Binance.BaseURL = exchangeSrvURL(t, exchange)

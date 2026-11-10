@@ -67,3 +67,12 @@ func (s *Store) SaveCredential(ctx context.Context, row model.Credential) error 
 		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_by", "updated_at"}),
 	}).Create(&row).Error
 }
+
+func (s *Store) SaveSettingAndArchiveTON(ctx context.Context, payload, operator, receiver string) error {
+	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if err := (&Store{db: db}).SaveSettingPayload(ctx, payload, operator); err != nil {
+			return err
+		}
+		return db.Model(&model.TONScanCheckpoint{}).Where("receiver <> ? AND active = ?", receiver, true).Update("active", false).Error
+	})
+}

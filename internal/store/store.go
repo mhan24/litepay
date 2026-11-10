@@ -84,13 +84,16 @@ func Open(path string) (*Store, error) {
 	if err = db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables).Error; err != nil {
 		return fail(err)
 	}
-	if version != 8 && version != 9 && tables > 0 {
+	if version != 8 && version != 9 && version != 10 && tables > 0 {
 		return fail(errors.New("旧数据库不兼容，请配置一个新的空数据库"))
 	}
-	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}); err != nil {
+	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}); err != nil {
 		return fail(err)
 	}
-	if err = db.Exec("PRAGMA user_version=9").Error; err != nil {
+	if err = migratePaymentAttempts(db); err != nil {
+		return fail(err)
+	}
+	if err = db.Exec("PRAGMA user_version=10").Error; err != nil {
 		return fail(err)
 	}
 	if path != ":memory:" {
@@ -143,13 +146,22 @@ func (s *Store) Create(ctx context.Context, o model.Order) (*model.Order, error)
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
+		if o.SigningKeyID == 0 {
+			var key model.SigningKey
+			e := db.Where("retired_at IS NULL").Order("id DESC").First(&key).Error
+			if e == nil {
+				o.SigningKeyID = key.ID
+			} else if !errors.Is(e, gorm.ErrRecordNotFound) {
+				return e
+			}
+		}
 		o.Status = model.Pending
 		return db.Create(&o).Error
 	})
 	return &o, err
 }
 
-// Select reserves integer slots. Detached slots stay occupied through their original cooldown.
+// Select reserves integer slots and preserves every previously issued payment instruction.
 func (s *Store) Select(ctx context.Context, no, provider, currency, receiver string, precision int, step, minUnits int64, maxOffset, grace int) (*model.Order, error) {
 	return s.selectPayment(ctx, no, provider, currency, receiver, precision, step, minUnits, maxOffset, grace, 0, gram.Snapshot{})
 }
@@ -188,10 +200,7 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 		if o.Status == model.Ready && !o.Reselect {
 			return errors.New("订单不允许重选")
 		}
-		if err := db.Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("order_id", nil).Error; err != nil {
-			return err
-		}
-		if err := db.Where("expires_at < ?", now).Delete(&model.Slot{}).Error; err != nil {
+		if err := db.Where("order_id IS NULL AND expires_at < ?", now).Delete(&model.Slot{}).Error; err != nil {
 			return err
 		}
 		q := amount.Quantum(precision)
@@ -226,7 +235,7 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 				continue // 低于商城可验签下限，继续向上递增
 			}
 			inRange++
-			slot := model.Slot{Provider: provider, Currency: currency, Units: units, OrderID: &o.ID, ExpiresAt: o.ExpiresAt.Add(time.Duration(grace) * time.Second)}
+			slot := model.Slot{Provider: provider, Currency: currency, Units: units, OrderID: &o.ID, ExpiresAt: o.ExpiresAt.Add(max(time.Duration(grace)*time.Second, LateVisibilityWindow))}
 			r := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&slot)
 			if r.Error != nil {
 				return r.Error
@@ -248,7 +257,10 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 			o.PayUnits = units
 			o.SelectedAt = &now
 			o.Status = model.Ready
-			return db.Save(&o).Error
+			if err := db.Save(&o).Error; err != nil {
+				return err
+			}
+			return createAttempt(db, o)
 		}
 		if inRange == 0 {
 			return errors.New("应付金额超出可核销范围，请调低订单金额后重新下单")
@@ -302,6 +314,9 @@ func (s *Store) CancelReference(ctx context.Context, tradeNo, outTradeNo string)
 // Process records evidence and atomically consumes a unique provider event.
 // expectedTrade is a restriction, never a hint that can override ownership.
 func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade string) (string, error) {
+	if t.Provider == "ton" && t.State == model.Confirmed && t.MasterchainSeqno <= 0 {
+		return "unfinalized", errors.New("TON 到账缺少主链最终性确认")
+	}
 	if t.EventID == "" || (t.Provider != "binance" && t.Provider != "okx" && t.Provider != "ton") || t.OccurredAt.IsZero() {
 		return "invalid_evidence", errors.New("交易缺少可靠身份或时间")
 	}
@@ -363,60 +378,41 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 		if t.Units <= 0 || t.Receiver == "" || ((t.Provider == "ton" && t.Currency != "GRAM") || (t.Provider != "ton" && t.Currency != "USDT" && t.Currency != "USDC")) {
 			return finish("invalid_payment")
 		}
-		var candidates []model.Order
-		if e = db.Where("status = ? AND provider = ? AND receiver = ? AND currency = ? AND pay_units = ? AND selected_at <= ? AND expires_at >= ?", model.Ready, t.Provider, t.Receiver, t.Currency, t.Units, t.OccurredAt, t.OccurredAt).Find(&candidates).Error; e != nil {
-			return e
+		attempt, o, reason, err := matchAttempt(db, t, false)
+		if err != nil {
+			return err
 		}
-		if len(candidates) == 0 {
-			return finish("no_match")
-		}
-		if len(candidates) != 1 {
-			if err := db.Model(&t).Update("state", model.Ambiguous).Error; err != nil {
-				return err
-			}
-			return finish("multiple_orders")
-		}
-		o := candidates[0]
-		var check model.ConfirmationTask
-		if e := db.Where("provider = ? AND event_id = ?", t.Provider, t.EventID).First(&check).Error; e == nil {
-			if check.State == "manual_review" || !time.Now().Before(check.Deadline) {
-				if e = db.Model(&check).Update("state", "manual_review").Error; e != nil {
-					return e
+		if reason != "" {
+			if reason == "additional_payment" {
+				if err := db.Model(&t).Update("attempt_id", attempt.ID).Error; err != nil {
+					return err
 				}
-				return finish("confirmation_review_required")
 			}
-		} else if !errors.Is(e, gorm.ErrRecordNotFound) {
-			return e
+			if reason == "multiple_orders" {
+				if err := db.Model(&t).Update("state", model.Ambiguous).Error; err != nil {
+					return err
+				}
+			}
+			return finish(reason)
 		}
 		if expectedTrade != "" && o.TradeNo != expectedTrade {
 			return finish("other_order")
 		}
-		// A matching amount must still hold this order's reservation: that row is the proof
-		// the payment window was never released. The wall clock is deliberately not consulted,
-		// so a scan that discovers an on-time payment late can still claim it. Closure is
-		// enforced by Expire, which removes the order from the candidate query above.
-		var slot model.Slot
-		err := db.Where("order_id = ? AND provider = ? AND currency = ? AND units = ?", o.ID, o.Provider, o.Currency, o.PayUnits).First(&slot).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return finish("reservation_released")
-		}
-		if err != nil {
-			return err
-		}
+		applyAttempt(&o, attempt)
 		now := time.Now()
 		o.Status = model.Paid
 		o.PaidAt = &now
 		if e = db.Save(&o).Error; e != nil {
 			return e
 		}
-		if e = db.Model(&t).Updates(map[string]any{"order_id": o.ID, "reason": "claimed"}).Error; e != nil {
+		if e = db.Model(&t).Updates(map[string]any{"order_id": o.ID, "attempt_id": attempt.ID, "reason": "claimed"}).Error; e != nil {
 			return e
 		}
 		if e = db.Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("order_id", nil).Error; e != nil {
 			return e
 		}
 		result = "paid"
-		return db.Create(&model.Callback{OrderID: o.ID, NextAt: now, State: "queued"}).Error
+		return db.Create(&model.Callback{OrderID: o.ID, SigningKeyID: o.SigningKeyID, NextAt: now, State: "queued"}).Error
 	})
 	return result, err
 }
@@ -435,18 +431,56 @@ func (s *Store) Expire(ctx context.Context, grace int) error {
 		if err := db.Model(&model.Order{}).Where("status = ? AND expires_at < ?", model.Pending, cutoff).Update("status", model.Expired).Error; err != nil {
 			return err
 		}
-		var cursors []model.ScanCursor
-		if err := db.Find(&cursors).Error; err != nil {
+		// Query success only proves what was visible at that moment. Historical attempts
+		// remain eligible for a separate late-visibility window, independent of checkout expiry.
+		var ready []model.Order
+		if err := db.Where("status = ?", model.Ready).Find(&ready).Error; err != nil {
 			return err
 		}
-		for _, cursor := range cursors {
-			covered := cursor.ScannedUntil
-			if covered.After(now) {
-				covered = now
-			}
-			if err := db.Model(&model.Order{}).Where("status = ? AND provider = ? AND expires_at < ?", model.Ready, cursor.Provider, covered.Add(-time.Duration(grace)*time.Second)).
-				Where("NOT EXISTS (SELECT 1 FROM confirmation_tasks q WHERE q.order_id = orders.id AND q.state = ? AND q.deadline > ?)", "pending", now).Update("status", model.Expired).Error; err != nil {
+		for _, o := range ready {
+			var attempts []model.PaymentAttempt
+			if err := db.Where("order_id = ?", o.ID).Find(&attempts).Error; err != nil {
 				return err
+			}
+			if len(attempts) == 0 {
+				continue
+			}
+			safe := true
+			for _, a := range attempts {
+				if now.Before(a.SettleUntil) {
+					safe = false
+					break
+				}
+				var cursor model.ScanCursor
+				if err := db.Where("provider = ?", a.Provider).First(&cursor).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						safe = false
+						break
+					}
+					return err
+				}
+				if cursor.ScannedUntil.Before(a.SettleUntil) {
+					safe = false
+					break
+				}
+				var finalPass int64
+				if err := db.Model(&model.HistoricalScan{}).Where(`automatic = ? AND provider = ? AND receiver = ? AND state = ? AND "from" <= ? AND "to" >= ? AND created_at >= ?`, true, a.Provider, a.Receiver, "completed", a.SelectedAt, a.ExpiresAt, a.SettleUntil).Count(&finalPass).Error; err != nil {
+					return err
+				}
+				if finalPass == 0 {
+					safe = false
+					break
+				}
+			}
+
+			var tasks int64
+			if err := db.Model(&model.ConfirmationTask{}).Where("order_id = ? AND state = ? AND deadline > ?", o.ID, "pending", now).Count(&tasks).Error; err != nil {
+				return err
+			}
+			if safe && tasks == 0 {
+				if err := db.Model(&o).Update("status", model.Expired).Error; err != nil {
+					return err
+				}
 			}
 		}
 		open := db.Model(&model.Order{}).Select("id").Where("status IN ?", []string{model.Pending, model.Ready})
@@ -460,7 +494,7 @@ func (s *Store) Expire(ctx context.Context, grace int) error {
 // IdleReconcileInterval keeps recording late/canceled-order deposits without creating claims.
 const IdleReconcileInterval = time.Minute
 
-func (s *Store) ScanDue(ctx context.Context, provider string) (bool, error) {
+func (s *Store) ScanDue(ctx context.Context, provider, receiver string) (bool, error) {
 	cursor, err := s.Cursor(ctx, provider)
 	if err != nil {
 		return false, err
@@ -470,10 +504,10 @@ func (s *Store) ScanDue(ctx context.Context, provider string) (bool, error) {
 	}
 	var n int64
 	db := s.db.WithContext(ctx)
-	if err = db.Model(&model.Order{}).Where("status = ? AND provider = ?", model.Ready, provider).Count(&n).Error; err != nil || n > 0 {
+	if err = db.Table("payment_attempts a").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ?", model.Ready, provider).Count(&n).Error; err != nil || n > 0 {
 		return n > 0, err
 	}
-	if err = db.Model(&model.TONScanCheckpoint{}).Where("active = ?", true).Count(&n).Error; err != nil {
+	if err = db.Model(&model.TONScanCheckpoint{}).Where("active = ? AND receiver = ?", true, receiver).Count(&n).Error; err != nil {
 		return false, err
 	}
 	if provider == "ton" && n > 0 {
@@ -498,13 +532,13 @@ func ensureConfirmationTask(db *gorm.DB, t model.Transaction) error {
 		return err
 	}
 	q := model.ConfirmationTask{Provider: t.Provider, EventID: t.EventID, OccurredAt: t.OccurredAt, Deadline: t.OccurredAt.Add(ConfirmationWait), State: "pending"}
-	var orders []model.Order
-	if err := db.Where("status = ? AND provider = ? AND receiver = ? AND currency = ? AND pay_units = ? AND selected_at <= ? AND expires_at >= ?", model.Ready, t.Provider, t.Receiver, t.Currency, t.Units, t.OccurredAt, t.OccurredAt).Find(&orders).Error; err != nil {
+	a, o, reason, err := matchAttempt(db, t, true)
+	if err != nil {
 		return err
 	}
-	if len(orders) == 1 {
-		q.OrderID = &orders[0].ID
-		q.Deadline = orders[0].ExpiresAt.Add(ConfirmationWait)
+	if reason == "" {
+		q.OrderID = &o.ID
+		q.Deadline = a.SettleUntil
 	}
 	if !time.Now().Before(q.Deadline) {
 		q.State = "manual_review"

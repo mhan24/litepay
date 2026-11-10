@@ -163,7 +163,7 @@
               <button class="btn btn-ghost btn-sm" type="submit" form="rotate-token" formaction="{{adminPath}}/settings/token">轮换并生成新 Token</button>
               <a class="btn btn-ghost btn-sm" href="{{adminPath}}/integration">查看接入信息</a>
             </div>
-            <span class="hint">Token 只能由系统安全随机生成。轮换后旧 Token 立即失效，新 Token 会展示在接入页，请立即更新独角数卡。</span>
+            <span class="hint">待发送或未确认通知 {{.PendingNotifyCount}} 笔。轮换后新订单使用新 Token，历史通知继续使用原密钥版本；请先让商城兼容旧版本。新 Token 在接入页展示。</span>
           </div>
           <div class="field"><label>结算法币</label><div class="input" style="display:flex;align-items:center">USD · 固定 1:1</div></div>
           <div class="field">

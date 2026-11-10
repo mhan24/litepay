@@ -55,3 +55,44 @@ func TestVersion8CallbacksAndEvidenceMigrateWithoutLosingRetryBudget(t *testing.
 		t.Fatal(next, err)
 	}
 }
+
+func TestMigrationRecoversPreexistingTaskSelectionWithoutGuessing(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "reselect.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := readyOrder(t, s, "legacy-reselect")
+	event := evidence(old, "old-linked")
+	event.State = model.Unconfirmed
+	if _, err = s.Process(ctx, event, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Select(ctx, old.TradeNo, "okx", "USDC", "new-receiver", 2, 10000, 10000, 99, 120); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate schema 9, which had the task association but no immutable instruction table.
+	if err = s.DB().Exec("DELETE FROM payment_attempts").Error; err != nil {
+		t.Fatal(err)
+	}
+	s.DB().Exec("PRAGMA user_version=9")
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var recovered model.PaymentAttempt
+	if err = s.DB().Where("recovered_from_event = ?", event.EventID).First(&recovered).Error; err != nil {
+		t.Fatal(err)
+	}
+	event.State = model.Confirmed
+	if result, err := s.Process(ctx, event, ""); err != nil || result != "paid" {
+		t.Fatal(result, err)
+	}
+	fresh, _ := s.GetByTradeNo(ctx, old.TradeNo)
+	if fresh.Provider != old.Provider {
+		t.Fatal("legacy task instruction lost")
+	}
+}

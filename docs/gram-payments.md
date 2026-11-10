@@ -58,3 +58,9 @@ BOC 损坏、哈希/逻辑时间/时间/账户不一致、分页顺序异常或�
 接口参考：[Toncenter v2](https://toncenter.com/api/v2/)、[TON 原生币余额单位](https://docs.ton.org/api/v2/rpc/get-address-balance)、[Kraken Ticker](https://docs.kraken.com/api-reference/market-data/get-ticker-information)、[TonAPI OpenAPI rates 契约](https://github.com/tonkeeper/opentonapi/blob/master/api/openapi.yml)。
 
 NO_STATE 信用与 aborted 行为核对依据：[TON 执行阶段](https://docs.ton.org/foundations/phases)、[节点交易序列化与信用阶段实现](https://github.com/ton-blockchain/ton/blob/master/crypto/block/transaction.cpp)。本地验证交易 BOC 与返回哈希，信任 Toncenter 的链数据来源；不宣称独立验证主链共识或账户余额的 Merkle 证明。
+
+## 主链最终性门槛
+
+BOC 验证通过仍不足以核销。每页候选原生币到账还需在 Toncenter v3 的交易索引中按账户、LT 和交易哈希精确对应，并取得正数 `mc_block_seqno`、合法分片引用，以及不低于该序号的 masterchainInfo 主链高度。缺失、HTTP 失败、索引滞后或身份不一致时本页不提交、不推进检查点，后续重试；Store 也拒绝没有主链序号的新增 TON confirmed 证据。
+
+每页最多增加两次共享限速预算的查询，不为每笔交易单独请求。这里核验的是所信任 Toncenter 索引的主链归属，不宣称运行独立验证节点或校验完整的主链 Merkle/签名证明。接口参考：[交易索引](https://docs.ton.org/api/v3/blockchain-data/get-transactions)、[支付最终性要求](https://docs.ton.org/applications/payments/overview)。

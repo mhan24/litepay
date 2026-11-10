@@ -27,6 +27,7 @@ func TestMerchantTimeoutConfirmationSurvivesDefaultRetentionAndRestart(t *testin
 				t.Fatal(err)
 			}
 			cfg := config.Default()
+			cfg.Server.Production = false
 			cfg.OKX.APIKey = "key"
 			cfg.OKX.APISecret = "secret"
 			cfg.OKX.Passphrase = "phrase"
@@ -48,6 +49,7 @@ func TestMerchantTimeoutConfirmationSurvivesDefaultRetentionAndRestart(t *testin
 			if err = st.DB().Model(o).Update("selected_at", selected).Error; err != nil {
 				t.Fatal(err)
 			}
+			syncAttemptFixture(t, st)
 			deposit := model.Transaction{Provider: "okx", EventID: "long-pending", Reference: "withdraw", Receiver: "receiver", Currency: "USDT", Units: o.PayUnits, OccurredAt: selected.Add(5 * time.Minute), State: model.Unconfirmed}
 			if _, err = st.Process(ctx, deposit, ""); err != nil {
 				t.Fatal(err)
@@ -99,6 +101,7 @@ func TestCanceledPaymentStillRecordsIdleAccountEvidence(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -172,6 +175,7 @@ func TestCallbackRecoveryReusesMerchantIdempotencyKey(t *testing.T) {
 	}))
 	defer merchant.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Notify.MaxAttempts = 1
 	mgr := settings.New(cfg, st)
 	if err = mgr.Load(ctx); err != nil {
@@ -205,5 +209,112 @@ func TestCallbackRecoveryReusesMerchantIdempotencyKey(t *testing.T) {
 	}
 	if received != 2 || delivered != 1 || payloads[0] != payloads[1] {
 		t.Fatal("recovery changed idempotency key", received, delivered)
+	}
+}
+
+func TestAuditedHistoricalScanFindsEventBeyondAutomaticWindow(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.Create(ctx, model.Order{TradeNo: "history", OutTradeNo: "history", OriginUnits: 1000000, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Select(ctx, "history", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := time.Now().Add(-72 * time.Hour)
+	to := from.Add(3 * time.Minute)
+	st.DB().Model(o).Updates(map[string]any{"selected_at": from, "expires_at": to, "status": model.Expired})
+	st.DB().Model(&model.PaymentAttempt{}).Where("order_id = ?", o.ID).Updates(map[string]any{"selected_at": from, "expires_at": to, "settle_until": to.Add(store.LateVisibilityWindow)})
+	event := model.Transaction{Provider: "binance", EventID: "indexed-3-days-late", Reference: "3-days", Currency: "USDT", Receiver: "receiver", Units: o.PayUnits, OccurredAt: from.Add(time.Minute), State: model.Confirmed}
+	if err = st.RequestHistoricalScan(ctx, o.TradeNo, "operator", "merchant waiting; verify old transfer"); err != nil {
+		t.Fatal(err)
+	}
+	// Duplicate clicks do not enqueue an overlapping active request.
+	st.RequestHistoricalScan(ctx, o.TradeNo, "operator", "second click")
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: &fixture{rows: []model.Transaction{event}}}
+	if err = p.Scan(ctx, "binance"); err != nil {
+		t.Fatal(err)
+	}
+	var stored model.Transaction
+	if err = st.DB().First(&stored, "event_id = ?", event.EventID).Error; err != nil || stored.OrderID != nil {
+		t.Fatal(stored, err)
+	}
+	fresh, _ := st.GetByTradeNo(ctx, o.TradeNo)
+	if fresh.Status != model.Expired {
+		t.Fatal("admin rescan automatically delivered closed order")
+	}
+	var jobs []model.HistoricalScan
+	st.DB().Find(&jobs)
+	if len(jobs) != 1 || jobs[0].State != "completed" || jobs[0].Operator != "operator" {
+		t.Fatal(jobs)
+	}
+	if err = st.ReconcilePayment(ctx, o.TradeNo, event.Provider, event.EventID, "operator", "platform proof and merchant state verified"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ = st.GetByTradeNo(ctx, o.TradeNo)
+	if fresh.Status != model.Paid {
+		t.Fatal(fresh.Status)
+	}
+}
+
+func TestFirstVisibleDepositBehindIncrementalCursorIsFoundByWindowRescan(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.OKX.APIKey = "key"
+	cfg.OKX.APISecret = "secret"
+	cfg.OKX.Passphrase = "pass"
+	cfg.Checkout.OKX.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.Create(ctx, model.Order{TradeNo: "unseen", OutTradeNo: "unseen", OriginUnits: 1000000, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Select(ctx, "unseen", "okx", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, expires := time.Now().Add(-20*time.Minute), time.Now().Add(-10*time.Minute)
+	st.DB().Model(o).Updates(map[string]any{"selected_at": selected, "expires_at": expires})
+	st.DB().Model(&model.PaymentAttempt{}).Where("order_id = ?", o.ID).Updates(map[string]any{"selected_at": selected, "expires_at": expires, "settle_until": expires.Add(store.LateVisibilityWindow)})
+	st.ScanResult(ctx, "okx", time.Now(), nil)
+	// No previous evidence and no ConfirmationTask: the event first appears 19 minutes late.
+	event := model.Transaction{Provider: "okx", EventID: "unseen-behind-cursor", Reference: "late-ref", Receiver: "receiver", Currency: "USDT", Units: o.PayUnits, OccurredAt: selected.Add(time.Minute), State: model.Confirmed}
+	source := &fixture{rows: []model.Transaction{event}}
+	p := NewPoller(mgr, st)
+	p.clients["okx"] = &connection{config: *mgr.Get(), source: source}
+	if err = p.Scan(ctx, "okx"); err != nil {
+		t.Fatal(err)
+	}
+	if len(source.windows) < 2 || !source.windows[0][0].After(event.OccurredAt) || source.windows[1][0].After(event.OccurredAt) {
+		t.Fatal("history window was not reopened", source.windows)
+	}
+	fresh, _ := st.GetByTradeNo(ctx, o.TradeNo)
+	if fresh.Status != model.Paid {
+		t.Fatal("previously invisible deposit lost", fresh.Status)
 	}
 }

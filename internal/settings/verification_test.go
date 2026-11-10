@@ -3,8 +3,10 @@ package settings
 import (
 	"context"
 	"errors"
+	"litepay/internal/model"
 	"reflect"
 	"testing"
+	"time"
 
 	"litepay/internal/config"
 	"litepay/internal/gram"
@@ -27,6 +29,7 @@ func verificationManager(t *testing.T, cfg *config.Config) *Manager {
 
 func TestVerificationReportsOnlyAccountsActuallyChecked(t *testing.T) {
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -54,6 +57,7 @@ func TestVerificationReportsOnlyAccountsActuallyChecked(t *testing.T) {
 
 func TestFailedVerificationDoesNotPublishOrSaveConfig(t *testing.T) {
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -82,6 +86,7 @@ func TestFailedVerificationDoesNotPublishOrSaveConfig(t *testing.T) {
 
 func TestCompleteVerificationChecksEveryEnabledProvider(t *testing.T) {
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -110,6 +115,7 @@ func TestCompleteVerificationChecksEveryEnabledProvider(t *testing.T) {
 
 func TestOrdinarySaveStillVerifiesChangedCredentials(t *testing.T) {
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.OKX.APIKey = "old"
 	cfg.OKX.APISecret = "secret"
 	cfg.OKX.Passphrase = "phrase"
@@ -132,6 +138,7 @@ func TestOrdinarySaveStillVerifiesChangedCredentials(t *testing.T) {
 func TestProviderCurrenciesLegacyPersistenceAndScopedVerification(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Checkout.Currencies = []string{"USDT", "USDC", "GRAM"}
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
@@ -169,5 +176,32 @@ func TestProviderCurrenciesLegacyPersistenceAndScopedVerification(t *testing.T) 
 	}
 	if reloaded.Get().AnyProviderEnabled() || len(reloaded.Get().Checkout.Currencies) != 0 {
 		t.Fatal("cleared providers resurrected on reload")
+	}
+}
+
+func TestChangingTONAddressArchivesOnlyOldCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.TON.Address = gram.DefaultAddress
+	m := verificationManager(t, cfg)
+	m.verifyAccount = func(context.Context, *config.Config, string) error { return nil }
+	old := model.TONScanCheckpoint{Receiver: cfg.TON.Address, Active: true, From: time.Now().Add(-time.Hour), To: time.Now()}
+	if err := m.st.StartTONCheckpoint(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	address := "0:0000000000000000000000000000000000000000000000000000000000000000"
+	if err := m.Update(ctx, Patch{TONAddress: &address}, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := m.st.TONCheckpoint(ctx, old.Receiver)
+	if err != nil || archived.Active {
+		t.Fatal(archived, err)
+	}
+	m.st.ScanResult(ctx, "ton", time.Now(), nil)
+	// A stray old active row is still excluded by the current receiver filter.
+	m.st.DB().Model(&model.TONScanCheckpoint{}).Where("receiver = ?", old.Receiver).Update("active", true)
+	if due, err := m.st.ScanDue(ctx, "ton", address); err != nil || due {
+		t.Fatal("old address kept current scan due", due, err)
 	}
 }

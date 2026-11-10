@@ -26,12 +26,13 @@ type connection struct {
 	uid    string
 }
 
-// One scheduler owns the shared exchange clients, budgets and account verification.
+// Each provider serializes its own clients, request budgets and account verification.
 type Poller struct {
-	cfg     *settings.Manager
-	st      *store.Store
-	mu      sync.Mutex
-	clients map[string]*connection
+	cfg       *settings.Manager
+	st        *store.Store
+	mu        sync.Mutex
+	scanLocks map[string]*sync.Mutex
+	clients   map[string]*connection
 	// 每个平台下一轮补查未确认到账的偏移量，用于有界轮转。
 	pendingOffset map[string]int
 	GRAM          *gram.Monitor
@@ -40,7 +41,7 @@ type Poller struct {
 }
 
 func NewPoller(cfg *settings.Manager, st *store.Store) *Poller {
-	return &Poller{GRAM: gram.NewMonitor(), cfg: cfg, st: st, clients: map[string]*connection{}, pendingOffset: map[string]int{}}
+	return &Poller{GRAM: gram.NewMonitor(), cfg: cfg, st: st, clients: map[string]*connection{}, scanLocks: map[string]*sync.Mutex{"binance": {}, "okx": {}, "ton": {}}, pendingOffset: map[string]int{}}
 }
 
 // UseTestTransports 只用于端到端测试：调度器创建的交易所客户端只访问本地模拟服务，
@@ -56,6 +57,7 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 		return nil, errors.New("付款平台不可用")
 	}
 
+	p.mu.Lock()
 	cached := p.clients[provider]
 	if cached == nil || cached.config.TON != cfg.TON || cached.config.Binance != cfg.Binance || cached.config.OKX != cfg.OKX || cached.config.Checkout.Binance != cfg.Checkout.Binance || cached.config.Checkout.OKX != cfg.Checkout.OKX {
 		var cli source
@@ -74,6 +76,7 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 		}
 		p.clients[provider] = cached
 	}
+	p.mu.Unlock()
 	if cached.uid == "" {
 		uid, err := cached.source.AccountUID(ctx)
 		if err != nil {
@@ -110,14 +113,24 @@ func markAmbiguous(rows []model.Transaction) {
 	}
 }
 func (p *Poller) Scan(ctx context.Context, provider string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	lock := p.scanLocks[provider]
+	if lock == nil {
+		return nil
+	}
+	lock.Lock()
+	defer lock.Unlock()
 	cfg := p.cfg.Get()
 	if !cfg.ProviderEnabled(provider) {
 		return nil
 	}
+	historyParent := ctx
+	defer func() {
+		if err := p.scanHistorical(historyParent, cfg, provider); err != nil && historyParent.Err() == nil {
+			slog.Warn("管理员历史补扫未完成", "provider", provider)
+		}
+	}()
 	// Active orders and durable confirmation tasks scan frequently; idle accounts still reconcile.
-	due, err := p.st.ScanDue(ctx, provider)
+	due, err := p.st.ScanDue(ctx, provider, cfg.TON.Address)
 	if err != nil || !due {
 		return err
 	}
@@ -198,7 +211,9 @@ const pendingRecheckLimit = 10
 // 每轮只取 pendingRecheckLimit 条并轮转偏移量，超出的记录在后续轮次补上，不会被永久跳过。
 // 已经落在本轮增量窗口里的记录不再重复请求。
 func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provider string, cli source, from, to time.Time) error {
+	p.mu.Lock()
 	offset := p.pendingOffset[provider]
+	p.mu.Unlock()
 	times, err := p.st.PendingTimes(ctx, provider, offset, pendingRecheckLimit)
 	if err != nil {
 		return err
@@ -210,7 +225,9 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 			return err
 		}
 	}
+	p.mu.Lock()
 	p.pendingOffset[provider] = offset + len(times)
+	p.mu.Unlock()
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	var covered time.Time
 	for _, at := range times {
@@ -239,29 +256,36 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 // Run 每秒推进付款窗口，并按各平台的查询间隔调度扫描。是否需要请求交易所由 Scan
 // 自身判断，这里不再重复粗略的“有没有订单”判断。
 func (p *Poller) Run(ctx context.Context) {
-	monitorCtx, stopMonitor := context.WithCancel(ctx)
-	var monitorWG sync.WaitGroup
-	monitorWG.Go(func() { p.monitorGRAM(monitorCtx) })
-	defer func() { stopMonitor(); monitorWG.Wait() }()
-
+	var workers sync.WaitGroup
+	workers.Go(func() { p.monitorGRAM(ctx) })
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
+		workers.Go(func() {
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := p.Scan(ctx, provider); err != nil && ctx.Err() == nil {
+					slog.Warn("收款扫描未完成", "provider", provider)
+				}
+				timer := time.NewTimer(time.Duration(p.cfg.Get().ProviderInterval(provider)) * time.Second)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+		})
+	}
+	defer workers.Wait()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	next := map[string]time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cfg := p.cfg.Get()
-			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
-				if !time.Now().Before(next[provider]) {
-					if err := p.Scan(ctx, provider); err != nil && ctx.Err() == nil {
-						slog.Warn("收款扫描未完成", "provider", provider)
-					}
-					next[provider] = time.Now().Add(time.Duration(cfg.ProviderInterval(provider)) * time.Second)
-				}
-			}
-			if err := p.st.Expire(ctx, cfg.Order.SlotGraceSeconds); err != nil && ctx.Err() == nil {
+			if err := p.st.Expire(ctx, p.cfg.Get().Order.SlotGraceSeconds); err != nil && ctx.Err() == nil {
 				slog.Error("订单过期状态写入失败")
 			}
 		}
@@ -319,8 +343,9 @@ func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider st
 	}
 	// 仍在等待付款的订单必须被完整覆盖：首次扫描没有任何覆盖，起点可能比最早一张订单的
 	// 窗口更晚，必须回溯；已有游标时始终覆盖其后的全部对账历史。
-	var earliest model.Order
-	if e := p.st.DB().WithContext(ctx).Where("status = ? AND provider = ?", model.Ready, provider).Order("selected_at").First(&earliest).Error; e == nil && earliest.SelectedAt != nil {
+	var earliest model.PaymentAttempt
+	e := p.st.DB().WithContext(ctx).Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ?", model.Ready, provider).Order("a.selected_at").First(&earliest).Error
+	if e == nil {
 		floor := earliest.SelectedAt.Add(-lookback)
 		if first && floor.Before(start) {
 			start = floor

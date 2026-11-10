@@ -41,6 +41,20 @@
     </section>
 
     {{range .Confirmations}}<p class="banner" role="status">到账确认任务 · {{.State}} · 最迟自动确认 {{.Deadline}}。超过期限的记录需人工核对，不会自动标记付款。</p>{{end}}
+    <h2>付款尝试记录</h2>
+    <section class="card"><div class="card-b">{{range .PaymentAttempts}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.Receiver}} · {{.Currency}} · 精确应付 {{.Amount}} · {{.SelectedAt}} 至 {{.ExpiresAt}}</p>{{else}}尚未选择付款方式{{end}}</div></section>
+    <section class="card" style="margin-top:16px"><div class="card-b"><h2>补扫历史到账</h2><p class="hint">按已保存的付款窗口重新查询平台。先等补扫完成，再核对证据补单；主动取消的订单只用于核对到账与退款。</p><form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/rescan"><input type="hidden" name="csrf" value="{{.Base.CSRF}}"><label>核对原因</label><input class="input" name="reason" maxlength="300" required><button class="btn btn-ghost" type="submit" style="margin-top:12px">申请历史补扫</button></form>{{range .HistoricalScans}}<p>{{if .Automatic}}自动结算复扫{{else}}管理员补扫{{end}} · {{.Provider}} · {{.State}} · 已扫描至 {{.Cursor}} · {{.Operator}} · {{.Reason}}{{if .LastError}} · {{.LastError}}{{end}}</p>{{end}}</div></section>
+    {{if or (eq .Order.Status "EXPIRED") (eq .Order.Status "READY")}}
+    <section class="card" style="margin-top:16px"><div class="card-b">
+      <h2>按到账证据补单</h2><p class="hint">先核对商城未交付并同意接收此订单。仅接受付款窗口内、金额与收款账户完全匹配的已确认资金事件；不会依据手填金额核销。</p>
+      <form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/reconcile">
+        <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+        <div class="form-grid"><div class="field"><label>到账平台</label><select class="input" name="provider"><option value="binance">Binance</option><option value="okx">OKX</option><option value="ton">TON</option></select></div>
+        <div class="field"><label>原始资金事件编号</label><input class="input" name="event_id" required></div>
+        <div class="field full"><label>核对结果与补单原因</label><input class="input" name="reason" required maxlength="300"></div></div>
+        <button class="btn btn-ghost" type="submit" style="margin-top:12px">核对证据并补单</button>
+      </form></div></section>{{end}}
+    {{range .PaymentRecoveries}}<p>补单审计 · {{.CreatedAt}} · {{.Operator}} · {{.Provider}} / {{.EventID}} · {{.Reason}}</p>{{end}}
     <h2>已认领资金事件</h2>
     <section class="card">
       <div class="card-b">

@@ -23,7 +23,6 @@ import (
 	"litepay/internal/amount"
 	"litepay/internal/config"
 	"litepay/internal/gram"
-	"litepay/internal/model"
 	"litepay/internal/store"
 )
 
@@ -289,30 +288,29 @@ func (m *Manager) Load(ctx context.Context) error {
 func (m *Manager) ensureAPIToken(ctx context.Context) error {
 	stored, err := m.st.LoadCredential(ctx, "bepusdt_api_token")
 	if err != nil {
-		return fmt.Errorf("读取 API Token 失败: %w", err)
+		return err
 	}
-	if stored != nil && strings.TrimSpace(stored.Value) != "" {
-		next := clone(m.cur.Load())
-		next.BEpusdt.APIToken = stored.Value
-		m.cur.Store(next)
-		return nil
+	token := ""
+	if stored != nil {
+		token = stored.Value
 	}
-	token, err := newAPIToken()
+	if strings.TrimSpace(token) == "" {
+		token, err = newAPIToken()
+		if err != nil {
+			return err
+		}
+	}
+	version, err := m.st.InstallSigningKey(ctx, token, "startup", false)
 	if err != nil {
 		return err
 	}
-	if err := m.st.SaveCredential(ctx, model.Credential{
-		Name: "bepusdt_api_token", Value: token, UpdatedBy: "startup",
-	}); err != nil {
-		return fmt.Errorf("保存系统生成的 API Token 失败: %w", err)
-	}
 	next := clone(m.cur.Load())
 	next.BEpusdt.APIToken = token
+	next.BEpusdt.TokenVersion = version
 	m.cur.Store(next)
 	return nil
 }
 
-// RotateAPIToken 生成并持久化新的 API Token。
 func (m *Manager) RotateAPIToken(ctx context.Context, operator string) (string, error) {
 	token, err := newAPIToken()
 	if err != nil {
@@ -320,13 +318,13 @@ func (m *Manager) RotateAPIToken(ctx context.Context, operator string) (string, 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.st.SaveCredential(ctx, model.Credential{
-		Name: "bepusdt_api_token", Value: token, UpdatedBy: operator,
-	}); err != nil {
-		return "", fmt.Errorf("保存新 API Token 失败: %w", err)
+	version, err := m.st.InstallSigningKey(ctx, token, operator, true)
+	if err != nil {
+		return "", err
 	}
 	next := clone(m.cur.Load())
 	next.BEpusdt.APIToken = token
+	next.BEpusdt.TokenVersion = version
 	m.cur.Store(next)
 	return token, nil
 }
@@ -421,7 +419,7 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 	if err != nil {
 		return err
 	}
-	if err := m.st.SaveSettingPayload(ctx, string(payload), operator); err != nil {
+	if err := m.st.SaveSettingAndArchiveTON(ctx, string(payload), operator, next.TON.Address); err != nil {
 		return fmt.Errorf("保存配置失败: %w", err)
 	}
 	m.cur.Store(next)

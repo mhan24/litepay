@@ -58,6 +58,11 @@ var requestBudget struct {
 }
 
 func (c *Client) get(ctx context.Context, method string, q url.Values, out any) error {
+	q.Set("address", c.receiver)
+	return c.requestJSON(ctx, c.base, method, q, out, true)
+}
+
+func (c *Client) requestJSON(ctx context.Context, base, method string, q url.Values, out any, enveloped bool) error {
 	if c.addr == nil {
 		return errors.New("GRAM 收款地址无效")
 	}
@@ -76,8 +81,7 @@ func (c *Client) get(ctx context.Context, method string, q url.Values, out any) 
 			}
 		}
 	}
-	q.Set("address", c.receiver)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/"+method+"?"+q.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/"+method+"?"+q.Encode(), nil)
 	if err != nil {
 		return err
 	}
@@ -89,7 +93,10 @@ func (c *Client) get(ctx context.Context, method string, q url.Values, out any) 
 		return errors.New("Toncenter 请求失败")
 	}
 	if status != 200 {
-		return fmt.Errorf("Toncenter HTTP %d", status)
+		return fmt.Errorf("Toncenter %s HTTP %d", method, status)
+	}
+	if !enveloped {
+		return json.Unmarshal(body, out)
 	}
 	var envelope struct {
 		OK     bool            `json:"ok"`
@@ -147,7 +154,7 @@ func (c *Client) decode(raw rawTransaction) (model.Transaction, uint64, error) {
 	if err != nil || le != nil || lt == 0 || tx.LT != lt || int64(tx.Now) != raw.Utime || raw.Utime <= 0 || !bytes.Equal(hash, root.Hash()) || !bytes.Equal(tx.AccountAddr, c.addr.Data()) {
 		return result, 0, errors.New("交易身份与 BOC 不一致")
 	}
-	result = model.Transaction{Provider: "ton", EventID: hex.EncodeToString(hash), Reference: hex.EncodeToString(hash), Receiver: c.receiver, Currency: "GRAM", OccurredAt: time.Unix(raw.Utime, 0), State: model.Rejected, Reason: "not_incoming_payment"}
+	result = model.Transaction{Provider: "ton", LogicalTime: raw.ID.LT, EventID: hex.EncodeToString(hash), Reference: hex.EncodeToString(hash), Receiver: c.receiver, Currency: "GRAM", OccurredAt: time.Unix(raw.Utime, 0), State: model.Rejected, Reason: "not_incoming_payment"}
 	if tx.IO.In == nil || tx.IO.In.MsgType != tlb.MsgTypeInternal {
 		return result, lt, nil
 	}

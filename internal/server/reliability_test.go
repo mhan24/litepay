@@ -27,6 +27,7 @@ func TestMerchantLongTimeoutsAndAdminNotificationRecovery(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Admin.Password = "local-test-password"
 	cfg.Server.BaseURL = "https://pay.example"
 	cfg.Server.NotifyHosts = []string{"shop.example"}

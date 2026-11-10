@@ -142,6 +142,8 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.GET("/orders/:trade_no", h.AdminOrderDetail)
 		adm.POST("/orders/:trade_no/close", h.AdminCloseOrder)
 		adm.POST("/orders/:trade_no/retry-notify", h.AdminRetryNotify)
+		adm.POST("/orders/:trade_no/reconcile", h.AdminReconcilePayment)
+		adm.POST("/orders/:trade_no/rescan", h.AdminHistoricalScan)
 		adm.GET("/integration", h.AdminIntegration)
 		adm.GET("/settings", h.AdminSettings)
 		adm.GET("/gram/status", h.GRAMStatus)

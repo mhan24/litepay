@@ -21,6 +21,7 @@ const (
 )
 
 type Order struct {
+	SigningKeyID  uint   `gorm:"not null;default:0"`
 	ID            uint   `gorm:"primaryKey"`
 	TradeNo       string `gorm:"uniqueIndex;not null"`
 	OutTradeNo    string `gorm:"uniqueIndex;not null"`
@@ -61,24 +62,28 @@ type Slot struct {
 // RawAmount keeps the exact original amount text of records rejected for amount reasons
 // (invalid_amount / conflicting_amount), so manual reconciliation never depends on rounding.
 type Transaction struct {
-	Provider   string `gorm:"primaryKey"`
-	EventID    string `gorm:"primaryKey"`
-	Reference  string `gorm:"index"`
-	Receiver   string
-	Currency   string
-	Units      int64
-	OccurredAt time.Time `gorm:"index"`
-	State      string
-	Reason     string
-	RawAmount  string
-	Assets     string
-	OrderID    *uint `gorm:"uniqueIndex"`
-	UpdatedAt  time.Time
+	AttemptID        *uint
+	MasterchainSeqno int64
+	LogicalTime      string
+	Provider         string `gorm:"primaryKey"`
+	EventID          string `gorm:"primaryKey"`
+	Reference        string `gorm:"index"`
+	Receiver         string
+	Currency         string
+	Units            int64
+	OccurredAt       time.Time `gorm:"index"`
+	State            string
+	Reason           string
+	RawAmount        string
+	Assets           string
+	OrderID          *uint `gorm:"uniqueIndex"`
+	UpdatedAt        time.Time
 }
 
 func (t Transaction) Amount() string { return amount.String(t.Units) }
 
 type Callback struct {
+	SigningKeyID uint   `gorm:"not null;default:0"`
 	AttemptBase  int    `gorm:"not null;default:0"`
 	AttemptLimit int    `gorm:"not null;default:0"`
 	State        string `gorm:"index;not null;default:queued"`
@@ -154,3 +159,66 @@ type CallbackRecovery struct {
 	PreviousAttempts int
 	CreatedAt        time.Time
 }
+
+// PaymentAttempt is an immutable payment instruction, including superseded selections.
+type PaymentAttempt struct {
+	RecoveredFromEvent string
+	ID                 uint   `gorm:"primaryKey"`
+	OrderID            uint   `gorm:"index;not null"`
+	Provider           string `gorm:"index:attempt_match"`
+	Receiver           string `gorm:"index:attempt_match"`
+	Currency           string `gorm:"index:attempt_match"`
+	Units              int64  `gorm:"index:attempt_match"`
+	Precision          int
+	SelectedAt         time.Time
+	ExpiresAt          time.Time
+	SettleUntil        time.Time `gorm:"index"`
+	RateUSD            string
+	RateAt             *time.Time
+	CreatedAt          time.Time
+}
+
+type SigningKey struct {
+	ID        uint   `gorm:"primaryKey"`
+	Token     string `gorm:"not null"`
+	RetiredAt *time.Time
+	CreatedAt time.Time
+}
+
+type PaymentRecovery struct {
+	ID        uint `gorm:"primaryKey"`
+	OrderID   uint `gorm:"index"`
+	AttemptID uint
+	Provider  string
+	EventID   string
+	Operator  string
+	Reason    string
+	CreatedAt time.Time
+}
+
+// HistoricalScan is an audited, resumable administrative request; it never changes a
+// closed order's status. Evidence must still pass normal provider and finality validation.
+type HistoricalScan struct {
+	Automatic bool `gorm:"not null;default:false"`
+	ID        uint `gorm:"primaryKey"`
+	OrderID   uint `gorm:"index"`
+	AttemptID uint
+	Provider  string `gorm:"index"`
+	Receiver  string
+	From      time.Time
+	To        time.Time
+	Cursor    time.Time
+	ChunkTo   time.Time
+	LT        string
+	Hash      string
+	OldestAt  time.Time
+	Pages     int
+	State     string `gorm:"index"`
+	LastError string
+	Operator  string
+	Reason    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func (a PaymentAttempt) Amount() string { return amount.Text(a.Units, a.Precision) }

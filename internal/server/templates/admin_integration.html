@@ -35,9 +35,10 @@
 
     <p class="section-desc">支持 USD 订单；USDT / USDC 使用站内转账，GRAM 使用 TON 主网转账。GRAM 回调 amount 为 USD，actual_amount 为 GRAM。成功支付回调 status=2，商户须验签并以订单号幂等处理，返回 success 或 ok。网关不发送过期回调；商城按自身订单期限关单。</p>
 
+    <p class="hint">待通知 {{.PendingNotifyCount}} 笔。历史订单保留原密钥版本，轮换前请确认商城能验证旧版本。</p>
     <form method="post" action="{{adminPath}}/settings/token">
       <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
-      <button class="btn btn-danger" onclick="return confirm('轮换会导致尚未更新 Token 的商城无法验签，确定继续？')">轮换 API Token</button>
+      <button class="btn btn-danger" onclick="return confirm('历史通知继续使用原密钥版本，新订单使用新版本；已确认商城兼容后继续轮换？')">轮换 API Token</button>
     </form>
   </main>
   {{template "theme_script" .}}

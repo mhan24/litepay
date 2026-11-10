@@ -76,6 +76,7 @@ func IsSupportedCurrency(currency string) bool {
 
 // ServerConfig HTTP 服务配置。
 type ServerConfig struct {
+	Production     bool     `yaml:"production"`
 	NotifyHosts    []string `yaml:"notify_hosts"`    // Exact callback hostnames in production; no wildcards.
 	StoreURL       string   `yaml:"store_url"`       // 根地址跳转目标；留空返回 404。
 	TrustedProxies []string `yaml:"trusted_proxies"` // Only explicit reverse proxies may supply client IP headers.
@@ -90,8 +91,9 @@ type DatabaseConfig struct {
 
 // BEpusdtConfig 是对独角数卡暴露的 BEpusdt API 配置。
 type BEpusdtConfig struct {
-	APIToken string `yaml:"api_token"` // 由系统生成和轮换
-	Reselect bool   `yaml:"reselect"`  // 是否允许付款人重选
+	TokenVersion uint   `yaml:"-"`
+	APIToken     string `yaml:"api_token"` // 由系统生成和轮换
+	Reselect     bool   `yaml:"reselect"`  // 是否允许付款人重选
 }
 
 // BinanceConfig 币安只读 API 配置。
@@ -174,7 +176,8 @@ type AdminConfig struct {
 func Default() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Addr: "0.0.0.0:8080",
+			Addr:       "0.0.0.0:8080",
+			Production: true,
 		},
 		Database: DatabaseConfig{Path: "./data/litepay-dev.db"},
 		BEpusdt:  BEpusdtConfig{Reselect: true},
@@ -256,6 +259,9 @@ func (c *Config) normalize() error {
 	base, err := url.Parse(c.Server.BaseURL)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") {
 		return fmt.Errorf("server.base_url 必须是无路径、查询参数和用户信息的 HTTP(S) 站点地址")
+	}
+	if c.Server.Production && (base.Scheme != "https" || len(c.Server.NotifyHosts) == 0) {
+		return fmt.Errorf("production 模式要求 HTTPS base_url 和非空 notify_hosts")
 	}
 	c.Binance.BaseURL = strings.TrimRight(c.Binance.BaseURL, "/")
 	if c.Binance.PollInterval < 1 {
@@ -499,14 +505,14 @@ func (c *Config) AnyProviderEnabled() bool {
 	return c.BinanceEnabled() || c.OKXEnabled() || c.TONEnabled()
 }
 
-// ValidateNotifyURL enforces transport and merchant identity in production. Development
-// HTTP gateways retain local integration support; production is selected by HTTPS base_url.
+// ValidateNotifyURL enforces explicit production transport and merchant identity.
+// Editing base_url cannot disable production policy; HTTPS development also keeps TLS checks.
 func (c *Config) ValidateNotifyURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("notify_url 必须是有效的商户回调地址")
 	}
-	if strings.HasPrefix(c.Server.BaseURL, "https://") {
+	if c.Server.Production || strings.HasPrefix(c.Server.BaseURL, "https://") {
 		if u.Scheme != "https" || u.Port() != "" && u.Port() != "443" {
 			return fmt.Errorf("生产回调必须使用 HTTPS 标准端口")
 		}

@@ -74,6 +74,33 @@ class PaymentDBTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             tool.validate(self.path)
 
+class PaymentAttemptDBTest(PaymentDBTest):
+    def setUp(self):
+        super().setUp()
+        self.db.executescript('''PRAGMA user_version=10;
+            ALTER TABLE orders ADD COLUMN signing_key_id INTEGER DEFAULT 1;
+            ALTER TABLE callbacks ADD COLUMN signing_key_id INTEGER DEFAULT 1;
+            ALTER TABLE transactions ADD COLUMN attempt_id INTEGER DEFAULT NULL;
+            ALTER TABLE transactions ADD COLUMN receiver TEXT;
+            ALTER TABLE transactions ADD COLUMN currency TEXT;
+            ALTER TABLE transactions ADD COLUMN units INTEGER;
+            ALTER TABLE transactions ADD COLUMN occurred_at TEXT;
+            CREATE TABLE payment_attempts(id,order_id,provider,receiver,currency,units,selected_at,expires_at,settle_until);
+            CREATE TABLE signing_keys(id,token);
+            CREATE TABLE payment_recoveries(order_id,operator,reason);
+            CREATE TABLE historical_scans(order_id,attempt_id,cursor,"from","to",operator,reason);
+            INSERT INTO signing_keys VALUES(1,'private-key-version');
+            INSERT INTO payment_attempts VALUES(1,1,'okx','receiver','USDT',100,'2026-11-10 00:00','2026-11-10 01:00','2026-11-12 01:00');
+        ''')
+        self.db.commit()
+
+    def test_versioned_keys_and_historical_attempts_preserved(self):
+        self.assertEqual(tool.drill(self.path)['schema'], 10)
+        self.db.execute('UPDATE orders SET signing_key_id=99')
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+
 
 if __name__ == '__main__':
     unittest.main()

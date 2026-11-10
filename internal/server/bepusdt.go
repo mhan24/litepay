@@ -177,7 +177,7 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		ttl = time.Duration(req.Timeout) * time.Second
 	}
 	tradeNo := generateTradeNo()
-	order, err := h.st.Create(c.Request.Context(), model.Order{TradeNo: tradeNo, OutTradeNo: req.OrderID, Name: strings.TrimSpace(req.Name), OriginUnits: units, NotifyURL: req.NotifyURL, ReturnURL: req.RedirectURL, ExpiresAt: time.Now().Add(ttl), CurrencyLimit: req.Currencies, Reselect: reselect})
+	order, err := h.st.Create(c.Request.Context(), model.Order{SigningKeyID: cfg.BEpusdt.TokenVersion, TradeNo: tradeNo, OutTradeNo: req.OrderID, Name: strings.TrimSpace(req.Name), OriginUnits: units, NotifyURL: req.NotifyURL, ReturnURL: req.RedirectURL, ExpiresAt: time.Now().Add(ttl), CurrencyLimit: req.Currencies, Reselect: reselect})
 	if err != nil {
 		h.bepusdtFail(c, "order create failed: "+err.Error())
 		return

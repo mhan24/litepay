@@ -69,6 +69,9 @@ func TestHistoryPageMoreThanHundredPagesWithInterruption(t *testing.T) {
 	calls := 0
 	fail := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if finalityFixture(w, r, rowsForFinality(r, rows)) {
+			return
+		}
 		calls++
 		if fail {
 			http.Error(w, "temporary", 503)
@@ -133,4 +136,20 @@ func TestHistoryPageInclusiveAnchorAtEndOfHistory(t *testing.T) {
 	if err != nil || len(rows) != 0 || next.Active {
 		t.Fatal(rows, next, err)
 	}
+}
+
+func rowsForFinality(r *http.Request, rows []rawTransaction) []rawTransaction {
+	if r.URL.Path != "/api/v3/transactions" {
+		return nil
+	}
+	low, _ := strconv.ParseUint(r.URL.Query().Get("start_lt"), 10, 64)
+	high, _ := strconv.ParseUint(r.URL.Query().Get("end_lt"), 10, 64)
+	var out []rawTransaction
+	for _, row := range rows {
+		lt, _ := strconv.ParseUint(row.ID.LT, 10, 64)
+		if lt >= low && lt <= high {
+			out = append(out, row)
+		}
+	}
+	return out
 }

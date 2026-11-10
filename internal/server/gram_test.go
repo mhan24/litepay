@@ -30,6 +30,7 @@ func TestGRAMCashierAndSettings(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Admin.Password = "local-test-password"
 	cfg.TON.Address = gram.DefaultAddress
 	cfg.Checkout.Currencies = []string{"USDT", "USDC", "GRAM"}

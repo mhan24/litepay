@@ -16,6 +16,7 @@ import tempfile
 
 BASE_TABLES = ('orders', 'transactions', 'callbacks', 'scan_cursors', 'settings', 'credentials', 'slots', 'notify_logs')
 NEW_TABLES = ('confirmation_tasks', 'ton_scan_checkpoints', 'callback_recoveries')
+ATTEMPT_TABLES = ('payment_attempts', 'signing_keys', 'payment_recoveries', 'historical_scans')
 
 
 def connect(path):
@@ -30,9 +31,10 @@ def validate(path):
         if db.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('foreign key check failed')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (8, 9):
+        if version not in (8, 9, 10):
             raise ValueError('unsupported payment schema')
-        tables = BASE_TABLES + (NEW_TABLES if version == 9 else ())
+        tables = BASE_TABLES + (NEW_TABLES if version >= 9 else ())
+        tables += ATTEMPT_TABLES if version >= 10 else ()
         counts = {name: db.execute('SELECT count(*) FROM ' + name).fetchone()[0] for name in tables}
         problems = [
             "SELECT count(*) FROM orders o WHERE o.status='PAID' AND ((SELECT count(*) FROM transactions t WHERE t.order_id=o.id AND t.state='confirmed')<>1 OR (SELECT count(*) FROM callbacks c WHERE c.order_id=o.id)<>1)",
@@ -40,11 +42,22 @@ def validate(path):
             "SELECT count(*) FROM callbacks c LEFT JOIN orders o ON o.id=c.order_id WHERE o.id IS NULL OR o.status<>'PAID'",
             "SELECT count(*) FROM slots s LEFT JOIN orders o ON o.id=s.order_id WHERE s.order_id IS NOT NULL AND (o.id IS NULL OR o.status<>'READY' OR s.provider<>o.provider OR s.currency<>o.currency OR s.units<>o.pay_units)",
         ]
-        if version == 9:
+        if version >= 9:
             problems += [
                 "SELECT count(*) FROM confirmation_tasks q LEFT JOIN transactions t ON t.provider=q.provider AND t.event_id=q.event_id WHERE t.event_id IS NULL OR q.state NOT IN ('pending','resolved','manual_review') OR q.deadline IS NULL",
                 "SELECT count(*) FROM ton_scan_checkpoints WHERE active=1 AND (receiver='' OR \"from\">\"to\" OR (pages>0 AND (lt='' OR hash='')))",
                 "SELECT count(*) FROM callbacks WHERE attempt_base>attempts OR recoveries<0",
+            ]
+        if version >= 10:
+            # Superseded instructions keep their own reservations for the same order.
+            problems[3] = "SELECT count(*) FROM slots s LEFT JOIN orders o ON o.id=s.order_id WHERE s.order_id IS NOT NULL AND (o.id IS NULL OR o.status<>'READY' OR NOT EXISTS (SELECT 1 FROM payment_attempts a WHERE a.order_id=o.id AND a.provider=s.provider AND a.currency=s.currency AND a.units=s.units))"
+            problems += [
+                "SELECT count(*) FROM orders o LEFT JOIN signing_keys k ON k.id=o.signing_key_id WHERE o.signing_key_id<>0 AND k.id IS NULL",
+                "SELECT count(*) FROM callbacks c LEFT JOIN signing_keys k ON k.id=c.signing_key_id WHERE c.signing_key_id<>0 AND k.id IS NULL",
+                "SELECT count(*) FROM payment_attempts a LEFT JOIN orders o ON o.id=a.order_id WHERE o.id IS NULL OR a.selected_at>a.expires_at OR a.expires_at>a.settle_until OR a.units<=0",
+                "SELECT count(*) FROM transactions t LEFT JOIN payment_attempts a ON a.id=t.attempt_id WHERE t.attempt_id IS NOT NULL AND (a.id IS NULL OR a.order_id<>t.order_id OR a.provider<>t.provider OR a.receiver<>t.receiver OR a.currency<>t.currency OR a.units<>t.units OR t.occurred_at<a.selected_at OR t.occurred_at>a.expires_at)",
+                "SELECT count(*) FROM payment_recoveries r LEFT JOIN orders o ON o.id=r.order_id WHERE o.id IS NULL OR r.reason='' OR r.operator=''",
+                "SELECT count(*) FROM historical_scans h LEFT JOIN payment_attempts a ON a.id=h.attempt_id WHERE a.id IS NULL OR a.order_id<>h.order_id OR h.cursor<h.\"from\" OR h.cursor>h.\"to\" OR h.reason='' OR h.operator=''",
             ]
         if any(db.execute(sql).fetchone()[0] for sql in problems):
             raise ValueError('payment evidence, reservation, or recovery invariants failed')

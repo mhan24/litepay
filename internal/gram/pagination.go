@@ -89,5 +89,8 @@ func (c *Client) HistoryPage(ctx context.Context, cp model.TONScanCheckpoint) ([
 	if finished || len(rows) < 100 {
 		next.Active = false
 	}
+	if err := c.verifyFinality(ctx, out); err != nil {
+		return nil, cp, err
+	}
 	return out, next, nil
 }

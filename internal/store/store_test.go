@@ -138,6 +138,7 @@ func TestMultipleCandidatesAndClosedOrders(t *testing.T) {
 	if e := s.DB().Model(b).Update("pay_units", a.PayUnits).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, s)
 	result, e := s.Process(ctx, evidence(a, "ambiguous"), "")
 	if e != nil || result != "multiple_orders" {
 		t.Fatal(result, e)
@@ -172,6 +173,9 @@ func TestPendingEvidenceAndFinalDeadline(t *testing.T) {
 	if e := s.DB().Model(closed).Updates(past).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, s)
+	s.DB().Model(&model.PaymentAttempt{}).Where("order_id = ?", closed.ID).Update("settle_until", time.Now().Add(-time.Minute))
+	completedSettlementFixture(t, s, closed.ID)
 	if e := s.ScanResult(ctx, "binance", time.Now(), nil); e != nil {
 		t.Fatal(e)
 	}
@@ -199,6 +203,7 @@ func TestLateScanStillClaimsOnTimePayment(t *testing.T) {
 	if e := s.DB().Model(o).Updates(past).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, s)
 	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("expires_at", time.Now().Add(-time.Minute)).Error; e != nil {
 		t.Fatal(e)
 	}
@@ -223,6 +228,9 @@ func TestExpireRequiresSuccessfulCoverage(t *testing.T) {
 	if e := s.DB().Model(o).Updates(map[string]any{"selected_at": time.Now().Add(-6 * time.Minute), "expires_at": windowEnd}).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, s)
+	s.DB().Model(&model.PaymentAttempt{}).Where("order_id = ?", o.ID).Update("settle_until", time.Now().Add(-time.Minute))
+	completedSettlementFixture(t, s, o.ID)
 	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("expires_at", windowEnd).Error; e != nil {
 		t.Fatal(e)
 	}
@@ -267,6 +275,7 @@ func TestUnconfirmedDepositHoldsOrderOpen(t *testing.T) {
 	if e := s.DB().Model(o).Updates(map[string]any{"selected_at": time.Now().Add(-6 * time.Minute), "expires_at": windowEnd}).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, s)
 	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("expires_at", windowEnd).Error; e != nil {
 		t.Fatal(e)
 	}
@@ -288,6 +297,8 @@ func TestUnconfirmedDepositHoldsOrderOpen(t *testing.T) {
 	if e := s.DB().Model(&model.ConfirmationTask{}).Where("event_id = ?", tx.EventID).Update("deadline", time.Now().Add(-time.Second)).Error; e != nil {
 		t.Fatal(e)
 	}
+	s.DB().Model(&model.PaymentAttempt{}).Where("order_id = ?", o.ID).Update("settle_until", time.Now().Add(-time.Second))
+	completedSettlementFixture(t, s, o.ID)
 	if e := s.Expire(ctx, 0); e != nil {
 		t.Fatal(e)
 	}
@@ -378,6 +389,7 @@ func TestReselectRejectsOutOfRangeSelectedAmount(t *testing.T) {
 	if e = s.DB().Model(o).Update("pay_units", amount.MaxMall).Error; e != nil {
 		t.Fatal(e)
 	}
+	syncAttemptFixture(t, s)
 	if _, e = s.Select(ctx, "a", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120); e == nil {
 		t.Fatal("out-of-range selected amount handed back to the payer")
 	}

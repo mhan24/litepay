@@ -26,6 +26,7 @@ func TestSignedCashierAndAdminPages(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Admin.Password = "test-password"
 	cfg.Server.BaseURL = "https://pay.example"
 	cfg.Server.NotifyHosts = []string{"shop.example"}
@@ -110,6 +111,7 @@ func TestBEpusdtCreateRejectsInteroperabilityRange(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -168,6 +170,7 @@ func TestPaymentSelectionRejectsAlignmentOverflow(t *testing.T) {
 	}
 	defer st.Close()
 	cfg := config.Default()
+	cfg.Server.Production = false
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
