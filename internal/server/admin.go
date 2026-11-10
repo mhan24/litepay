@@ -712,6 +712,14 @@ func safeAdminNext(raw, root string) bool {
 }
 
 func (h *Handlers) AdminDashboard(c *gin.Context) {
+	queues, err := h.st.QueueStats(c.Request.Context())
+	if err != nil {
+		h.renderAdminError(c, err)
+		return
+	}
+	cancelHealth, cancelErr := h.st.IntegrationHealth(c.Request.Context())
+	cancelWarning := h.C().Server.CancelSyncRequired && (cancelErr != nil || !cancelHealth.Healthy || cancelHealth.Failures > 0 || time.Since(cancelHealth.ReceivedAt) > 45*time.Second)
+
 	var exhausted, review, merchantReview int64
 	var orders []model.Order
 	var evidence []model.Transaction
@@ -732,7 +740,7 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 			return
 		}
 	}
-	c.HTML(200, "admin_dashboard.html", gin.H{"Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
+	c.HTML(200, "admin_dashboard.html", gin.H{"Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "Queues": queues, "CancelHealth": cancelHealth, "CancelWarning": cancelWarning, "CancelRequired": h.C().Server.CancelSyncRequired, "BinanceUsage": h.poller.BinanceUsage(), "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
 }
 func (h *Handlers) AdminOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))

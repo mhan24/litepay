@@ -60,8 +60,9 @@
     {{with externalURL .ReturnURL}}<a class="btn" href="{{.}}">返回商户查看订单</a>{{end}}
   </main>
 {{template "theme_script" .}}
-{{if .SettlementPending}}<script>
-(function poll(){setTimeout(function(){fetch('/api/order/status?order_id='+encodeURIComponent({{.TradeNo}}),{cache:'no-store'}).then(function(r){return r.json()}).then(function(r){if(r.code===0&&r.data.payment_phase!=='settling'){location.reload();return}poll()}).catch(poll)},3000)})();
+{{if .SettlementPending}}{{template "status_poll_script" .}}<script>
+var phaseChanged=false;
+window.pollOrderStatus({{.TradeNo}},function(d){if(d.payment_phase!=='settling'){phaseChanged=true;location.reload()}},function(){return phaseChanged});
 </script>{{end}}
 </body>
 </html>

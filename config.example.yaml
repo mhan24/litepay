@@ -4,6 +4,10 @@
 # 都保存在 SQLite 中，首次启动后请在 /admin/settings 配置。
 
 server:
+  # 并发商户回调数，默认 8，最大 32；单订单仍使用数据库租约隔离。
+  callback_workers: 8
+  # 部署取消同步脚本并启用心跳上报后开启；心跳过期时 readyz 返回 503。
+  cancel_sync_required: false
   # 本机开发显式关闭；生产必须为 true，并配置 HTTPS 与商户主机白名单。
   production: false
   # 商城兼容历史密钥的联动验收通过后才可设为 true；否则生产轮换被阻止。

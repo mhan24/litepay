@@ -101,7 +101,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		st:             st,
 		log:            slog.Default(),
 		poller:         poller,
-		selectionLimit: newSelectionLimiter(),
+		selectionLimit: newSelectionLimiter(), readLimit: newSelectionLimiter(),
 	}
 	if cfg.AdminEnabled() {
 		h.admin = newAdminAuth(cfg)
@@ -110,12 +110,13 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	// ---- BEpusdt API（独角数卡收银台模式）----
 	r.POST("/api/v1/order/create-order", h.BEpusdtCreateOrder)
 	r.POST("/api/v1/order/cancel-transaction", h.BEpusdtCancelOrder)
+	r.POST("/api/v1/order/cancel-sync-status", h.CancelSyncHeartbeat)
 
 	// ---- 收银台 ----
-	r.GET("/pay/:trade_no", h.CashierPage)
+	r.GET("/pay/:trade_no", h.LimitPublicRead, h.CashierPage)
 
 	// ---- 前端订单状态查询接口 ----
-	r.GET("/api/order/status", h.OrderStatus)
+	r.GET("/api/order/status", h.LimitPublicRead, h.OrderStatus)
 	r.POST("/api/order/payment", h.LimitPaymentSelection, h.SelectPayment)
 
 	// ---- 运维 ----
@@ -139,6 +140,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 
 		adm := adminRoot.Group("", h.AdminAuth())
 		adm.GET("", h.AdminDashboard)
+		adm.GET("/operations", h.AdminOperations)
 		adm.GET("/orders", h.AdminOrders)
 		adm.GET("/orders/:trade_no", h.AdminOrderDetail)
 		adm.POST("/orders/:trade_no/close", h.AdminCloseOrder)

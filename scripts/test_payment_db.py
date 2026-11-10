@@ -103,6 +103,7 @@ class PaymentAttemptDBTest(PaymentDBTest):
 
 
 class CapacityDBTest(PaymentAttemptDBTest):
+    expected_schema = 11
     def setUp(self):
         super().setUp()
         self.db.executescript('''PRAGMA user_version=11;
@@ -114,14 +115,14 @@ class CapacityDBTest(PaymentAttemptDBTest):
         self.db.commit()
 
     def test_versioned_keys_and_historical_attempts_preserved(self):
-        self.assertEqual(tool.drill(self.path)['schema'], 11)
+        self.assertEqual(tool.drill(self.path)['schema'], self.expected_schema)
         self.db.execute('UPDATE orders SET signing_key_id=99')
         self.db.commit()
         with self.assertRaises(ValueError):
             tool.validate(self.path)
 
     def test_review_hold_and_expiry_schedule_invariants(self):
-        self.assertEqual(tool.validate(self.path)['schema'], 11)
+        self.assertEqual(tool.validate(self.path)['schema'], self.expected_schema)
         self.db.execute("UPDATE callbacks SET delivered_at='2026-11-10'")
         self.db.commit()
         with self.assertRaises(ValueError):
@@ -131,6 +132,24 @@ class CapacityDBTest(PaymentAttemptDBTest):
         self.db.commit()
         with self.assertRaises(ValueError):
             tool.validate(self.path)
+
+    def test_in_flight_callback_is_a_valid_backup_state(self):
+        self.db.execute("UPDATE callbacks SET state='in_flight'")
+        self.db.commit()
+        self.assertEqual(tool.drill(self.path)['schema'], self.expected_schema)
+
+
+class QueueDBTest(CapacityDBTest):
+    expected_schema = 12
+
+    def setUp(self):
+        super().setUp()
+        self.db.executescript('''PRAGMA user_version=12;
+            ALTER TABLE historical_scans ADD COLUMN chunk_millis INTEGER DEFAULT 3600000;
+            ALTER TABLE historical_scans ADD COLUMN priority INTEGER DEFAULT 0;
+            CREATE TABLE integration_healths(name,pending,failures,conflicts,reported_at);
+        ''')
+        self.db.commit()
 
 
 if __name__ == '__main__':

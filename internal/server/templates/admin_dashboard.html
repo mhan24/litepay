@@ -18,6 +18,15 @@
     </header>
     <p class="section-desc">到账、核销、商户确认分别记录。商户确认回调不代表已经交付商品。</p>
 
+    <section class="card"><div class="card-b">
+      <h2>队列与取消同步</h2>
+      <p>待确认通知 {{.Queues.CallbackWaiting}} 笔 · 发送中 {{.Queues.CallbackInFlight}} 笔 · 最老待确认通知已等待 {{.Queues.OldestCallbackSeconds}} 秒</p>
+      <p>历史补扫 {{.Queues.HistoricalPending}} 项 · 剩余窗口 {{.Queues.HistoricalRemainingSeconds}} 秒 · 最早窗口距今 {{.Queues.OldestHistoricalSeconds}} 秒</p>
+      <p>最终复核尚未覆盖 {{.Queues.FinalReviewWaiting}} 份付款尝试 · 最早窗口距今 {{.Queues.OldestFinalWindowSeconds}} 秒，包含尚未排入扫描任务的窗口。</p>
+      <p>Binance Pay 当前客户端累计请求 {{.BinanceUsage.Requests}} 次 · 当前计量窗口估算 UID 权重 {{.BinanceUsage.MinuteUIDWeight}}，不含其他应用调用。</p>
+      {{if .CancelRequired}}<p {{if .CancelWarning}}role="alert"{{end}}>商城取消同步：{{if .CancelWarning}}异常或心跳过期{{else}}运行中{{end}} · 失败待重试 {{.CancelHealth.Failures}} 笔 · 已支付冲突 {{.CancelHealth.Conflicts}} 笔 · {{if .CancelHealth.ReportedAt}}最近成功 {{.CancelHealth.LastSuccessAt.Format "01-02 15:04:05"}}{{else}}尚未收到心跳{{end}}</p>{{else}}<p>取消同步心跳未设为必需；部署脚本并开启监控后，才能持续检查商城关单联动。</p>{{end}}
+    </div></section>
+
     <section class="card">
       <div class="card-h">
         <h2>扫描状态</h2>

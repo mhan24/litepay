@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -92,16 +93,35 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	return true, err
 }
 func (n *Notifier) Run(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if _, err := n.Deliver(ctx); err != nil && ctx.Err() == nil {
-				slog.Error("回调任务处理失败")
-			}
-		}
+	workers := n.cfg.Get().Server.CallbackWorkers
+	if workers <= 0 {
+		workers = 8
 	}
+	workers = min(workers, 32)
+	var group sync.WaitGroup
+	for range workers {
+		group.Go(func() {
+			for ctx.Err() == nil {
+				did, err := n.Deliver(ctx)
+				if did && err == nil {
+					continue
+				}
+				delay := 250 * time.Millisecond
+				if err != nil {
+					delay = time.Second
+					if ctx.Err() == nil {
+						slog.Error("回调任务处理失败")
+					}
+				}
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+		})
+	}
+	group.Wait()
 }

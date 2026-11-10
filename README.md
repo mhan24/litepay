@@ -12,7 +12,7 @@ go run . -config config.yaml
 
 默认数据库为 `data/litepay-dev.db`。首次启动后到 `/admin/settings` 配置只读 API 凭据、收款 UID、币种和金额规则；到接入页读取生成的 BEpusdt Token。可以自定义后台入口及首页商店跳转地址。API 凭据仅需读取权限，不启用交易或提现。生产启动默认 `server.production: true`，须配置 HTTPS 和回调主机白名单；本机开发需显式设为 false。
 
-本版本使用 Schema 10，支持从版本 8 / 9 加法升级；拒绝其他旧版非空数据库。升级前先做一致性备份和隔离验证；旧二进制不能打开升级后的数据库。配置及数据库包含密钥，不要提交到 Git。备份、恢复、演练与发布流程见 [支付运维](docs/operations.md)。
+数据库版本与支持的加法升级范围以 `internal/store/store.go` 的 `Open` 为准，可用 `PRAGMA user_version` 检查实际数据库。升级前先做一致性备份和隔离验证；旧二进制可能拒绝升级后的数据库。配置及数据库包含密钥，不要提交到 Git。备份、恢复、演练与发布流程见 [支付运维](docs/operations.md)。
 
 GRAM 的配置、定期检测、报价和到账核对见 [GRAM 收款](docs/gram-payments.md)。
 
@@ -49,7 +49,7 @@ docker build -t litepay:dev .
 
 小额真实收款的人工验收步骤见 `docs/acceptance-real-payment.md`；该清单目前只记录离线与只读已验证项，真实资金闭环尚未执行。
 
-Dockerfile 以非 root 用户运行。自行挂载配置及可写数据目录。仓库不再包含生产部署、回滚、备份和恢复演练工具。模拟测试通过不能替代真实交易所字段、只读权限、到账延迟及商城幂等交付的实际验收。
+Dockerfile 以非 root 用户运行。自行挂载配置及可写数据目录。仓库提供 `scripts/payment_db.py` 用于一致性备份、完整性检查、恢复与离线演练；生产部署和回滚按 [支付运维](docs/operations.md) 操作。模拟测试通过不能替代真实交易所字段、只读权限、到账延迟及商城幂等交付的实际验收。
 
 ## 平台配置与关闭订单
 

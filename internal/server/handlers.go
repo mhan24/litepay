@@ -27,6 +27,7 @@ import (
 
 // Handlers 持有全部依赖。
 type Handlers struct {
+	readLimit      *selectionLimiter
 	selectionLimit *selectionLimiter
 	cfg            *settings.Manager
 	st             *store.Store
@@ -155,8 +156,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 	var paymentQR template.URL
 	if provider == config.ProviderTON && uid != "" && !needsProvider && !needsCurrency {
 		transferURL = "ton://transfer/" + uid + "?amount=" + strconv.FormatInt(o.PayUnits*1000, 10)
-		// Telegram's receive QR uses the bare address; the wallet link carries the amount.
-		png, err := qrcode.Encode(uid, qrcode.Medium, 480)
+		png, err := qrcode.Encode(transferURL, qrcode.Medium, 480)
 		if err != nil {
 			h.renderError(c, http.StatusInternalServerError, "暂时无法生成转账二维码", "请刷新订单页面后重试。")
 			return
@@ -388,6 +388,13 @@ func (h *Handlers) Health(c *gin.Context) {
 func (h *Handlers) Ready(c *gin.Context) {
 	ctx := c.Request.Context()
 	cfg := h.C()
+	if cfg.Server.CancelSyncRequired {
+		health, err := h.st.IntegrationHealth(ctx)
+		if err != nil || !health.Healthy || health.Failures > 0 || time.Since(health.ReceivedAt) > 45*time.Second || time.Since(health.LastSuccessAt) > time.Minute {
+			c.JSON(503, gin.H{"ready": false, "reason": "商城取消同步异常或心跳过期"})
+			return
+		}
+	}
 	if !cfg.AnyProviderEnabled() {
 		c.JSON(503, gin.H{"ready": false, "reason": "未配置收款账户"})
 		return

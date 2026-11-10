@@ -17,6 +17,10 @@ import (
 
 type flexString = exchange.Text
 type Client struct {
+	usageMu          sync.Mutex
+	payRequests      uint64
+	minuteRequests   uint64
+	minuteStart      time.Time
 	clockOffset      int64
 	lastRequestStart time.Time
 	backoffUntil     time.Time

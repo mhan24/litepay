@@ -6,13 +6,14 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"litepay/internal/binance"
 	"litepay/internal/config"
 	"litepay/internal/model"
 )
 
 // Called under the same provider lock as the regular scan; each step is bounded and durable.
 func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, provider string) error {
-	ctx, cancel := context.WithTimeout(parent, 35*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
 	receiver := cfg.Checkout.Binance.UID
 	if provider == config.ProviderOKX {
@@ -37,7 +38,11 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 	cli, err := p.client(ctx, cfg, provider)
 	after := job
 	if after.ChunkTo.IsZero() {
-		after.ChunkTo = job.Cursor.Add(5 * time.Minute)
+		step := time.Duration(job.ChunkMillis) * time.Millisecond
+		if step <= 0 {
+			step = time.Hour
+		}
+		after.ChunkTo = job.Cursor.Add(step)
 		if after.ChunkTo.After(job.To) {
 			after.ChunkTo = job.To
 		}
@@ -69,6 +74,9 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 				}
 			}
 		} else {
+			if provider == config.ProviderBinance {
+				ctx = binance.WithRequestBudget(ctx, 4)
+			}
 			rows, err = cli.History(ctx, job.Cursor, after.ChunkTo)
 			if err == nil {
 				after.Cursor = after.ChunkTo
@@ -80,6 +88,10 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 	save, done := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
 	defer done()
 	if err != nil {
+		var apiErr *binance.APIError
+		if errors.As(err, &apiErr) && (apiErr.Kind == binance.ErrorIncomplete || apiErr.Kind == binance.ErrorBudget) {
+			return p.st.ShrinkHistoricalChunk(save, job, after.ChunkTo)
+		}
 		if e := p.st.HistoricalScanFailure(save, job, false); e != nil {
 			return e
 		}

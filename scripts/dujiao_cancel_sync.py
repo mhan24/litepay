@@ -8,6 +8,8 @@ import argparse
 import hashlib
 import json
 import logging
+import os
+import socket
 import sqlite3
 import time
 import urllib.parse
@@ -18,6 +20,16 @@ from pathlib import Path
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def source_connect(database):
+    if str(database).startswith(('postgresql://', 'postgres://')):
+        try:
+            import psycopg
+        except ImportError:
+            raise RuntimeError('PostgreSQL requires psycopg 3; install psycopg[binary]') from None
+        return psycopg.connect(database, connect_timeout=5, options='-c default_transaction_read_only=on')
+    return sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
 
 
 def candidates(source, gateway):
@@ -33,7 +45,7 @@ def candidates(source, gateway):
         ORDER BY p.id DESC
     """).fetchall()
     for payment_id, trade_id, order_id, pay_url, raw in rows:
-        cfg = json.loads(raw or '{}')
+        cfg = raw if isinstance(raw, dict) else json.loads(raw or '{}')
         if str(cfg.get('gateway_url', '')).rstrip('/') != gateway:
             continue
         # A channel can be repointed. Never send its historical orders to the new host.
@@ -79,11 +91,16 @@ def journal(path):
 def sync_once(database, state, gateway, sender=cancel, now=None):
     now = time.time() if now is None else now
     # Finish the snapshot read before making external calls: never hold a DB lock over HTTP.
-    source = sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
+    source = source_connect(database)
     try:
         pending = list(candidates(source, gateway))
     finally:
         source.close()
+    active = {(gateway, row[0], row[1], row[2]) for row in pending}
+    for key in state.execute("SELECT gateway,payment_id,trade_id,order_id FROM cancellations WHERE gateway=? AND outcome='retry'", (gateway,)).fetchall():
+        if key not in active:
+            state.execute("UPDATE cancellations SET outcome='merchant_changed',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?", (now,) + key)
+    state.commit()
     processed = 0
     deadline = time.monotonic() + 5
     for payment_id, trade_id, order_id, token in pending:
@@ -114,28 +131,90 @@ def sync_once(database, state, gateway, sender=cancel, now=None):
     return processed
 
 
+def report_health(database, state, gateway, healthy):
+    source = source_connect(database)
+    try:
+        configs = source.execute("SELECT config_json FROM payment_channels WHERE provider_type='bepusdt'").fetchall()
+        tokens = set()
+        for (raw,) in configs:
+            cfg = raw if isinstance(raw, dict) else json.loads(raw or '{}')
+            if str(cfg.get('gateway_url', '')).rstrip('/') == gateway and cfg.get('auth_token'):
+                tokens.add(cfg['auth_token'])
+        if len(tokens) != 1:
+            raise ValueError('one consistent gateway token is required for health reports')
+    finally:
+        source.close()
+    pending, conflicts = state.execute("SELECT count(*),coalesce(sum(outcome='paid_conflict'),0) FROM cancellations WHERE gateway=? AND outcome IN ('retry','paid_conflict')", (gateway,)).fetchone()
+    failures = pending - conflicts
+    body = {'source': 'postgresql' if str(database).startswith(('postgresql://', 'postgres://')) else 'sqlite',
+            'timestamp': str(int(time.time())), 'healthy': 'true' if healthy else 'false',
+            'pending': str(failures), 'failures': str(failures), 'conflicts': str(conflicts)}
+    token = next(iter(tokens))
+    body['signature'] = hashlib.md5(('&'.join(k+'='+body[k] for k in sorted(body)) + token).encode()).hexdigest()
+    req = urllib.request.Request(gateway+'/api/v1/order/cancel-sync-status', data=json.dumps(body).encode(),
+                                 headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 LitePay-CancelSync/1.0'})
+    with urllib.request.build_opener(NoRedirect).open(req, timeout=3) as response:
+        if json.loads(response.read(4096)).get('status_code') != 200:
+            raise ValueError('health report rejected')
+
+
+def systemd_notify(message):
+    address = os.environ.get('NOTIFY_SOCKET')
+    if not address:
+        return
+    if address.startswith('@'):
+        address = '\0' + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as connection:
+            connection.sendto(message.encode(), address)
+    except OSError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--database', required=True)
+    sources = parser.add_mutually_exclusive_group(required=True)
+    sources.add_argument('--database', help='SQLite database path')
+    sources.add_argument('--database-url-env', help='Environment variable containing a PostgreSQL DSN')
     parser.add_argument('--state', required=True)
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--report-health', action='store_true')
     args = parser.parse_args()
+    database = args.database or os.environ.get(args.database_url_env, '')
+    if not database:
+        parser.error('database source is missing')
+    if args.database and str(database).startswith(('postgresql://', 'postgres://')):
+        parser.error('use --database-url-env for PostgreSQL credentials')
     gateway = args.gateway.rstrip('/')
     url = urllib.parse.urlsplit(gateway)
     if url.scheme != 'https' or not url.hostname or url.username or url.password or url.port not in (None, 443) or url.path or url.query or url.fragment:
         parser.error('--gateway must be an HTTPS origin')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     state = journal(args.state)
+    state.execute('CREATE TABLE IF NOT EXISTS health(id INTEGER PRIMARY KEY,last_attempt REAL,last_success REAL)')
+    next_report = 0
+    systemd_notify('READY=1')
     while True:
+        healthy = True
         try:
-            sync_once(args.database, state, gateway)
+            sync_once(database, state, gateway)
         except Exception as error:
+            healthy = False
             logging.error('sync failed error_type=%s', type(error).__name__)
-            if args.once:
-                raise SystemExit(1)
+        now = time.time()
+        state.execute('INSERT INTO health VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET last_attempt=excluded.last_attempt,last_success=CASE WHEN excluded.last_success>0 THEN excluded.last_success ELSE last_success END', (now, now if healthy else 0))
+        state.commit()
+        if args.report_health and now >= next_report:
+            try:
+                report_health(database, state, gateway, healthy)
+                next_report = now + 15
+            except Exception as error:
+                logging.error('health report failed error_type=%s', type(error).__name__)
+        if healthy:
+            systemd_notify('WATCHDOG=1')
         if args.once:
-            break
+            raise SystemExit(0 if healthy else 1)
         time.sleep(5)
 
 

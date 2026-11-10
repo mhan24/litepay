@@ -6,6 +6,8 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
+import sys
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location('sync', Path(__file__).with_name('dujiao_cancel_sync.py'))
@@ -97,6 +99,35 @@ class SyncTest(unittest.TestCase):
             self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, sender, now=now), 1)
         self.assertEqual(self.state.execute('SELECT outcome,attempts FROM cancellations').fetchone(), ('missing_gateway', 3))
         self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, sender, now=1000), 0)
+
+    def test_postgresql_connections_are_read_only_and_bounded(self):
+        driver = Mock()
+        with patch.dict(sys.modules, {'psycopg': driver}):
+            self.assertIs(sync.source_connect('postgresql://fixture'), driver.connect.return_value)
+        driver.connect.assert_called_once_with('postgresql://fixture', connect_timeout=5,
+                                               options='-c default_transaction_read_only=on')
+
+    def test_signed_health_report_without_cancellation_candidates(self):
+        self.db.commit()
+        captured = []
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, limit): return b'{"status_code":200}'
+        class Opener:
+            def open(self, request, timeout):
+                captured.append((request, timeout))
+                return Response()
+        with patch.object(sync.urllib.request, 'build_opener', return_value=Opener()):
+            sync.report_health(self.path, self.state, self.gateway, True)
+        request, timeout = captured[0]
+        body = json.loads(request.data)
+        signature = body.pop('signature')
+        expected = hashlib.md5(('&'.join(k+'='+body[k] for k in sorted(body))+'private').encode()).hexdigest()
+        self.assertEqual(signature, expected)
+        self.assertEqual(body['source'], 'sqlite')
+        self.assertEqual(body['failures'], '0')
+        self.assertEqual(timeout, 3)
 
 
 if __name__ == '__main__':

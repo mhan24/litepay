@@ -129,7 +129,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
       <div>
         <h2 id="wallet-scan-title">Telegram 钱包扫码付款</h2>
         <p>打开 Telegram（电报）→ 钱包 → 右上角「扫一扫」，扫描二维码进行转账。</p>
-        <p class="scan-check">扫码后请复制上方完整金额 {{.Amount}} GRAM，并核对收款地址后确认转账。</p>
+        <p class="scan-check">二维码包含精确金额 {{.Amount}} GRAM。扫码后请核对钱包中的金额和收款地址；若未自动填写，请复制上方完整金额。</p>
       </div>
     </div>
     {{end}}
@@ -199,6 +199,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   </div>
 </div>
 
+{{template "status_poll_script" .}}
 <script>
 (function () {
   var TRADE_NO = "{{.TradeNo}}";
@@ -324,21 +325,14 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   });
 
   // ---- 查询订单状态（仅在实际展示收款信息时）----
-  function poll() {
+  function receiveStatus(d) {
     if (finished) return;
-    fetch('/api/order/status?order_id=' + encodeURIComponent(TRADE_NO), { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
-      .then(function (res) {
-        if (!res || res.code !== 0) return;
-        var d = res.data;
-        if (typeof d.remain_seconds === 'number') remain = d.remain_seconds;
-        if (d.status === 'PAID') { onPaid(d); }
-        else if (d.status === 'EXPIRED') { onExpired(); }
-        else if (d.status === 'CANCELED') { onCanceled(); }
-        else if(d.payment_phase==='settling'){window.location.reload();}
-        else if (d.provider && (d.provider !== PROVIDER || d.currency !== CURRENCY || d.amount !== PAY_AMOUNT)) { window.location.reload(); }
-      })
-      .catch(function () { /* 网络抖动忽略，下次继续 */ });
+    if (typeof d.remain_seconds === 'number') remain = d.remain_seconds;
+    if (d.status === 'PAID') onPaid(d);
+    else if (d.status === 'EXPIRED') onExpired();
+    else if (d.status === 'CANCELED') onCanceled();
+    else if(d.payment_phase==='settling')window.location.reload();
+    else if(d.provider&&(d.provider!==PROVIDER||d.currency!==CURRENCY||d.amount!==PAY_AMOUNT))window.location.reload();
   }
 
   function hideWalletPayment() {
@@ -395,8 +389,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   if (!NEEDS_PROVIDER && !NEEDS_CURRENCY) {
     renderTimer();
     setInterval(tick, 1000);
-    setInterval(poll, 2000);
-    poll();
+    window.pollOrderStatus(TRADE_NO,receiveStatus,function(){return finished});
   }
 })();
 </script>

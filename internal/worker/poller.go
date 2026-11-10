@@ -380,3 +380,14 @@ func (p *Poller) scanTON(ctx context.Context, cfg *config.Config, cli interface 
 	}
 	return p.st.SaveTONPage(ctx, cp, next, rows)
 }
+
+func (p *Poller) BinanceUsage() binance.Usage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if conn := p.clients[config.ProviderBinance]; conn != nil {
+		if cli, ok := conn.source.(*binance.Client); ok {
+			return cli.Usage()
+		}
+	}
+	return binance.Usage{}
+}

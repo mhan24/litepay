@@ -74,6 +74,7 @@ db.commit();state=s.journal(str(path.parent/'journal.db'))
 assert s.sync_once(path,state,gateway)==2
 assert dict(state.execute('SELECT trade_id,outcome FROM cancellations'))=={'bridge-cancel':'closed','bridge-paid':'paid_conflict'}
 assert s.sync_once(path,state,gateway)==0
+s.report_health(path,state,gateway,True)
 `, script, gateway.URL, t.TempDir())
 	encoded, _ := json.Marshal(mgr.Get().BEpusdt.APIToken)
 	cmd.Stdin = strings.NewReader(string(encoded))
@@ -82,6 +83,10 @@ assert s.sync_once(path,state,gateway)==0
 	}
 	if result, e := st.Process(ctx, payments[0], ""); e != nil || result != "order_closed" {
 		t.Fatal(result, e)
+	}
+	health, e := st.IntegrationHealth(ctx)
+	if e != nil || !health.Healthy || health.Source != "sqlite" || health.Conflicts != 1 {
+		t.Fatal(health, e)
 	}
 	canceled, _ := st.GetByTradeNo(ctx, "bridge-cancel")
 	if canceled.Status != model.Canceled {

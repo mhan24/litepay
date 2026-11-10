@@ -112,3 +112,25 @@ func TestSaturatedMillisecondFails(t *testing.T) {
 		t.Fatal("incomplete history accepted")
 	}
 }
+
+func TestPayUsageCountsActualRequestsAndSharedBudget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":"000000","success":true,"data":[]}`)
+	}))
+	defer srv.Close()
+	c := New("key", "secret", srv.URL, 5000, 100)
+	c.UseTestTransport()
+	now := time.Now()
+	for range 2 {
+		if _, err := c.History(context.Background(), now.Add(-time.Minute), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.History(WithRequestBudget(context.Background(), 0), now.Add(-time.Minute), now); err == nil {
+		t.Fatal("budget bypassed")
+	}
+	usage := c.Usage()
+	if usage.Requests != 2 || usage.EstimatedUIDWeight != 6000 || usage.MinuteUIDWeight != 6000 {
+		t.Fatal(usage)
+	}
+}

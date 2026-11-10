@@ -40,7 +40,7 @@ func (s *Store) RequestHistoricalScan(ctx context.Context, no, operator, reason 
 			if end.After(time.Now()) {
 				end = time.Now()
 			}
-			if err := db.Create(&model.HistoricalScan{OrderID: o.ID, AttemptID: a.ID, Provider: a.Provider, Receiver: a.Receiver, From: a.SelectedAt, To: end, Cursor: a.SelectedAt, State: "pending", Operator: operator, Reason: reason}).Error; err != nil {
+			if err := db.Create(&model.HistoricalScan{Priority: 1, OrderID: o.ID, AttemptID: a.ID, Provider: a.Provider, Receiver: a.Receiver, From: a.SelectedAt, To: end, Cursor: a.SelectedAt, State: "pending", Operator: operator, Reason: reason}).Error; err != nil {
 				return err
 			}
 		}
@@ -49,7 +49,7 @@ func (s *Store) RequestHistoricalScan(ctx context.Context, no, operator, reason 
 }
 func (s *Store) NextHistoricalScan(ctx context.Context, provider string) (model.HistoricalScan, error) {
 	var q model.HistoricalScan
-	err := s.db.WithContext(ctx).Where("provider = ? AND state = ?", provider, "pending").Order("updated_at,id").First(&q).Error
+	err := s.db.WithContext(ctx).Where("provider = ? AND state = ?", provider, "pending").Order("priority DESC,updated_at,id").First(&q).Error
 	return q, err
 }
 func (s *Store) HistoricalScanFailure(ctx context.Context, q model.HistoricalScan, blocked bool) error {
@@ -84,36 +84,58 @@ func (s *Store) SaveHistoricalScan(ctx context.Context, before, after model.Hist
 	})
 }
 
-// QueueSettlementScan continuously reopens historical creation-time windows. Successful
-// incremental queries cannot establish that a previously invisible record does not exist.
-// One account-wide job covers all its open instructions, instead of polling per invoice.
+// Cohorts share one coverage result for instructions selected in the same hour.
+// Final passes outrank routine rechecks; empty gaps between cohorts are never queried.
+const SettlementRefresh = 15 * time.Minute
+
 func (s *Store) QueueSettlementScan(ctx context.Context, provider, receiver string, lookback time.Duration) error {
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		query := func() *gorm.DB {
-			return db.Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ? AND a.receiver = ? AND a.selected_at < ?", model.Ready, provider, receiver, time.Now().Add(-lookback))
-		}
-		var first, last model.PaymentAttempt
-		if err := query().Order("a.selected_at").First(&first).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
+		now := time.Now()
+		for _, priority := range []int{2, 0} {
+			var active int64
+			if err := db.Model(&model.HistoricalScan{}).Where("automatic=1 AND provider=? AND receiver=? AND state='pending' AND priority=?", provider, receiver, priority).Count(&active).Error; err != nil {
+				return err
 			}
-			return err
+			if active > 0 {
+				continue
+			}
+			base := func() *gorm.DB {
+				q := db.Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status=? AND a.provider=? AND a.receiver=? AND a.selected_at<?", model.Ready, provider, receiver, now.Add(-lookback))
+				if priority == 2 {
+					return q.Where("a.settle_until<=?", now)
+				}
+				return q.Where("a.settle_until>?", now)
+			}
+			q := base().Where(`NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=CASE WHEN a.expires_at<? THEN a.expires_at ELSE ? END AND (h.created_at>=a.settle_until OR (?=0 AND h.updated_at>=?)))`, now, now, priority, now.Add(-SettlementRefresh))
+			var first model.PaymentAttempt
+			if err := q.Order("a.settle_until,a.selected_at,a.id").First(&first).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					continue
+				}
+				return err
+			}
+			from := first.SelectedAt.Truncate(time.Hour)
+			var last model.PaymentAttempt
+			if err := base().Where("a.selected_at>=? AND a.selected_at<?", from, from.Add(time.Hour)).Order("a.expires_at DESC").First(&last).Error; err != nil {
+				return err
+			}
+			end := last.ExpiresAt
+			if end.After(now) {
+				end = now
+			}
+			if err := db.Create(&model.HistoricalScan{Automatic: true, Priority: priority, OrderID: first.OrderID, AttemptID: first.ID, Provider: provider, Receiver: receiver, From: from, To: end, Cursor: from, State: "pending", Operator: "system", Reason: "付款窗口分组复核"}).Error; err != nil {
+				return err
+			}
 		}
-		var latest model.HistoricalScan
-		err := db.Where("automatic = ? AND provider = ? AND receiver = ?", true, provider, receiver).Order("id DESC").First(&latest).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		if err == nil && (latest.State == "pending" || time.Since(latest.UpdatedAt) < time.Minute) {
-			return nil
-		}
-		if err = query().Order("a.expires_at DESC").First(&last).Error; err != nil {
-			return err
-		}
-		end := last.ExpiresAt
-		if end.After(time.Now()) {
-			end = time.Now()
-		}
-		return db.Create(&model.HistoricalScan{Automatic: true, OrderID: first.OrderID, AttemptID: first.ID, Provider: provider, Receiver: receiver, From: first.SelectedAt, To: end, Cursor: first.SelectedAt, State: "pending", Operator: "system", Reason: "付款窗口首次可见延迟对账"}).Error
+		return nil
 	})
+}
+
+// A saturated request gets a smaller durable chunk, without advancing its coverage.
+func (s *Store) ShrinkHistoricalChunk(ctx context.Context, job model.HistoricalScan, end time.Time) error {
+	size := end.Sub(job.Cursor) / 2
+	if size < time.Millisecond {
+		return s.HistoricalScanFailure(ctx, job, false)
+	}
+	return s.db.WithContext(ctx).Model(&model.HistoricalScan{}).Where("id=? AND state='pending' AND cursor=? AND pages=?", job.ID, job.Cursor, job.Pages).Updates(map[string]any{"chunk_millis": max(1, size.Milliseconds()), "chunk_to": time.Time{}, "last_error": "历史窗口数据密集，已缩小时间片继续复核", "updated_at": time.Now()}).Error
 }

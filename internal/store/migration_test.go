@@ -138,3 +138,39 @@ func TestVersion10ExpiryScheduleAndSelectionLimitsSurviveRestart(t *testing.T) {
 		t.Fatal(fresh, err)
 	}
 }
+
+func TestVersion11HistoricalCheckpointMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "schema11.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "v11-history")
+	var a model.PaymentAttempt
+	s.DB().Where("order_id=?", o.ID).First(&a)
+	job := model.HistoricalScan{Automatic: true, OrderID: o.ID, AttemptID: a.ID, Provider: a.Provider, Receiver: a.Receiver, From: a.SelectedAt, To: a.ExpiresAt, Cursor: a.SelectedAt, State: "pending", Operator: "system", Reason: "old range", Pages: 1, LT: "checkpoint"}
+	s.DB().Create(&job)
+	manual := job
+	manual.ID = 0
+	manual.Automatic = false
+	s.DB().Create(&manual)
+	for _, col := range []string{"priority", "chunk_millis"} {
+		if err = s.DB().Migrator().DropColumn(&model.HistoricalScan{}, col); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.DB().Migrator().DropTable(&model.IntegrationHealth{})
+	s.DB().Exec("PRAGMA user_version=11")
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var automatic, retained model.HistoricalScan
+	s.DB().First(&automatic, job.ID)
+	s.DB().First(&retained, manual.ID)
+	if automatic.State != "superseded" || automatic.LT != "checkpoint" || automatic.Pages != 1 || retained.State != "pending" || retained.Priority != 1 || retained.LT != "checkpoint" || !retained.Cursor.Equal(job.Cursor) {
+		t.Fatal(automatic, retained)
+	}
+}

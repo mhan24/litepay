@@ -76,6 +76,8 @@ func IsSupportedCurrency(currency string) bool {
 
 // ServerConfig HTTP 服务配置。
 type ServerConfig struct {
+	CancelSyncRequired  bool     `yaml:"cancel_sync_required"`
+	CallbackWorkers     int      `yaml:"callback_workers"`
 	MerchantKeyVersions bool     `yaml:"merchant_key_versions"` // Enable only after merchant compatibility acceptance.
 	Production          bool     `yaml:"production"`
 	NotifyHosts         []string `yaml:"notify_hosts"`    // Exact callback hostnames in production; no wildcards.

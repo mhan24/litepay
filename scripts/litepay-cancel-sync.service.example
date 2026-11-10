@@ -1,0 +1,26 @@
+[Unit]
+Description=LitePay merchant cancellation sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+WatchdogSec=45
+User=dujiao
+Group=dujiao
+StateDirectory=litepay-cancel-sync
+StateDirectoryMode=0700
+# Run as the commerce DB owner; keep its DB access read-only.
+ExecStart=/usr/bin/python3 /opt/litepay-cancel-sync/dujiao_cancel_sync.py --database /opt/dujiao-next/db/dujiao.db --state /var/lib/litepay-cancel-sync/state.db --gateway https://pay.example.com --report-health
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/litepay-cancel-sync
+
+[Install]
+WantedBy=multi-user.target

@@ -143,6 +143,16 @@ func (c *Client) request(ctx context.Context, path string, q url.Values, signed 
 	}
 	req.Header.Set("Accept", "application/json")
 	c.lastRequestStart = time.Now()
+	if path == "/sapi/v1/pay/transactions" {
+		c.usageMu.Lock()
+		if time.Since(c.minuteStart) >= time.Minute {
+			c.minuteStart = time.Now()
+			c.minuteRequests = 0
+		}
+		c.payRequests++
+		c.minuteRequests++
+		c.usageMu.Unlock()
+	}
 	status, body, err := c.http.Do(req)
 	if err != nil {
 		kind := ErrorNetwork
@@ -181,4 +191,22 @@ func (c *Client) request(ctx context.Context, path string, q url.Values, signed 
 		return failure(ErrorBusiness)
 	}
 	return body, nil
+}
+
+// Usage measures this client's own Pay requests; other applications sharing the UID
+// consume separate quota that cannot be inferred from this process.
+type Usage struct {
+	Requests           uint64 `json:"requests"`
+	EstimatedUIDWeight uint64 `json:"estimated_uid_weight"`
+	MinuteUIDWeight    uint64 `json:"minute_uid_weight"`
+}
+
+func (c *Client) Usage() Usage {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	weight := c.minuteRequests * 3000
+	if time.Since(c.minuteStart) >= time.Minute {
+		weight = 0
+	}
+	return Usage{c.payRequests, c.payRequests * 3000, weight}
 }

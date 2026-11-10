@@ -83,10 +83,10 @@ func Open(path string) (*Store, error) {
 	if err = db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables).Error; err != nil {
 		return fail(err)
 	}
-	if version != 8 && version != 9 && version != 10 && version != 11 && tables > 0 {
+	if version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && tables > 0 {
 		return fail(errors.New("旧数据库不兼容，请配置一个新的空数据库"))
 	}
-	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}); err != nil {
+	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}, &model.IntegrationHealth{}); err != nil {
 		return fail(err)
 	}
 	if err = migratePaymentAttempts(db); err != nil {
@@ -98,7 +98,15 @@ func Open(path string) (*Store, error) {
 	if err = backfillConfirmationTasks(db); err != nil {
 		return fail(err)
 	}
-	if err = db.Exec("PRAGMA user_version=11").Error; err != nil {
+	if version < 12 {
+		if err = db.Model(&model.HistoricalScan{}).Where("automatic = ? AND state = ?", false, "pending").Update("priority", 1).Error; err != nil {
+			return fail(err)
+		}
+		if err = db.Model(&model.HistoricalScan{}).Where("automatic = ? AND state = ?", true, "pending").Updates(map[string]any{"state": "superseded", "last_error": "已由付款窗口分组复核替代"}).Error; err != nil {
+			return fail(err)
+		}
+	}
+	if err = db.Exec("PRAGMA user_version=12").Error; err != nil {
 		return fail(err)
 	}
 	if path != ":memory:" {

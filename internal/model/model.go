@@ -188,6 +188,18 @@ type SigningKey struct {
 	CreatedAt time.Time
 }
 
+type IntegrationHealth struct {
+	Name          string `gorm:"primaryKey"`
+	Source        string
+	ReportedAt    int64
+	ReceivedAt    time.Time
+	LastSuccessAt time.Time
+	Healthy       bool
+	Pending       int64
+	Failures      int64
+	Conflicts     int64
+}
+
 type PaymentRecovery struct {
 	ID        uint `gorm:"primaryKey"`
 	OrderID   uint `gorm:"index"`
@@ -202,26 +214,28 @@ type PaymentRecovery struct {
 // HistoricalScan is an audited, resumable administrative request; it never changes a
 // closed order's status. Evidence must still pass normal provider and finality validation.
 type HistoricalScan struct {
-	Automatic bool `gorm:"not null;default:false;index:idx_final_pass,priority:1;index:idx_hist_auto,priority:1"`
-	ID        uint `gorm:"primaryKey;index:idx_hist_auto,priority:4"`
-	OrderID   uint `gorm:"index"`
-	AttemptID uint
-	Provider  string `gorm:"index:idx_final_pass,priority:2;index:idx_hist_pending,priority:1;index:idx_hist_auto,priority:2"`
-	Receiver  string `gorm:"index:idx_final_pass,priority:3;index:idx_hist_auto,priority:3"`
-	From      time.Time
-	To        time.Time
-	Cursor    time.Time
-	ChunkTo   time.Time
-	LT        string
-	Hash      string
-	OldestAt  time.Time
-	Pages     int
-	State     string `gorm:"index:idx_final_pass,priority:4;index:idx_hist_pending,priority:2"`
-	LastError string
-	Operator  string
-	Reason    string
-	CreatedAt time.Time `gorm:"index:idx_final_pass,priority:5"`
-	UpdatedAt time.Time `gorm:"index:idx_hist_pending,priority:3"`
+	Priority    int   `gorm:"not null;default:0"`
+	ChunkMillis int64 `gorm:"not null;default:3600000"`
+	Automatic   bool  `gorm:"not null;default:false;index:idx_final_pass,priority:1;index:idx_hist_auto,priority:1"`
+	ID          uint  `gorm:"primaryKey;index:idx_hist_auto,priority:4"`
+	OrderID     uint  `gorm:"index"`
+	AttemptID   uint
+	Provider    string `gorm:"index:idx_final_pass,priority:2;index:idx_hist_pending,priority:1;index:idx_hist_auto,priority:2"`
+	Receiver    string `gorm:"index:idx_final_pass,priority:3;index:idx_hist_auto,priority:3"`
+	From        time.Time
+	To          time.Time
+	Cursor      time.Time
+	ChunkTo     time.Time
+	LT          string
+	Hash        string
+	OldestAt    time.Time
+	Pages       int
+	State       string `gorm:"index:idx_final_pass,priority:4;index:idx_hist_pending,priority:2"`
+	LastError   string
+	Operator    string
+	Reason      string
+	CreatedAt   time.Time `gorm:"index:idx_final_pass,priority:5"`
+	UpdatedAt   time.Time `gorm:"index:idx_hist_pending,priority:3"`
 }
 
 func (a PaymentAttempt) Amount() string { return amount.Text(a.Units, a.Precision) }
