@@ -40,7 +40,7 @@ func (s *Store) Expire(ctx context.Context, grace int) error {
 			eligible := `EXISTS(SELECT 1 FROM payment_attempts a WHERE a.order_id=orders.id)
     AND NOT EXISTS(SELECT 1 FROM payment_attempts a WHERE a.order_id=orders.id AND (
      a.settle_until > ? OR NOT EXISTS(SELECT 1 FROM scan_cursors c WHERE c.provider=a.provider AND c.scanned_until>=a.settle_until)
-     OR NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=a.expires_at AND h.created_at>=a.settle_until)))
+     OR NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=a.expires_at AND (CASE WHEN h.coverage_after>'0002-01-01' THEN h.coverage_after ELSE h.created_at END)>=a.settle_until)))
     AND NOT EXISTS(SELECT 1 FROM confirmation_tasks q WHERE q.order_id=orders.id AND q.state='pending' AND q.deadline>?)`
 			if err := db.Model(&model.Order{}).Where("id IN ? AND status = ?", ids, model.Ready).Where(eligible, now, now).Update("status", model.Expired).Error; err != nil {
 				return err
@@ -52,6 +52,9 @@ func (s *Store) Expire(ctx context.Context, grace int) error {
 			if err := db.Model(&model.Order{}).Where("id IN ? AND status = ?", ids, model.Ready).Update("next_expiry_check_at", now.Add(ExpiryRecheckInterval)).Error; err != nil {
 				return err
 			}
+		}
+		if err := db.Exec(`DELETE FROM history_coverages WHERE id IN(SELECT id FROM history_coverages WHERE observed_at<? ORDER BY observed_at LIMIT 1000)`, now.Add(-96*time.Hour)).Error; err != nil {
+			return err
 		}
 		return db.Exec(`DELETE FROM slots WHERE rowid IN(SELECT rowid FROM slots WHERE order_id IS NULL AND expires_at<? ORDER BY expires_at LIMIT 1000)`, now).Error
 	})

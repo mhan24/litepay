@@ -35,7 +35,7 @@ def validate(path):
             raise ValueError('unsupported payment schema')
         tables = BASE_TABLES + (NEW_TABLES if version >= 9 else ())
         tables += ATTEMPT_TABLES if version >= 10 else ()
-        tables += ('integration_healths',) if version >= 12 else ()
+        tables += ('integration_healths', 'history_coverages') if version >= 12 else ()
         counts = {name: db.execute('SELECT count(*) FROM ' + name).fetchone()[0] for name in tables}
         problems = [
             "SELECT count(*) FROM orders o WHERE o.status='PAID' AND ((SELECT count(*) FROM transactions t WHERE t.order_id=o.id AND t.state='confirmed')<>1 OR (SELECT count(*) FROM callbacks c WHERE c.order_id=o.id)<>1)",
@@ -68,6 +68,8 @@ def validate(path):
         if version >= 12:
             problems += [
                 "SELECT count(*) FROM historical_scans WHERE chunk_millis<1 OR priority<0 OR priority>2",
+                "SELECT count(*) FROM historical_scans WHERE automatic=1 AND state='completed' AND required_after>'0002-01-01' AND (coverage_after<required_after OR coverage_after>created_at)",
+                "SELECT count(*) FROM history_coverages c LEFT JOIN historical_scans h ON h.id=c.scan_id WHERE h.id IS NULL OR h.automatic<>1 OR c.provider<>h.provider OR c.receiver<>h.receiver OR c.\"from\"<h.\"from\" OR c.\"to\">h.\"to\" OR c.\"from\">=c.\"to\" OR c.observed_at IS NULL OR c.observed_at<h.created_at",
                 "SELECT count(*) FROM integration_healths WHERE name<>'dujiao_cancel_sync' OR pending<0 OR failures<0 OR conflicts<0 OR reported_at<0",
             ]
         if any(db.execute(sql).fetchone()[0] for sql in problems):

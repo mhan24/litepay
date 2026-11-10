@@ -79,6 +79,12 @@ func (s *Store) SaveHistoricalScan(ctx context.Context, before, after model.Hist
 				return err
 			}
 		}
+		if before.Automatic && after.Cursor.After(before.Cursor) {
+			proof := model.HistoryCoverage{Provider: before.Provider, Receiver: before.Receiver, From: before.Cursor, To: after.Cursor, ObservedAt: before.CreatedAt, ScanID: before.ID}
+			if err := db.Create(&proof).Error; err != nil {
+				return err
+			}
+		}
 		after.LastError = ""
 		return db.Save(&after).Error
 	})
@@ -106,7 +112,7 @@ func (s *Store) QueueSettlementScan(ctx context.Context, provider, receiver stri
 				}
 				return q.Where("a.settle_until>?", now)
 			}
-			q := base().Where(`NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=CASE WHEN a.expires_at<? THEN a.expires_at ELSE ? END AND (h.created_at>=a.settle_until OR (?=0 AND h.updated_at>=?)))`, now, now, priority, now.Add(-SettlementRefresh))
+			q := base().Where(`NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=CASE WHEN a.expires_at<? THEN a.expires_at ELSE ? END AND ((CASE WHEN h.coverage_after>'0002-01-01' THEN h.coverage_after ELSE h.created_at END)>=a.settle_until OR (?=0 AND (CASE WHEN h.coverage_after>'0002-01-01' THEN h.coverage_after ELSE h.created_at END)>=?)))`, now, now, priority, now.Add(-SettlementRefresh))
 			var first model.PaymentAttempt
 			if err := q.Order("a.settle_until,a.selected_at,a.id").First(&first).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -119,11 +125,19 @@ func (s *Store) QueueSettlementScan(ctx context.Context, provider, receiver stri
 			if err := base().Where("a.selected_at>=? AND a.selected_at<?", from, from.Add(time.Hour)).Order("a.expires_at DESC").First(&last).Error; err != nil {
 				return err
 			}
+			bound := now.Add(-SettlementRefresh)
+			if priority == 2 {
+				var deadline model.PaymentAttempt
+				if err := base().Where("a.selected_at>=? AND a.selected_at<?", from, from.Add(time.Hour)).Order("a.settle_until DESC").First(&deadline).Error; err != nil {
+					return err
+				}
+				bound = deadline.SettleUntil
+			}
 			end := last.ExpiresAt
 			if end.After(now) {
 				end = now
 			}
-			if err := db.Create(&model.HistoricalScan{Automatic: true, Priority: priority, OrderID: first.OrderID, AttemptID: first.ID, Provider: provider, Receiver: receiver, From: from, To: end, Cursor: from, State: "pending", Operator: "system", Reason: "付款窗口分组复核"}).Error; err != nil {
+			if err := db.Create(&model.HistoricalScan{Automatic: true, CoverageAfter: now, RequiredAfter: bound, CreatedAt: now, Priority: priority, OrderID: first.OrderID, AttemptID: first.ID, Provider: provider, Receiver: receiver, From: from, To: end, Cursor: from, State: "pending", Operator: "system", Reason: "付款窗口分组复核"}).Error; err != nil {
 				return err
 			}
 		}

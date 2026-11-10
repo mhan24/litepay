@@ -148,8 +148,27 @@ class QueueDBTest(CapacityDBTest):
             ALTER TABLE historical_scans ADD COLUMN chunk_millis INTEGER DEFAULT 3600000;
             ALTER TABLE historical_scans ADD COLUMN priority INTEGER DEFAULT 0;
             CREATE TABLE integration_healths(name,pending,failures,conflicts,reported_at);
+            CREATE TABLE history_coverages(scan_id,provider,receiver,"from","to",observed_at);
+            ALTER TABLE historical_scans ADD COLUMN id INTEGER;
+            ALTER TABLE historical_scans ADD COLUMN automatic INTEGER;
+            ALTER TABLE historical_scans ADD COLUMN provider TEXT;
+            ALTER TABLE historical_scans ADD COLUMN receiver TEXT;
+            ALTER TABLE historical_scans ADD COLUMN created_at TEXT;
+            ALTER TABLE historical_scans ADD COLUMN state TEXT;
+            ALTER TABLE historical_scans ADD COLUMN coverage_after TEXT;
+            ALTER TABLE historical_scans ADD COLUMN required_after TEXT;
         ''')
         self.db.commit()
+
+    def test_shared_coverage_provenance_survives_backup(self):
+        self.db.execute("INSERT INTO historical_scans(id,order_id,attempt_id,cursor,\"from\",\"to\",operator,reason,automatic,provider,receiver,created_at) VALUES(99,1,1,'2026-11-10 01:00','2026-11-10 00:00','2026-11-10 01:00','system','final',1,'okx','receiver','2026-11-12 02:00')")
+        self.db.execute("INSERT INTO history_coverages VALUES(99,'okx','receiver','2026-11-10 00:00','2026-11-10 01:00','2026-11-12 02:00')")
+        self.db.commit()
+        self.assertEqual(tool.drill(self.path)['schema'], 12)
+        self.db.execute("UPDATE history_coverages SET observed_at='2026-11-12 01:00'")
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
 
 
 if __name__ == '__main__':

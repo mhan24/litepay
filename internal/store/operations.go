@@ -48,7 +48,7 @@ func (s *Store) QueueStats(ctx context.Context) (QueueStats, error) {
 		Waiting int64
 		Oldest  int64
 	}
-	err = db.Raw(`SELECT count(*) waiting,CAST(COALESCE(MAX((julianday('now')-julianday(a.selected_at))*86400),0) AS INTEGER) oldest FROM payment_attempts a JOIN orders o ON o.id=a.order_id WHERE o.status='READY' AND a.settle_until<=? AND NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=a.expires_at AND h.created_at>=a.settle_until)`, time.Now()).Scan(&final).Error
+	err = db.Raw(`SELECT count(*) waiting,CAST(COALESCE(MAX((julianday('now')-julianday(a.selected_at))*86400),0) AS INTEGER) oldest FROM payment_attempts a JOIN orders o ON o.id=a.order_id WHERE o.status='READY' AND a.settle_until<=? AND NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=a.expires_at AND (CASE WHEN h.coverage_after>'0002-01-01' THEN h.coverage_after ELSE h.created_at END)>=a.settle_until)`, time.Now()).Scan(&final).Error
 	out.FinalReviewWaiting = final.Waiting
 	out.OldestFinalWindowSeconds = final.Oldest
 	return out, err

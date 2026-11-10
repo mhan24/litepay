@@ -35,7 +35,10 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 	if receiver != job.Receiver {
 		return p.st.HistoricalScanFailure(ctx, job, true)
 	}
-	cli, err := p.client(ctx, cfg, provider)
+	job, err = p.st.ReuseHistoricalCoverage(ctx, job)
+	if err != nil || job.State == "completed" {
+		return err
+	}
 	after := job
 	if after.ChunkTo.IsZero() {
 		step := time.Duration(job.ChunkMillis) * time.Millisecond
@@ -47,6 +50,11 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 			after.ChunkTo = job.To
 		}
 	}
+	after.ChunkTo, err = p.st.UncoveredChunkEnd(ctx, job, after.ChunkTo)
+	if err != nil {
+		return err
+	}
+	cli, err := p.client(ctx, cfg, provider)
 	var rows []model.Transaction
 	if err == nil {
 		if provider == config.ProviderTON {
