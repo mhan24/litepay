@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -26,12 +27,13 @@ import (
 
 // Handlers 持有全部依赖。
 type Handlers struct {
-	cfg     *settings.Manager
-	st      *store.Store
-	log     *slog.Logger
-	adminMu sync.Mutex
-	admin   *adminAuth
-	poller  *worker.Poller
+	selectionLimit *selectionLimiter
+	cfg            *settings.Manager
+	st             *store.Store
+	log            *slog.Logger
+	adminMu        sync.Mutex
+	admin          *adminAuth
+	poller         *worker.Poller
 }
 
 // C 返回当前生效配置的快照（后台修改后立即反映）。
@@ -39,34 +41,36 @@ func (h *Handlers) C() *config.Config { return h.cfg.Get() }
 
 // CashierData 收银台模板数据。
 type CashierData struct {
-	NotifyStatus     string
-	Title            string
-	Provider         string
-	ProviderName     string
-	TradeNo          string
-	OutTradeNo       string
-	Name             string
-	Amount           string // 精确应付金额，如 10.01
-	Currency         string
-	RateUSD          string
-	TransferURL      string
-	PaymentQR        template.URL
-	OriginMoney      string
-	UID              string
-	HasPayee         bool
-	Note             string
-	RemainSeconds    int
-	TotalSeconds     int
-	ReturnURL        string
-	Status           string
-	CreatedAt        string
-	ExpiredAt        string
-	Providers        []providerOption
-	CurrencyOptions  []currencyOption
-	CanReselect      bool
-	NeedsProvider    bool
-	NeedsCurrency    bool
-	ProviderSubtitle string
+	NotifyStatus      string
+	SettlementPending bool
+	MerchantReview    bool
+	Title             string
+	Provider          string
+	ProviderName      string
+	TradeNo           string
+	OutTradeNo        string
+	Name              string
+	Amount            string // 精确应付金额，如 10.01
+	Currency          string
+	RateUSD           string
+	TransferURL       string
+	PaymentQR         template.URL
+	OriginMoney       string
+	UID               string
+	HasPayee          bool
+	Note              string
+	RemainSeconds     int
+	TotalSeconds      int
+	ReturnURL         string
+	Status            string
+	CreatedAt         string
+	ExpiredAt         string
+	Providers         []providerOption
+	CurrencyOptions   []currencyOption
+	CanReselect       bool
+	NeedsProvider     bool
+	NeedsCurrency     bool
+	ProviderSubtitle  string
 }
 
 // -----------------------------------------------------------------------------
@@ -336,7 +340,12 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 			_, err = h.st.Select(c.Request.Context(), no, provider, currency, receiver, cfg.Order.AmountPrecision, step, minimum, cfg.Order.MaxOffset, cfg.Order.SlotGraceSeconds)
 		}
 		if err != nil {
-			c.JSON(400, gin.H{"code": 1, "msg": err.Error()})
+			status := 400
+			if errors.Is(err, store.ErrSelectionThrottled) {
+				status = 429
+				c.Header("Retry-After", "2")
+			}
+			c.JSON(status, gin.H{"code": 1, "msg": err.Error()})
 			return
 		}
 		c.JSON(200, gin.H{"code": 0})
@@ -348,7 +357,7 @@ func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 	if err := h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil && cb.DeliveredAt != nil {
 		ack = "SUCCESS"
 	}
-	c.HTML(200, "result.html", CashierData{Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
+	c.HTML(200, "result.html", CashierData{Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
 }
 func (h *Handlers) renderError(c *gin.Context, status int, title, detail string) {
 	c.HTML(status, "error.html", gin.H{"Title": title, "Detail": detail})
@@ -364,7 +373,7 @@ func (h *Handlers) OrderStatus(c *gin.Context) {
 	if err = h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil {
 		ack = cb.DeliveredAt != nil
 	}
-	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack}})
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": o.PaymentPhase(time.Now()), "accepting_payment": time.Now().Before(o.ExpiresAt) && (o.Status == model.Pending || o.Status == model.Ready), "merchant_review_required": cb.State == "merchant_review"}})
 }
 func (h *Handlers) Health(c *gin.Context) {
 	if err := h.st.Ping(c.Request.Context()); err != nil {

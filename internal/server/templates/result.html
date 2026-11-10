@@ -35,15 +35,19 @@
     <div class="icon ok"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></div>
     <h1>支付成功</h1>
     <p>款项已确认到账，请返回商户页面查看订单进度。</p>
-    {{if ne .NotifyStatus "SUCCESS"}}<p style="margin-top:12px">付款已确认，商户通知尚未确认成功。请稍后查看商户订单；如一直未更新，请联系商户，勿重复付款。</p>{{end}}
+    {{if .MerchantReview}}<p style="margin-top:12px">付款窗口结束后确认到账，正在等待商户核对订单是否可以交付。请勿重复付款。</p>{{else if ne .NotifyStatus "SUCCESS"}}<p style="margin-top:12px">付款已确认，商户通知尚未确认成功。请稍后查看商户订单；如一直未更新，请联系商户，勿重复付款。</p>{{end}}
     {{else if eq .Status "CANCELED"}}
     <div class="icon canceled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
     <h1>订单已取消</h1>
     <p>商户已取消该订单，请勿继续向此订单付款。<br>如已付款，请联系商户客服处理。</p>
+    {{else if .SettlementPending}}
+    <div class="icon exp"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+    <h1>付款时间已结束，资金核对中</h1>
+    <p>请勿再转账。有效期内发起的付款仍会继续核对；商品交付需以商户订单为准。如已付款，请勿重复支付。</p>
     {{else}}
     <div class="icon exp"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
-    <h1>订单已超时</h1>
-    <p>该订单已超过支付时间，请返回商户查看订单。<br>如已付款，请联系商户客服处理。</p>
+    <h1>订单已关闭</h1>
+    <p>该订单的自动结算已结束，请返回商户查看订单。<br>如已付款，请联系商户客服处理。</p>
     {{end}}
 
     <div class="amount">{{.Amount}}<span>{{.Currency}}</span></div>
@@ -56,5 +60,8 @@
     {{with externalURL .ReturnURL}}<a class="btn" href="{{.}}">返回商户查看订单</a>{{end}}
   </main>
 {{template "theme_script" .}}
+{{if .SettlementPending}}<script>
+(function poll(){setTimeout(function(){fetch('/api/order/status?order_id='+encodeURIComponent({{.TradeNo}}),{cache:'no-store'}).then(function(r){return r.json()}).then(function(r){if(r.code===0&&r.data.payment_phase!=='settling'){location.reload();return}poll()}).catch(poll)},3000)})();
+</script>{{end}}
 </body>
 </html>

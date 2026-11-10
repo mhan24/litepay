@@ -123,3 +123,46 @@ func TestMerchantLongTimeoutsAndAdminNotificationRecovery(t *testing.T) {
 		t.Fatal(audits)
 	}
 }
+
+func TestSettlementPhaseAndFinalCloseAreDistinct(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, worker.NewPoller(mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.Create(ctx, model.Order{TradeNo: "phase", OutTradeNo: "phase", OriginUnits: 1000000, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Select(ctx, "phase", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.DB().Model(o).Update("expires_at", time.Now().Add(-time.Minute))
+	w := getRequest(engine, "/pay/phase")
+	if !strings.Contains(w.Body.String(), "资金核对中") || strings.Contains(w.Body.String(), "订单已关闭") || strings.Contains(w.Body.String(), "gram-payment-qr") {
+		t.Fatal(w.Body.String())
+	}
+	w = getRequest(engine, "/api/order/status?order_id=phase")
+	if !strings.Contains(w.Body.String(), `"payment_phase":"settling"`) || !strings.Contains(w.Body.String(), `"accepting_payment":false`) {
+		t.Fatal(w.Body.String())
+	}
+	if err = st.Cancel(ctx, o.TradeNo); err != nil {
+		t.Fatal(err)
+	}
+	w = getRequest(engine, "/pay/phase")
+	if !strings.Contains(w.Body.String(), "订单已取消") {
+		t.Fatal(w.Body.String())
+	}
+}

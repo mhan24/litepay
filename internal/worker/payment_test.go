@@ -221,7 +221,7 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 	if f.calls != 2 {
 		t.Fatal("closed order still queried the exchange", f.calls)
 	}
-	if e = st.DB().Create(&model.Transaction{Provider: "binance", EventID: "confirming", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: time.Now(), State: model.Unconfirmed}).Error; e != nil {
+	if _, e = st.Process(ctx, model.Transaction{Provider: "binance", EventID: "confirming", Reference: "app", Receiver: "receiver", Currency: "USDT", Units: 10000000, OccurredAt: time.Now(), State: model.Unconfirmed}, ""); e != nil {
 		t.Fatal(e)
 	}
 	if e = p.Scan(ctx, "binance"); e != nil {

@@ -6,6 +6,8 @@
 server:
   # 本机开发显式关闭；生产必须为 true，并配置 HTTPS 与商户主机白名单。
   production: false
+  # 商城兼容历史密钥的联动验收通过后才可设为 true；否则生产轮换被阻止。
+  merchant_key_versions: false
   # 访问根地址时跳转到商店；留空返回 404。
   store_url: ""
   addr: "0.0.0.0:8080"

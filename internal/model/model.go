@@ -21,29 +21,32 @@ const (
 )
 
 type Order struct {
-	SigningKeyID  uint   `gorm:"not null;default:0"`
-	ID            uint   `gorm:"primaryKey"`
-	TradeNo       string `gorm:"uniqueIndex;not null"`
-	OutTradeNo    string `gorm:"uniqueIndex;not null"`
-	Name          string
-	OriginUnits   int64 `gorm:"not null;check:origin_units > 0"`
-	RateUSD       string
-	RateAt        *time.Time
-	PayUnits      int64
-	Precision     int
-	Provider      string
-	Currency      string
-	Receiver      string
-	CurrencyLimit string
-	Reselect      bool
-	Status        string `gorm:"index;not null;check:status IN ('PENDING','READY','PAID','EXPIRED','CANCELED')"`
-	SelectedAt    *time.Time
-	ExpiresAt     time.Time `gorm:"index"`
-	PaidAt        *time.Time
-	NotifyURL     string
-	ReturnURL     string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	SelectionChanges  int `gorm:"not null;default:0"`
+	LastSelectionAt   *time.Time
+	NextExpiryCheckAt time.Time `gorm:"index:idx_order_expiry_due,priority:2"`
+	SigningKeyID      uint      `gorm:"not null;default:0"`
+	ID                uint      `gorm:"primaryKey"`
+	TradeNo           string    `gorm:"uniqueIndex;not null"`
+	OutTradeNo        string    `gorm:"uniqueIndex;not null"`
+	Name              string
+	OriginUnits       int64 `gorm:"not null;check:origin_units > 0"`
+	RateUSD           string
+	RateAt            *time.Time
+	PayUnits          int64
+	Precision         int
+	Provider          string
+	Currency          string
+	Receiver          string
+	CurrencyLimit     string
+	Reselect          bool
+	Status            string `gorm:"index;index:idx_order_expiry_due,priority:1;index:idx_pending_expiry,priority:1;not null;check:status IN ('PENDING','READY','PAID','EXPIRED','CANCELED')"`
+	SelectedAt        *time.Time
+	ExpiresAt         time.Time `gorm:"index;index:idx_pending_expiry,priority:2"`
+	PaidAt            *time.Time
+	NotifyURL         string
+	ReturnURL         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 func (o Order) Original() string  { return amount.String(o.OriginUnits) }
@@ -53,8 +56,8 @@ type Slot struct {
 	Provider  string    `gorm:"primaryKey"`
 	Currency  string    `gorm:"primaryKey"`
 	Units     int64     `gorm:"primaryKey"`
-	OrderID   *uint     `gorm:"index"`
-	ExpiresAt time.Time `gorm:"index"`
+	OrderID   *uint     `gorm:"index;index:idx_slot_cleanup,priority:1"`
+	ExpiresAt time.Time `gorm:"index;index:idx_slot_cleanup,priority:2"`
 }
 
 // Transaction is both the exchange evidence and its unique consumption record.
@@ -133,8 +136,8 @@ type ConfirmationTask struct {
 	EventID    string `gorm:"primaryKey"`
 	OrderID    *uint  `gorm:"index"`
 	OccurredAt time.Time
-	Deadline   time.Time `gorm:"index"`
-	State      string    `gorm:"index"` // pending, resolved, manual_review
+	Deadline   time.Time `gorm:"index;index:idx_confirmation_expiry,priority:2"`
+	State      string    `gorm:"index;index:idx_confirmation_expiry,priority:1"` // pending, resolved, manual_review
 	UpdatedAt  time.Time
 }
 
@@ -199,12 +202,12 @@ type PaymentRecovery struct {
 // HistoricalScan is an audited, resumable administrative request; it never changes a
 // closed order's status. Evidence must still pass normal provider and finality validation.
 type HistoricalScan struct {
-	Automatic bool `gorm:"not null;default:false"`
-	ID        uint `gorm:"primaryKey"`
+	Automatic bool `gorm:"not null;default:false;index:idx_final_pass,priority:1;index:idx_hist_auto,priority:1"`
+	ID        uint `gorm:"primaryKey;index:idx_hist_auto,priority:4"`
 	OrderID   uint `gorm:"index"`
 	AttemptID uint
-	Provider  string `gorm:"index"`
-	Receiver  string
+	Provider  string `gorm:"index:idx_final_pass,priority:2;index:idx_hist_pending,priority:1;index:idx_hist_auto,priority:2"`
+	Receiver  string `gorm:"index:idx_final_pass,priority:3;index:idx_hist_auto,priority:3"`
 	From      time.Time
 	To        time.Time
 	Cursor    time.Time
@@ -213,12 +216,28 @@ type HistoricalScan struct {
 	Hash      string
 	OldestAt  time.Time
 	Pages     int
-	State     string `gorm:"index"`
+	State     string `gorm:"index:idx_final_pass,priority:4;index:idx_hist_pending,priority:2"`
 	LastError string
 	Operator  string
 	Reason    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	CreatedAt time.Time `gorm:"index:idx_final_pass,priority:5"`
+	UpdatedAt time.Time `gorm:"index:idx_hist_pending,priority:3"`
 }
 
 func (a PaymentAttempt) Amount() string { return amount.Text(a.Units, a.Precision) }
+
+func (o Order) PaymentPhase(now time.Time) string {
+	switch o.Status {
+	case Paid:
+		return "paid"
+	case Canceled, Expired:
+		return "closed"
+	}
+	if !now.Before(o.ExpiresAt) {
+		if o.Status == Ready {
+			return "settling"
+		}
+		return "closed"
+	}
+	return "accepting_payment"
+}

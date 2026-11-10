@@ -253,6 +253,7 @@ func TestExpireRequiresSuccessfulCoverage(t *testing.T) {
 	if e := s.ScanResult(ctx, "binance", time.Now(), nil); e != nil {
 		t.Fatal(e)
 	}
+	s.DB().Model(o).Update("next_expiry_check_at", time.Now().Add(-time.Second))
 	if e := s.Expire(ctx, 0); e != nil {
 		t.Fatal(e)
 	}
@@ -337,23 +338,20 @@ func TestSelectRejectsAmountsAboveMallLimit(t *testing.T) {
 	if e != nil || align.Status != model.Pending || align.PayUnits != 0 || slotOwners(t, s, align.ID) != 0 {
 		t.Fatal("rejected selection left the order or a tier reserved", align, e)
 	}
-	// 首档合法、冲突递增后越界：只能拒绝，且不能占用任何档位。
+	// A coarse increment would cross the mall ceiling; a micro-unit inside it is valid.
 	createOrder(t, s, "first", 999_999_990_000)
 	createOrder(t, s, "second", 999_999_990_000)
 	if _, e = s.Select(ctx, "first", "binance", "USDT", "receiver", 2, 10000, 10000, 1, 120); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = s.Select(ctx, "second", "binance", "USDT", "receiver", 2, 10000, 10000, 1, 120); e == nil {
-		t.Fatal("conflict increment above the mall limit accepted")
-	}
-	second, e := s.GetByTradeNo(ctx, "second")
-	if e != nil || second.Status != model.Pending || second.PayUnits != 0 || slotOwners(t, s, second.ID) != 0 {
-		t.Fatal("failed increment left the order or a tier reserved", second, e)
+	second, e := s.Select(ctx, "second", "binance", "USDT", "receiver", 2, 10000, 10000, 1, 120)
+	if e != nil || second.PayUnits >= amount.MaxMall || second.PayUnits <= 999_999_990_000 || second.Precision != 6 {
+		t.Fatal("invalid fine allocation near mall boundary", second, e)
 	}
 	var slots int64
 	s.DB().Model(&model.Slot{}).Count(&slots)
-	if slots != 1 {
-		t.Fatalf("failed selection created %d tiers", slots)
+	if slots != 2 {
+		t.Fatal(slots)
 	}
 	// 上限内侧的金额仍然可用：不做过度收紧。
 	createOrder(t, s, "top", 999_999_999_999)

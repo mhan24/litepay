@@ -76,12 +76,13 @@ func IsSupportedCurrency(currency string) bool {
 
 // ServerConfig HTTP 服务配置。
 type ServerConfig struct {
-	Production     bool     `yaml:"production"`
-	NotifyHosts    []string `yaml:"notify_hosts"`    // Exact callback hostnames in production; no wildcards.
-	StoreURL       string   `yaml:"store_url"`       // 根地址跳转目标；留空返回 404。
-	TrustedProxies []string `yaml:"trusted_proxies"` // Only explicit reverse proxies may supply client IP headers.
-	Addr           string   `yaml:"addr"`            // 监听地址，如 0.0.0.0:8080
-	BaseURL        string   `yaml:"base_url"`        // 网关对外访问地址
+	MerchantKeyVersions bool     `yaml:"merchant_key_versions"` // Enable only after merchant compatibility acceptance.
+	Production          bool     `yaml:"production"`
+	NotifyHosts         []string `yaml:"notify_hosts"`    // Exact callback hostnames in production; no wildcards.
+	StoreURL            string   `yaml:"store_url"`       // 根地址跳转目标；留空返回 404。
+	TrustedProxies      []string `yaml:"trusted_proxies"` // Only explicit reverse proxies may supply client IP headers.
+	Addr                string   `yaml:"addr"`            // 监听地址，如 0.0.0.0:8080
+	BaseURL             string   `yaml:"base_url"`        // 网关对外访问地址
 }
 
 // DatabaseConfig SQLite 配置。

@@ -12,7 +12,7 @@
   {{template "admin_nav" .}}
   <main class="shell">
     {{template "admin_flash" .}}
-    {{if or .ExhaustedCallbacks .ReviewConfirmations}}<p class="banner" role="alert">{{.ExhaustedCallbacks}} 笔商城通知重试已耗尽；{{.ReviewConfirmations}} 笔到账确认已转人工核对。请按订单号检查通知和到账证据。</p>{{end}}
+    {{if or .ExhaustedCallbacks .ReviewConfirmations .MerchantReviewCallbacks}}<p class="banner" role="alert">{{.ExhaustedCallbacks}} 笔商城通知重试已耗尽；{{.ReviewConfirmations}} 笔到账确认已转人工核对；{{.MerchantReviewCallbacks}} 笔超时后到账需核对商城状态。请按订单号检查通知和到账证据。</p>{{end}}
     <header class="pagehead">
       <h1>{{.Base.Title}}</h1>
     </header>
@@ -99,7 +99,7 @@
     <section class="card">
       <div class="card-b">
         {{range .Callbacks}}
-        <p>本地订单 {{.OrderID}} · 已尝试 {{.Attempts}} 次 · {{.LastError}} · 下次调度 {{.NextAt.Format "01-02 15:04:05"}}</p>
+        <p><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.OutTradeNo}}</a> · {{if eq .State "merchant_review"}}等待核对商城状态{{else}}{{.State}}{{end}} · 已尝试 {{.Attempts}} 次 · {{.LastError}} · 下次调度 {{.NextAt.Format "01-02 15:04:05"}}</p>
         {{else}}
         暂无待确认回调
         {{end}}

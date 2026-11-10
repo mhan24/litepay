@@ -205,3 +205,22 @@ func TestChangingTONAddressArchivesOnlyOldCheckpoint(t *testing.T) {
 		t.Fatal("old address kept current scan due", due, err)
 	}
 }
+
+func TestProductionTokenRotationRequiresMerchantCompatibility(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Server.Production = true
+	m := verificationManager(t, cfg)
+	before := m.Get().BEpusdt
+	if _, err := m.RotateAPIToken(ctx, "operator"); err == nil {
+		t.Fatal("production single-token merchant rotated")
+	}
+	after := m.Get().BEpusdt
+	if before != after {
+		t.Fatal("rejected rotation published key")
+	}
+	stored, err := m.st.LoadCredential(ctx, "bepusdt_api_token")
+	if err != nil || stored.Value != before.APIToken {
+		t.Fatal("rejected rotation changed stored token", err)
+	}
+}

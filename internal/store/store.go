@@ -13,7 +13,6 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 
 	"litepay/internal/amount"
@@ -84,7 +83,7 @@ func Open(path string) (*Store, error) {
 	if err = db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables).Error; err != nil {
 		return fail(err)
 	}
-	if version != 8 && version != 9 && version != 10 && tables > 0 {
+	if version != 8 && version != 9 && version != 10 && version != 11 && tables > 0 {
 		return fail(errors.New("旧数据库不兼容，请配置一个新的空数据库"))
 	}
 	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}); err != nil {
@@ -93,7 +92,13 @@ func Open(path string) (*Store, error) {
 	if err = migratePaymentAttempts(db); err != nil {
 		return fail(err)
 	}
-	if err = db.Exec("PRAGMA user_version=10").Error; err != nil {
+	if err = initializeExpiryAndSelection(db); err != nil {
+		return fail(err)
+	}
+	if err = backfillConfirmationTasks(db); err != nil {
+		return fail(err)
+	}
+	if err = db.Exec("PRAGMA user_version=11").Error; err != nil {
 		return fail(err)
 	}
 	if path != ":memory:" {
@@ -178,7 +183,7 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 	if provider != "ton" && ((provider != "binance" && provider != "okx") || (currency != "USDT" && currency != "USDC")) {
 		return nil, errors.New("收款平台与币种不匹配")
 	}
-	if precision < 2 || precision > 6 || step <= 0 || step%amount.Quantum(precision) != 0 || maxOffset < 1 || maxOffset > 900 || minUnits <= 0 {
+	if precision < 2 || precision > 6 || step <= 0 || step > amount.Scale || step%amount.Quantum(precision) != 0 || maxOffset < 1 || maxOffset > 900 || minUnits <= 0 {
 		return nil, errors.New("金额配置无效")
 	}
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
@@ -200,9 +205,34 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 		if o.Status == model.Ready && !o.Reselect {
 			return errors.New("订单不允许重选")
 		}
-		if err := db.Where("order_id IS NULL AND expires_at < ?", now).Delete(&model.Slot{}).Error; err != nil {
+		if o.SelectionChanges >= MaxSelectionChanges {
+			return ErrSelectionLimit
+		}
+		if o.LastSelectionAt != nil && now.Sub(*o.LastSelectionAt) < SelectionInterval {
+			return ErrSelectionThrottled
+		}
+		// Returning to any saved instruction reuses its amount and quote; it never allocates again.
+		var previous model.PaymentAttempt
+		err := db.Where("order_id = ? AND provider = ? AND currency = ? AND receiver = ?", o.ID, provider, currency, receiver).Order("id").First(&previous).Error
+		if err == nil {
+			if !amount.MallCompatible(previous.Units) {
+				return errors.New("历史付款金额超出可核销范围")
+			}
+			applyAttempt(&o, previous)
+			o.SelectionChanges++
+			o.LastSelectionAt = &now
+			return db.Save(&o).Error
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
+		var attempts int64
+		if err = db.Model(&model.PaymentAttempt{}).Where("order_id = ?", o.ID).Count(&attempts).Error; err != nil {
+			return err
+		}
+		if attempts >= MaxPaymentAttempts {
+			return errors.New("本订单已保存的付款方式数量达到上限，请使用已选方式")
+		}
+
 		q := amount.Quantum(precision)
 		base := max(o.OriginUnits, minUnits)
 		var quoteLimit int64
@@ -218,54 +248,36 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 			}
 		}
 		base = ((base + q - 1) / q) * q
-		// 创建订单只约束原始金额，应付金额是向上对齐后再按档位递增得到的，可能越过
-		// 商城 float64 验签区间 [0.0001, 1000000)。越界只能整单拒绝：不放宽边界、不截断、
-		// 不调低金额，也不占用任何金额档位（整个事务回滚）。
-		inRange := 0
-		for i := 0; i <= maxOffset; i++ {
-			units := base + int64(i)*step
-			// Unique-amount offsets may increase a GRAM quote by at most 0.1%.
-			if quoted != 0 && units > quoteLimit {
-				break
-			}
-			if units >= amount.MaxMall {
-				break // 档位随 i 单调递增，越过上限后不再有合法金额
-			}
-			if units < amount.MinMall {
-				continue // 低于商城可验签下限，继续向上递增
-			}
-			inRange++
-			slot := model.Slot{Provider: provider, Currency: currency, Units: units, OrderID: &o.ID, ExpiresAt: o.ExpiresAt.Add(max(time.Duration(grace)*time.Second, LateVisibilityWindow))}
-			r := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&slot)
-			if r.Error != nil {
-				return r.Error
-			}
-			if r.RowsAffected == 0 {
-				continue
-			}
-			o.RateUSD = ""
-			o.RateAt = nil
-			if quoted != 0 {
-				o.RateUSD = quote.USD
-				at := quote.PriceAt
-				o.RateAt = &at
-			}
-			o.Provider = provider
-			o.Currency = currency
-			o.Receiver = receiver
-			o.Precision = precision
-			o.PayUnits = units
-			o.SelectedAt = &now
-			o.Status = model.Ready
-			if err := db.Save(&o).Error; err != nil {
-				return err
-			}
-			return createAttempt(db, o)
+		ceiling := base + step*int64(maxOffset)
+		if quoted != 0 {
+			ceiling = quoteLimit
 		}
-		if inRange == 0 {
-			return errors.New("应付金额超出可核销范围，请调低订单金额后重新下单")
+		units, actualPrecision, err := allocateSlot(db, o, provider, currency, base, ceiling, step, precision, grace, now)
+		if err != nil {
+			return err
 		}
-		return errors.New("可用金额档位已满，请稍后重试")
+		o.RateUSD = ""
+		o.RateAt = nil
+		if quoted != 0 {
+			o.RateUSD = quote.USD
+			at := quote.PriceAt
+			o.RateAt = &at
+		}
+		o.Provider = provider
+		o.Currency = currency
+		o.Receiver = receiver
+		o.Precision = actualPrecision
+		o.PayUnits = units
+		o.SelectedAt = &now
+		o.Status = model.Ready
+		o.SelectionChanges++
+		o.LastSelectionAt = &now
+		o.NextExpiryCheckAt = o.ExpiresAt.Add(LateVisibilityWindow)
+		if err = db.Save(&o).Error; err != nil {
+			return err
+		}
+		return createAttempt(db, o)
+
 	})
 	return &o, err
 }
@@ -412,83 +424,13 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			return e
 		}
 		result = "paid"
-		return db.Create(&model.Callback{OrderID: o.ID, SigningKeyID: o.SigningKeyID, NextAt: now, State: "queued"}).Error
+		state := "queued"
+		if !now.Before(o.ExpiresAt) {
+			state = "merchant_review"
+		}
+		return db.Create(&model.Callback{OrderID: o.ID, SigningKeyID: o.SigningKeyID, NextAt: now, State: state}).Error
 	})
 	return result, err
-}
-
-// Expire requires complete scan coverage and no live confirmation task tied to the order.
-func (s *Store) Expire(ctx context.Context, grace int) error {
-	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		now := time.Now()
-		if err := backfillConfirmationTasks(db); err != nil {
-			return err
-		}
-		if err := db.Model(&model.ConfirmationTask{}).Where("state = ? AND deadline <= ?", "pending", now).Update("state", "manual_review").Error; err != nil {
-			return err
-		}
-		cutoff := now.Add(-time.Duration(grace) * time.Second)
-		if err := db.Model(&model.Order{}).Where("status = ? AND expires_at < ?", model.Pending, cutoff).Update("status", model.Expired).Error; err != nil {
-			return err
-		}
-		// Query success only proves what was visible at that moment. Historical attempts
-		// remain eligible for a separate late-visibility window, independent of checkout expiry.
-		var ready []model.Order
-		if err := db.Where("status = ?", model.Ready).Find(&ready).Error; err != nil {
-			return err
-		}
-		for _, o := range ready {
-			var attempts []model.PaymentAttempt
-			if err := db.Where("order_id = ?", o.ID).Find(&attempts).Error; err != nil {
-				return err
-			}
-			if len(attempts) == 0 {
-				continue
-			}
-			safe := true
-			for _, a := range attempts {
-				if now.Before(a.SettleUntil) {
-					safe = false
-					break
-				}
-				var cursor model.ScanCursor
-				if err := db.Where("provider = ?", a.Provider).First(&cursor).Error; err != nil {
-					if errors.Is(err, gorm.ErrRecordNotFound) {
-						safe = false
-						break
-					}
-					return err
-				}
-				if cursor.ScannedUntil.Before(a.SettleUntil) {
-					safe = false
-					break
-				}
-				var finalPass int64
-				if err := db.Model(&model.HistoricalScan{}).Where(`automatic = ? AND provider = ? AND receiver = ? AND state = ? AND "from" <= ? AND "to" >= ? AND created_at >= ?`, true, a.Provider, a.Receiver, "completed", a.SelectedAt, a.ExpiresAt, a.SettleUntil).Count(&finalPass).Error; err != nil {
-					return err
-				}
-				if finalPass == 0 {
-					safe = false
-					break
-				}
-			}
-
-			var tasks int64
-			if err := db.Model(&model.ConfirmationTask{}).Where("order_id = ? AND state = ? AND deadline > ?", o.ID, "pending", now).Count(&tasks).Error; err != nil {
-				return err
-			}
-			if safe && tasks == 0 {
-				if err := db.Model(&o).Update("status", model.Expired).Error; err != nil {
-					return err
-				}
-			}
-		}
-		open := db.Model(&model.Order{}).Select("id").Where("status IN ?", []string{model.Pending, model.Ready})
-		if err := db.Model(&model.Slot{}).Where("order_id IS NOT NULL AND order_id NOT IN (?)", open).Update("order_id", nil).Error; err != nil {
-			return err
-		}
-		return db.Where("order_id IS NULL AND expires_at < ?", now).Delete(&model.Slot{}).Error
-	})
 }
 
 // IdleReconcileInterval keeps recording late/canceled-order deposits without creating claims.
@@ -512,9 +454,6 @@ func (s *Store) ScanDue(ctx context.Context, provider, receiver string) (bool, e
 	}
 	if provider == "ton" && n > 0 {
 		return true, nil
-	}
-	if err = backfillConfirmationTasks(db); err != nil {
-		return false, err
 	}
 	err = db.Model(&model.ConfirmationTask{}).Where("provider = ? AND state = ? AND deadline > ?", provider, "pending", time.Now()).Count(&n).Error
 	return n > 0, err
@@ -561,9 +500,6 @@ func backfillConfirmationTasks(db *gorm.DB) error {
 
 func (s *Store) PendingTimes(ctx context.Context, provider string, offset, limit int) ([]time.Time, error) {
 	db := s.db.WithContext(ctx)
-	if err := backfillConfirmationTasks(db); err != nil {
-		return nil, err
-	}
 	if err := db.Model(&model.ConfirmationTask{}).Where("state = ? AND deadline <= ?", "pending", time.Now()).Update("state", "manual_review").Error; err != nil {
 		return nil, err
 	}
@@ -597,14 +533,14 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 	var o model.Order
 	missing := false
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state <> ?", maxAttempts, time.Now(), "exhausted").Updates(map[string]any{"state": "exhausted"}).Error; err != nil {
+		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state NOT IN ?", maxAttempts, time.Now(), []string{"exhausted", "merchant_review"}).Updates(map[string]any{"state": "exhausted"}).Error; err != nil {
 			return err
 		}
 		// Only paid orders are notified. Filtering here keeps a task whose order is not paid
 		// from blocking the queue: it would never become deliverable and every reservation
 		// would return the same row again.
 		paid := db.Model(&model.Order{}).Select("id").Where("status = ?", model.Paid)
-		if e := db.Where("delivered_at IS NULL AND attempts < attempt_base + ? AND next_at <= ? AND order_id IN (?) AND state <> ?", maxAttempts, time.Now(), paid, "exhausted").Order("next_at").First(&task).Error; e != nil {
+		if e := db.Where("delivered_at IS NULL AND attempts < attempt_base + ? AND next_at <= ? AND order_id IN (?) AND state NOT IN ?", maxAttempts, time.Now(), paid, []string{"exhausted", "merchant_review"}).Order("next_at").First(&task).Error; e != nil {
 			if errors.Is(e, gorm.ErrRecordNotFound) {
 				missing = true
 				return nil

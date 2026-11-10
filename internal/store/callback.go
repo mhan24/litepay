@@ -43,7 +43,7 @@ func (s *Store) RetryCallback(ctx context.Context, tradeNo, operator, reason str
 		if time.Now().Before(task.LeaseUntil) || (task.State == "" && task.Attempts > 0 && time.Now().Before(task.NextAt)) {
 			return errors.New("通知仍在发送，请稍后重试")
 		}
-		if task.State != "exhausted" && task.Attempts < task.AttemptBase+maxAttempts {
+		if task.State != "merchant_review" && task.State != "exhausted" && task.Attempts < task.AttemptBase+maxAttempts {
 			return errors.New("自动通知仍在重试中")
 		}
 		audit := model.CallbackRecovery{OrderID: o.ID, Operator: operator, Reason: reason, PreviousAttempts: task.Attempts}

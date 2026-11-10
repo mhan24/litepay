@@ -137,7 +137,7 @@
           </div>
           <div class="field">
             <label>应付金额小数位</label>
-            <input class="input" type="number" name="order_amount_precision" value="{{.Cfg.Order.AmountPrecision}}" min="2" max="6">
+            <input class="input" type="number" name="order_amount_precision" value="{{.Cfg.Order.AmountPrecision}}" min="2" max="6"><span class="hint">粗档位不足时自动细分至六位；最大加价仍受步长 × 最大偏移限制。</span>
           </div>
           <div class="field">
             <label>支付截止后继续确认到账的宽限时间（秒）</label>
@@ -160,10 +160,10 @@
             <label>API Token</label>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <span class="mono" style="padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)">{{.BEpusdtKeyMask}}</span>
-              <button class="btn btn-ghost btn-sm" type="submit" form="rotate-token" formaction="{{adminPath}}/settings/token">轮换并生成新 Token</button>
+              <button class="btn btn-ghost btn-sm" type="submit" form="rotate-token" formaction="{{adminPath}}/settings/token" {{if not .CanRotateToken}}disabled{{end}}>轮换并生成新 Token</button>
               <a class="btn btn-ghost btn-sm" href="{{adminPath}}/integration">查看接入信息</a>
             </div>
-            <span class="hint">待发送或未确认通知 {{.PendingNotifyCount}} 笔。轮换后新订单使用新 Token，历史通知继续使用原密钥版本；请先让商城兼容旧版本。新 Token 在接入页展示。</span>
+            <span class="hint">{{if not .CanRotateToken}}商城历史密钥验签尚未完成兼容验收，生产 Token 轮换已暂停。{{end}}待发送或未确认通知 {{.PendingNotifyCount}} 笔。轮换后新订单使用新 Token，历史通知继续使用原密钥版本；请先让商城兼容旧版本。新 Token 在接入页展示。</span>
           </div>
           <div class="field"><label>结算法币</label><div class="input" style="display:flex;align-items:center">USD · 固定 1:1</div></div>
           <div class="field">

@@ -35,6 +35,7 @@ func TestPaymentAttemptReselectionKeepsOriginalClaim(t *testing.T) {
 			if mode == "cross_currency" {
 				currency = "USDC"
 			}
+			allowSelectionFixture(t, s, "attempts")
 			next, err := s.Select(ctx, "attempts", "binance", currency, "new-receiver", 2, 10000, 10000, 99, 120)
 			if err != nil {
 				t.Fatal(err)
@@ -71,6 +72,7 @@ func TestOldAndNewPaymentsOnlySettleOneOrder(t *testing.T) {
 	old := readyOrder(t, s, "double-payment")
 	first := evidence(old, "old-deposit")
 	first.OccurredAt = time.Now()
+	allowSelectionFixture(t, s, old.TradeNo)
 	next, err := s.Select(ctx, old.TradeNo, "okx", "USDC", "other-receiver", 2, 10000, 10000, 99, 120)
 	if err != nil {
 		t.Fatal(err)

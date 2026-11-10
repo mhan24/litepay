@@ -89,41 +89,31 @@ func (s *Store) SaveHistoricalScan(ctx context.Context, before, after model.Hist
 // One account-wide job covers all its open instructions, instead of polling per invoice.
 func (s *Store) QueueSettlementScan(ctx context.Context, provider, receiver string, lookback time.Duration) error {
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		var attempts []model.PaymentAttempt
-		if err := db.Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ? AND a.receiver = ? AND a.selected_at < ?", model.Ready, provider, receiver, time.Now().Add(-lookback)).Order("a.selected_at").Find(&attempts).Error; err != nil {
+		query := func() *gorm.DB {
+			return db.Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ? AND a.receiver = ? AND a.selected_at < ?", model.Ready, provider, receiver, time.Now().Add(-lookback))
+		}
+		var first, last model.PaymentAttempt
+		if err := query().Order("a.selected_at").First(&first).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
 			return err
 		}
-		if len(attempts) == 0 {
+		var latest model.HistoricalScan
+		err := db.Where("automatic = ? AND provider = ? AND receiver = ?", true, provider, receiver).Order("id DESC").First(&latest).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err == nil && (latest.State == "pending" || time.Since(latest.UpdatedAt) < time.Minute) {
 			return nil
 		}
-		// Account identities cannot change while an order is open. Keep grouping explicit anyway.
-		grouped := map[string][]model.PaymentAttempt{}
-		for _, a := range attempts {
-			grouped[a.Receiver] = append(grouped[a.Receiver], a)
+		if err = query().Order("a.expires_at DESC").First(&last).Error; err != nil {
+			return err
 		}
-		for receiver, group := range grouped {
-			var latest model.HistoricalScan
-			err := db.Where("automatic = ? AND provider = ? AND receiver = ?", true, provider, receiver).Order("id DESC").First(&latest).Error
-			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
-			}
-			if err == nil && (latest.State == "pending" || time.Since(latest.UpdatedAt) < time.Minute) {
-				continue
-			}
-			from, end := group[0].SelectedAt, group[0].ExpiresAt
-			for _, a := range group {
-				if a.ExpiresAt.After(end) {
-					end = a.ExpiresAt
-				}
-			}
-			if end.After(time.Now()) {
-				end = time.Now()
-			}
-			a := group[0]
-			if err := db.Create(&model.HistoricalScan{Automatic: true, OrderID: a.OrderID, AttemptID: a.ID, Provider: provider, Receiver: receiver, From: from, To: end, Cursor: from, State: "pending", Operator: "system", Reason: "付款窗口首次可见延迟对账"}).Error; err != nil {
-				return err
-			}
+		end := last.ExpiresAt
+		if end.After(time.Now()) {
+			end = time.Now()
 		}
-		return nil
+		return db.Create(&model.HistoricalScan{Automatic: true, OrderID: first.OrderID, AttemptID: first.ID, Provider: provider, Receiver: receiver, From: first.SelectedAt, To: end, Cursor: first.SelectedAt, State: "pending", Operator: "system", Reason: "付款窗口首次可见延迟对账"}).Error
 	})
 }

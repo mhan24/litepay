@@ -312,6 +312,9 @@ func (m *Manager) ensureAPIToken(ctx context.Context) error {
 }
 
 func (m *Manager) RotateAPIToken(ctx context.Context, operator string) (string, error) {
+	if m.Get().Server.Production && !m.Get().Server.MerchantKeyVersions {
+		return "", fmt.Errorf("商城历史密钥验签尚未完成兼容验收，生产 Token 轮换已暂停")
+	}
 	token, err := newAPIToken()
 	if err != nil {
 		return "", err

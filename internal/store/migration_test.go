@@ -69,6 +69,7 @@ func TestMigrationRecoversPreexistingTaskSelectionWithoutGuessing(t *testing.T) 
 	if _, err = s.Process(ctx, event, ""); err != nil {
 		t.Fatal(err)
 	}
+	allowSelectionFixture(t, s, old.TradeNo)
 	if _, err = s.Select(ctx, old.TradeNo, "okx", "USDC", "new-receiver", 2, 10000, 10000, 99, 120); err != nil {
 		t.Fatal(err)
 	}
@@ -94,5 +95,46 @@ func TestMigrationRecoversPreexistingTaskSelectionWithoutGuessing(t *testing.T) 
 	fresh, _ := s.GetByTradeNo(ctx, old.TradeNo)
 	if fresh.Provider != old.Provider {
 		t.Fatal("legacy task instruction lost")
+	}
+}
+
+func TestVersion10ExpiryScheduleAndSelectionLimitsSurviveRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "schema10.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "v10-ready")
+	// Remove new columns to exercise the actual additive migration.
+	for _, column := range []string{"selection_changes", "last_selection_at", "next_expiry_check_at"} {
+		if column == "next_expiry_check_at" {
+			s.DB().Exec("DROP INDEX idx_order_expiry_due")
+		}
+		if err = s.DB().Migrator().DropColumn(&model.Order{}, column); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.DB().Exec("PRAGMA user_version=10")
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := s.GetByTradeNo(context.Background(), o.TradeNo)
+	if err != nil || fresh.SelectionChanges != 1 || fresh.LastSelectionAt == nil || fresh.NextExpiryCheckAt.Before(o.ExpiresAt.Add(LateVisibilityWindow-time.Second)) {
+		t.Fatal(fresh, err)
+	}
+	if _, err = s.Select(context.Background(), o.TradeNo, "okx", "USDC", "other", 2, 10000, 10000, 99, 120); err != ErrSelectionThrottled {
+		t.Fatal("migration lost last selection", err)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	fresh, err = s.GetByTradeNo(context.Background(), o.TradeNo)
+	if err != nil || fresh.SelectionChanges != 1 {
+		t.Fatal(fresh, err)
 	}
 }

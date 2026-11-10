@@ -102,5 +102,36 @@ class PaymentAttemptDBTest(PaymentDBTest):
             tool.validate(self.path)
 
 
+class CapacityDBTest(PaymentAttemptDBTest):
+    def setUp(self):
+        super().setUp()
+        self.db.executescript('''PRAGMA user_version=11;
+            ALTER TABLE orders ADD COLUMN selection_changes INTEGER DEFAULT 1;
+            ALTER TABLE orders ADD COLUMN next_expiry_check_at TEXT;
+            ALTER TABLE callbacks ADD COLUMN state TEXT DEFAULT 'merchant_review';
+            ALTER TABLE callbacks ADD COLUMN delivered_at TEXT;
+        ''')
+        self.db.commit()
+
+    def test_versioned_keys_and_historical_attempts_preserved(self):
+        self.assertEqual(tool.drill(self.path)['schema'], 11)
+        self.db.execute('UPDATE orders SET signing_key_id=99')
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+
+    def test_review_hold_and_expiry_schedule_invariants(self):
+        self.assertEqual(tool.validate(self.path)['schema'], 11)
+        self.db.execute("UPDATE callbacks SET delivered_at='2026-11-10'")
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+        self.db.execute('UPDATE callbacks SET delivered_at=NULL')
+        self.db.execute("INSERT INTO orders(id,status) VALUES(2,'READY')")
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+
+
 if __name__ == '__main__':
     unittest.main()

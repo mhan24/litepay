@@ -1,4 +1,4 @@
-name: Go checks
+name: Payment checks
 on: [push, pull_request]
 permissions:
   contents: read
@@ -14,3 +14,7 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: go build ./...
+      - name: Python backup and cancellation contracts
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Expiry capacity benchmarks
+        run: go test ./internal/store -run '^$' -bench 'BenchmarkExpire' -benchtime=1x

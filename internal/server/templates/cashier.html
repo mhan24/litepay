@@ -335,6 +335,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
         if (d.status === 'PAID') { onPaid(d); }
         else if (d.status === 'EXPIRED') { onExpired(); }
         else if (d.status === 'CANCELED') { onCanceled(); }
+        else if(d.payment_phase==='settling'){window.location.reload();}
         else if (d.provider && (d.provider !== PROVIDER || d.currency !== CURRENCY || d.amount !== PAY_AMOUNT)) { window.location.reload(); }
       })
       .catch(function () { /* 网络抖动忽略，下次继续 */ });
@@ -351,6 +352,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     if (finished || !showPayment) return;
     finished = true;
     hideWalletPayment();
+    if(d.merchant_review_required){window.location.reload();return;}
     statusEl.textContent = d.merchant_confirmed ? '付款已确认，商户已接收通知' : '付款已确认，正在通知商户，请勿重复付款';
     document.getElementById('ov-title').textContent = '支付成功';
     document.getElementById('ov-desc').textContent = '正在跳转回商户页面…';
@@ -371,8 +373,9 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     statusEl.textContent = '付款窗口已结束，已付款请勿重复下单或转账';
     var icon = document.getElementById('ov-icon');
     icon.classList.add('expired');
-    document.getElementById('ov-title').textContent = '订单已超时';
-    document.getElementById('ov-desc').textContent = '请返回商户查看订单。如果已经付款，请联系商户客服。';
+    document.getElementById('ov-title').textContent = '付款时间已结束，资金核对中';
+    document.getElementById('ov-desc').textContent = '请勿再转账。有效期内付款继续核对，商品交付需由商户确认。';
+    setTimeout(function(){location.reload()},1500);
     var review=document.getElementById('ov-review');review.hidden=false;review.style.display='inline-block';
     overlay.classList.add('show');
   }

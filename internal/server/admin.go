@@ -358,6 +358,7 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 		"UpdatedAt":          updated.Format("2006-01-02 15:04:05"),
 		"Cfg":                cfg,
 		"PendingNotifyCount": h.pendingNotifyCount(c),
+		"CanRotateToken":     !cfg.Server.Production || cfg.Server.MerchantKeyVersions,
 		"Currencies":         cfg.Checkout.Currencies,
 		"KnownCurrencies":    []string{"USDT", "USDC"},
 		"BinanceCurrencies":  cfg.ProviderCurrencies(config.ProviderBinance),
@@ -521,7 +522,7 @@ func (h *Handlers) AdminRotateToken(c *gin.Context) {
 	_, err := h.cfg.RotateAPIToken(c.Request.Context(), c.GetString("admin_user"))
 	if err != nil {
 		c.Redirect(http.StatusSeeOther,
-			h.adminURL("/admin/integration?msg=")+url.QueryEscape("API Token 生成失败，请重试")+"&t=err")
+			h.adminURL("/admin/integration?msg=")+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
 	slog.Info("BEpusdt API Token 已轮换", "operator", c.GetString("admin_user"))
@@ -711,27 +712,27 @@ func safeAdminNext(raw, root string) bool {
 }
 
 func (h *Handlers) AdminDashboard(c *gin.Context) {
-	var exhausted, review int64
+	var exhausted, review, merchantReview int64
 	var orders []model.Order
 	var evidence []model.Transaction
 	var cursors []model.ScanCursor
-	var callbacks []model.Callback
+	var callbacks []pendingCallbackView
 	var ton []model.TONScanCheckpoint
 	var reviews []model.ConfirmationTask
 	db := h.st.DB().WithContext(c.Request.Context())
-	for _, query := range []error{db.Model(&model.Callback{}).Where("delivered_at IS NULL AND (state = ? OR (attempts >= attempt_base + ? AND next_at <= ?))", "exhausted", h.C().Notify.MaxAttempts, time.Now()).Count(&exhausted).Error, db.Model(&model.ConfirmationTask{}).Where("state = ?", "manual_review").Count(&review).Error} {
+	for _, query := range []error{db.Model(&model.Callback{}).Where("state = ? AND delivered_at IS NULL", "merchant_review").Count(&merchantReview).Error, db.Model(&model.Callback{}).Where("delivered_at IS NULL AND (state = ? OR (attempts >= attempt_base + ? AND next_at <= ?))", "exhausted", h.C().Notify.MaxAttempts, time.Now()).Count(&exhausted).Error, db.Model(&model.ConfirmationTask{}).Where("state = ?", "manual_review").Count(&review).Error} {
 		if query != nil {
 			h.renderAdminError(c, query)
 			return
 		}
 	}
-	for _, err := range []error{db.Order("id DESC").Limit(8).Find(&orders).Error, db.Where("order_id IS NULL").Order("updated_at DESC").Limit(20).Find(&evidence).Error, db.Find(&cursors).Error, db.Where("delivered_at IS NULL").Order("next_at").Limit(20).Find(&callbacks).Error, db.Where("active = ?", true).Find(&ton).Error, db.Where("state = ?", "manual_review").Order("deadline").Limit(20).Find(&reviews).Error} {
+	for _, err := range []error{db.Order("id DESC").Limit(8).Find(&orders).Error, db.Where("order_id IS NULL").Order("updated_at DESC").Limit(20).Find(&evidence).Error, db.Find(&cursors).Error, db.Table("callbacks c").Select("c.*,o.trade_no,o.out_trade_no").Joins("JOIN orders o ON o.id=c.order_id").Where("c.delivered_at IS NULL").Order("c.next_at").Limit(20).Scan(&callbacks).Error, db.Where("active = ?", true).Find(&ton).Error, db.Where("state = ?", "manual_review").Order("deadline").Limit(20).Find(&reviews).Error} {
 		if err != nil {
 			h.renderAdminError(c, err)
 			return
 		}
 	}
-	c.HTML(200, "admin_dashboard.html", gin.H{"Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
+	c.HTML(200, "admin_dashboard.html", gin.H{"Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
 }
 func (h *Handlers) AdminOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
@@ -787,7 +788,7 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts, "PaymentAttempts": attempts, "PaymentRecoveries": paymentRecoveries, "HistoricalScans": history})
 }
 func (h *Handlers) AdminIntegration(c *gin.Context) {
-	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken, "PendingNotifyCount": h.pendingNotifyCount(c)})
+	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken, "PendingNotifyCount": h.pendingNotifyCount(c), "CanRotateToken": !h.C().Server.Production || h.C().Server.MerchantKeyVersions})
 }
 
 func (h *Handlers) AdminRetryNotify(c *gin.Context) {
@@ -829,4 +830,10 @@ func (h *Handlers) AdminHistoricalScan(c *gin.Context) {
 		return
 	}
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("历史到账补扫已排队，关闭订单只记录证据，不会自动补单"))
+}
+
+type pendingCallbackView struct {
+	model.Callback
+	TradeNo    string
+	OutTradeNo string
 }

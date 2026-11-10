@@ -31,7 +31,7 @@ def validate(path):
         if db.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('foreign key check failed')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (8, 9, 10):
+        if version not in (8, 9, 10, 11):
             raise ValueError('unsupported payment schema')
         tables = BASE_TABLES + (NEW_TABLES if version >= 9 else ())
         tables += ATTEMPT_TABLES if version >= 10 else ()
@@ -58,6 +58,11 @@ def validate(path):
                 "SELECT count(*) FROM transactions t LEFT JOIN payment_attempts a ON a.id=t.attempt_id WHERE t.attempt_id IS NOT NULL AND (a.id IS NULL OR a.order_id<>t.order_id OR a.provider<>t.provider OR a.receiver<>t.receiver OR a.currency<>t.currency OR a.units<>t.units OR t.occurred_at<a.selected_at OR t.occurred_at>a.expires_at)",
                 "SELECT count(*) FROM payment_recoveries r LEFT JOIN orders o ON o.id=r.order_id WHERE o.id IS NULL OR r.reason='' OR r.operator=''",
                 "SELECT count(*) FROM historical_scans h LEFT JOIN payment_attempts a ON a.id=h.attempt_id WHERE a.id IS NULL OR a.order_id<>h.order_id OR h.cursor<h.\"from\" OR h.cursor>h.\"to\" OR h.reason='' OR h.operator=''",
+            ]
+        if version >= 11:
+            problems += [
+                "SELECT count(*) FROM orders WHERE selection_changes<0 OR (status='READY' AND (next_expiry_check_at IS NULL OR next_expiry_check_at<'0002-01-01'))",
+                "SELECT count(*) FROM callbacks WHERE state NOT IN ('queued','sending','delivered','exhausted','merchant_review') OR (state='merchant_review' AND delivered_at IS NOT NULL)",
             ]
         if any(db.execute(sql).fetchone()[0] for sql in problems):
             raise ValueError('payment evidence, reservation, or recovery invariants failed')
