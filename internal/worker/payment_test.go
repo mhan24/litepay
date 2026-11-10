@@ -232,7 +232,7 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 		t.Fatal(e)
 	}
 
-	// 空闲可能让游标落后数小时：补查从最早一张待付款订单的窗口开始，不重读空白历史。
+	// 空闲或停机后仍需覆盖游标后的全部历史，不能跳过取消后的对账窗口。
 	if _, e = st.Create(ctx, model.Order{TradeNo: "c", OutTradeNo: "c", OriginUnits: 10000000, NotifyURL: "https://merchant.example/callback", ExpiresAt: time.Now().Add(time.Minute)}); e != nil {
 		t.Fatal(e)
 	}
@@ -248,8 +248,8 @@ func TestScanSkipsIdleExchangeQueries(t *testing.T) {
 	if f.calls != 4 {
 		t.Fatal("ready order did not trigger a scan", f.calls)
 	}
-	if time.Since(f.from) > 10*time.Minute || f.to.Before(f.from) {
-		t.Fatal("scan did not resume near the open payment window", f.from, f.to)
+	if time.Since(f.from) < 2*time.Hour || f.to.Before(f.from) {
+		t.Fatal("scan skipped unscanned reconciliation history", f.from, f.to)
 	}
 }
 

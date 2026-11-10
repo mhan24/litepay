@@ -70,10 +70,10 @@ func TestActualToncenterTransactions(t *testing.T) {
 		if err != nil {
 			t.Fatal(i, err)
 		}
-		if i < 3 && (tx.State != model.Confirmed || tx.Units != 100000 || tx.Currency != "GRAM") {
+		if (i < 3 || i == 4) && (tx.State != model.Confirmed || tx.Units != 100000 || tx.Currency != "GRAM") {
 			t.Fatal(i, tx)
 		}
-		if i >= 3 && tx.State != model.Rejected {
+		if i == 3 && tx.State != model.Rejected {
 			t.Fatal("contract/aborted payment accepted", i, tx)
 		}
 	}

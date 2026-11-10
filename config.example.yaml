@@ -11,6 +11,8 @@ server:
   # 生产环境只填写实际反向代理的固定 IP/CIDR；默认忽略转发 IP 头。
   # Caddy 容器重建后如 IP 改变，必须同步更新此值。
   trusted_proxies: []
+  # base_url 使用 HTTPS 时，回调仅允许这些精确主机名且必须使用 HTTPS。
+  notify_hosts: []
 
 database:
   path: "./data/litepay-dev.db"

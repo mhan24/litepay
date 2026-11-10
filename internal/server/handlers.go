@@ -392,7 +392,7 @@ func (h *Handlers) Ready(c *gin.Context) {
 			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
 			return
 		}
-		due, err := h.st.ScanDue(ctx, provider, cfg.ScanRetention())
+		due, err := h.st.ScanDue(ctx, provider)
 		if err != nil {
 			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
 			return

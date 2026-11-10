@@ -1,0 +1,79 @@
+import fcntl
+import importlib.util
+from pathlib import Path
+import sqlite3
+import tempfile
+import unittest
+
+spec = importlib.util.spec_from_file_location('dbtool', Path(__file__).with_name('payment_db.py'))
+tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+
+
+class PaymentDBTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = self.root / 'live.db'
+        self.db = sqlite3.connect(self.path)
+        self.addCleanup(self.db.close)
+        self.db.executescript('''PRAGMA user_version=9; PRAGMA journal_mode=WAL;
+            CREATE TABLE orders(id INTEGER PRIMARY KEY,status,provider,currency,pay_units);
+            CREATE TABLE transactions(provider,event_id,order_id,state);
+            CREATE TABLE callbacks(order_id,attempt_base,attempts,recoveries);
+            CREATE TABLE slots(order_id,provider,currency,units);
+            CREATE TABLE scan_cursors(provider,scanned_until);
+            CREATE TABLE settings(payload);
+            CREATE TABLE credentials(name,value);
+            CREATE TABLE notify_logs(id);
+            CREATE TABLE confirmation_tasks(provider,event_id,state,deadline);
+            CREATE TABLE ton_scan_checkpoints(receiver,active,"from","to",pages,lt,hash);
+            CREATE TABLE callback_recoveries(id);
+            INSERT INTO orders VALUES(1,'PAID','okx','USDT',100);
+            INSERT INTO transactions VALUES('okx','deposit',1,'confirmed');
+            INSERT INTO callbacks VALUES(1,5,6,1);
+            INSERT INTO credentials VALUES('secret','do-not-print');
+            INSERT INTO settings VALUES('{}');
+            INSERT INTO scan_cursors VALUES('okx','2026-11-10');
+            INSERT INTO ton_scan_checkpoints VALUES('wallet',1,'2026-11-09','2026-11-10',40,'200','hash');
+        ''')
+        self.db.commit()
+
+    def test_wal_consistent_snapshot_and_restore_preserve_recovery_state(self):
+        backup, restored = self.root / 'backup.db', self.root / 'restored.db'
+        result = tool.snapshot(self.path, backup)
+        self.assertNotIn('do-not-print', str(result))
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+        tool.restore(backup, restored)
+        self.assertEqual(tool.fingerprint(backup), tool.fingerprint(restored))
+        self.assertEqual(tool.drill(self.path)['drill'], 'passed')
+
+    def test_restore_refuses_active_lock_and_existing_database(self):
+        backup, restored = self.root / 'backup.db', self.root / 'restored.db'
+        tool.snapshot(self.path, backup)
+        with open(str(restored) + '.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):
+                tool.restore(backup, restored)
+        tool.restore(backup, restored)
+        with self.assertRaises(ValueError):
+            tool.restore(backup, restored)
+        with self.assertRaises(FileExistsError):
+            tool.snapshot(self.path, backup)
+
+    def test_checksum_and_payment_invariants(self):
+        backup = self.root / 'backup.db'
+        tool.snapshot(self.path, backup)
+        with open(backup, 'ab') as file:
+            file.write(b'changed')
+        with self.assertRaises(ValueError):
+            tool.restore(backup, self.root / 'restored.db')
+        self.db.execute('DELETE FROM transactions')
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+
+
+if __name__ == '__main__':
+    unittest.main()

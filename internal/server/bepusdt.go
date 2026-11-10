@@ -145,8 +145,8 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		h.bepusdtFail(c, "request field exceeds maximum length")
 		return
 	}
-	if externalURL(req.NotifyURL) == "" {
-		h.bepusdtFail(c, "notify_url must be an absolute http(s) URL")
+	if err := cfg.ValidateNotifyURL(req.NotifyURL); err != nil {
+		h.bepusdtFail(c, err.Error())
 		return
 	}
 	if externalURL(req.RedirectURL) == "" {

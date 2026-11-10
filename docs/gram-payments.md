@@ -31,9 +31,9 @@ LitePay 使用 Toncenter v2 接收 TON 主网原生 GRAM，以 USD 创建商城�
 | `data` | Base64 BOC。实际收款金额、收款地址、执行状态、退回标记和消息内容从这里解析。 |
 | `out_msgs` | 出站消息；伴随转出或合约执行的交易不作为普通收款自动核销。 |
 
-只有成功执行的普通内部入站转账才能自动核销：收款地址须匹配，没有 bounced、bounce phase、aborted、失败的执行阶段、转出消息、状态初始化或合约调用载荷。空消息和文本备注消息可接收。初始化或其他复杂交易保留为待人工核对的拒绝证据。
+普通内部入站转账须匹配收款地址，没有退回、转出、状态初始化或合约调用载荷。正常 VM 路径要求执行成功且未 aborted。另允许未初始化账户接收 non-bounceable 的 `NO_STATE` 转账：须有完整信用阶段、信用额与消息金额一致、无欠费扣收、状态为 uninit、无 action/bounce，且明确的信用额减存储费用仍为正。此路径的 aborted 表示未执行 action，不能单独当作资金退回。其他 skipped 原因、bounceable 或冻结账户不自动核销。空消息和文本备注消息可接收。
 
-BOC 损坏、哈希/逻辑时间/时间/账户不一致、分页顺序异常或响应不完整时，整次查询失败，扫描游标不推进。查询失败不自动把订单当作未付款而关闭。后续补查、金额档位、唯一认领和回调沿用 `store.Process` 的事务规则。
+BOC 损坏、哈希/逻辑时间/时间/账户不一致、分页顺序异常或响应不完整时，本页失败，保留已提交的 LT/Hash 检查点；下一轮从该检查点继续。每轮最多一页，固定范围全部完成后才推进时间游标，不受单次 100 页上限影响。查询失败不自动把订单当作未付款而关闭。后续补查、金额档位、唯一认领和回调沿用 `store.Process` 的事务规则。
 
 到账精确到链上的九位小数；支付域使用六位小数。后面三位非零的到账保留原始金额并拒绝自动核销，不截断、不四舍五入。到账由后台自动扫描核对，收银台不接受手动提交交易哈希。
 
@@ -56,3 +56,5 @@ BOC 损坏、哈希/逻辑时间/时间/账户不一致、分页顺序异常或�
 真实验收时创建小额 USD 订单，以页面完整数量转账，记录链上哈希，核对到账确认与商城交付；重复查询不应产生第二次认领。还应中断行情源，确认新报价停止而已锁定订单仍能按链上证据核销。自动化模拟和只读接口查询不能替代这一步。
 
 接口参考：[Toncenter v2](https://toncenter.com/api/v2/)、[TON 原生币余额单位](https://docs.ton.org/api/v2/rpc/get-address-balance)、[Kraken Ticker](https://docs.kraken.com/api-reference/market-data/get-ticker-information)、[TonAPI OpenAPI rates 契约](https://github.com/tonkeeper/opentonapi/blob/master/api/openapi.yml)。
+
+NO_STATE 信用与 aborted 行为核对依据：[TON 执行阶段](https://docs.ton.org/foundations/phases)、[节点交易序列化与信用阶段实现](https://github.com/ton-blockchain/ton/blob/master/crypto/block/transaction.cpp)。本地验证交易 BOC 与返回哈希，信任 Toncenter 的链数据来源；不宣称独立验证主链共识或账户余额的 Merkle 证明。

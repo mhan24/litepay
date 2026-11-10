@@ -60,6 +60,12 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	ok := false
 	message := "callback_request_failed"
 	if err == nil {
+		err = cfg.ValidateNotifyURL(o.NotifyURL)
+		if err != nil {
+			message = "callback_policy_rejected"
+		}
+	}
+	if err == nil {
 		req.Header.Set("Content-Type", "application/json")
 		var response []byte
 		status, response, err = n.http.Do(req)
@@ -75,7 +81,11 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	delay := cfg.Notify.RetryDelays[min(task.Attempts-1, len(cfg.Notify.RetryDelays)-1)]
 	save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer done()
-	return true, n.st.FinishCallback(save, *task, status, ok, message, time.Duration(delay)*time.Second)
+	err = n.st.FinishCallback(save, *task, status, ok, message, time.Duration(delay)*time.Second)
+	if err == nil && !ok && task.Attempts >= task.AttemptLimit {
+		slog.Error("商户通知重试已耗尽，需核对商城后重新通知", "trade_id", o.TradeNo)
+	}
+	return true, err
 }
 func (n *Notifier) Run(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)

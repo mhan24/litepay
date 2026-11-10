@@ -12,6 +12,7 @@
   {{template "admin_nav" .}}
   <main class="shell">
     {{template "admin_flash" .}}
+    {{if or .ExhaustedCallbacks .ReviewConfirmations}}<p class="banner" role="alert">{{.ExhaustedCallbacks}} 笔商城通知重试已耗尽；{{.ReviewConfirmations}} 笔到账确认已转人工核对。请按订单号检查通知和到账证据。</p>{{end}}
     <header class="pagehead">
       <h1>{{.Base.Title}}</h1>
     </header>
@@ -27,6 +28,7 @@
         {{else}}
         尚未完成首次扫描
         {{end}}
+        {{range .TONCheckpoints}}<p>TON 历史正在补齐 · 已提交 {{.Pages}} 页 · 当前 LT {{.LT}} · 范围 {{.From.Format "01-02 15:04"}} 至 {{.To.Format "01-02 15:04"}}</p>{{end}}
       </div>
     </section>
 
@@ -60,6 +62,7 @@
       </div>
     </section>
 
+    {{if .ConfirmationReviews}}<h2>到账确认待人工复核</h2><section class="card"><div class="card-b">{{range .ConfirmationReviews}}<p>{{.Provider}} · 事件 {{.EventID}} · 自动确认期限 {{.Deadline.Format "01-02 15:04"}}{{if .OrderID}} · 本地订单 {{.OrderID}}{{end}}</p>{{end}}</div></section>{{end}}
     <h2>待核对到账</h2>
     <section class="card">
       <div class="table-wrap">

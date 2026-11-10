@@ -526,6 +526,7 @@ func Validate(c *config.Config) error {
 
 func clone(c *config.Config) *config.Config {
 	n := *c
+	n.Server.NotifyHosts = append([]string(nil), c.Server.NotifyHosts...)
 	n.Checkout.Currencies = append([]string(nil), c.Checkout.Currencies...)
 	if c.Checkout.BinanceCurrencies != nil {
 		n.Checkout.BinanceCurrencies = append([]string{}, c.Checkout.BinanceCurrencies...)

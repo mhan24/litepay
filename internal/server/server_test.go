@@ -28,6 +28,7 @@ func TestSignedCashierAndAdminPages(t *testing.T) {
 	cfg := config.Default()
 	cfg.Admin.Password = "test-password"
 	cfg.Server.BaseURL = "https://pay.example"
+	cfg.Server.NotifyHosts = []string{"shop.example"}
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"

@@ -710,18 +710,27 @@ func safeAdminNext(raw, root string) bool {
 }
 
 func (h *Handlers) AdminDashboard(c *gin.Context) {
+	var exhausted, review int64
 	var orders []model.Order
 	var evidence []model.Transaction
 	var cursors []model.ScanCursor
 	var callbacks []model.Callback
+	var ton []model.TONScanCheckpoint
+	var reviews []model.ConfirmationTask
 	db := h.st.DB().WithContext(c.Request.Context())
-	for _, err := range []error{db.Order("id DESC").Limit(8).Find(&orders).Error, db.Where("order_id IS NULL").Order("updated_at DESC").Limit(20).Find(&evidence).Error, db.Find(&cursors).Error, db.Where("delivered_at IS NULL").Order("next_at").Limit(20).Find(&callbacks).Error} {
+	for _, query := range []error{db.Model(&model.Callback{}).Where("delivered_at IS NULL AND (state = ? OR (attempts >= attempt_base + ? AND next_at <= ?))", "exhausted", h.C().Notify.MaxAttempts, time.Now()).Count(&exhausted).Error, db.Model(&model.ConfirmationTask{}).Where("state = ?", "manual_review").Count(&review).Error} {
+		if query != nil {
+			h.renderAdminError(c, query)
+			return
+		}
+	}
+	for _, err := range []error{db.Order("id DESC").Limit(8).Find(&orders).Error, db.Where("order_id IS NULL").Order("updated_at DESC").Limit(20).Find(&evidence).Error, db.Find(&cursors).Error, db.Where("delivered_at IS NULL").Order("next_at").Limit(20).Find(&callbacks).Error, db.Where("active = ?", true).Find(&ton).Error, db.Where("state = ?", "manual_review").Order("deadline").Limit(20).Find(&reviews).Error} {
 		if err != nil {
 			h.renderAdminError(c, err)
 			return
 		}
 	}
-	c.HTML(200, "admin_dashboard.html", gin.H{"Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks})
+	c.HTML(200, "admin_dashboard.html", gin.H{"Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
 }
 func (h *Handlers) AdminOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
@@ -763,14 +772,27 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 	var tx []model.Transaction
 	var logs []model.NotifyLog
 	var tasks []model.Callback
-	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error} {
+	var recoveries []model.CallbackRecovery
+	var checks []model.ConfirmationTask
+	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&recoveries).Error, db.Where("order_id = ?", o.ID).Find(&checks).Error} {
 		if err != nil {
 			h.renderAdminError(c, err)
 			return
 		}
 	}
-	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs})
+	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts})
 }
 func (h *Handlers) AdminIntegration(c *gin.Context) {
 	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken})
+}
+
+func (h *Handlers) AdminRetryNotify(c *gin.Context) {
+	no := c.Param("trade_no")
+	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
+	if err := h.st.RetryCallback(c.Request.Context(), no, c.GetString("admin_user"), c.PostForm("reason"), h.C().Notify.MaxAttempts); err != nil {
+		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
+		return
+	}
+	h.log.Warn("管理员重新通知商城", "trade_id", no, "operator", c.GetString("admin_user"))
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("通知已重新入队，将使用原订单号发送"))
 }

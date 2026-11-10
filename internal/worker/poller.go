@@ -116,10 +116,8 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	if !cfg.ProviderEnabled(provider) {
 		return nil
 	}
-	// Nothing is waiting for a payment, so a history query could only rediscover evidence no
-	// order can claim. Skipping keeps the cursor honest: the next scan that is actually due
-	// catches up from the last position a successful query really read.
-	due, err := p.st.ScanDue(ctx, provider, cfg.ScanRetention())
+	// Active orders and durable confirmation tasks scan frequently; idle accounts still reconcile.
+	due, err := p.st.ScanDue(ctx, provider)
 	if err != nil || !due {
 		return err
 	}
@@ -129,6 +127,21 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	coveredFrom := end
 	cli, err := p.client(ctx, cfg, provider)
 	if err == nil {
+		if provider == config.ProviderTON {
+			if pages, ok := cli.(interface {
+				HistoryPage(context.Context, model.TONScanCheckpoint) ([]model.Transaction, model.TONScanCheckpoint, error)
+			}); ok {
+				err = p.scanTON(ctx, cfg, pages, end)
+				if err != nil {
+					save, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+					defer cancel()
+					if e := p.st.ScanResult(save, provider, end, err); e != nil {
+						return e
+					}
+				}
+				return err
+			}
+		}
 		coveredFrom, end, err = p.scanIncremental(ctx, cfg, provider, cli, end)
 	}
 	// 未确认到账按各自原始创建时间单独补查：它只补充事实、不推进游标，因此旧记录既不会
@@ -159,27 +172,9 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 // scanIncremental 正常增量扫描：从游标继续读到当前时刻，返回本次真正覆盖到的时间区间。
 // 只有完整成功的查询才推进游标；不完整响应返回错误，游标保持原位。
 func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provider string, cli source, end time.Time) (time.Time, time.Time, error) {
-	cursor, err := p.st.Cursor(ctx, provider)
+	start, end, err := p.scanBounds(ctx, cfg, provider, end)
 	if err != nil {
-		return end, end, err
-	}
-	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
-	first := cursor.ScannedUntil.IsZero()
-	start := cursor.ScannedUntil.Add(-lookback)
-	if first {
-		start = end.Add(-cfg.ScanRetention())
-	}
-	// 仍在等待付款的订单必须被完整覆盖：首次扫描没有任何覆盖，起点可能比最早一张订单的
-	// 窗口更晚，必须回溯；平时则跳过更早的空白历史，不重读已有覆盖的部分。
-	var earliest model.Order
-	if e := p.st.DB().WithContext(ctx).Where("status = ? AND provider = ?", model.Ready, provider).Order("selected_at").First(&earliest).Error; e == nil && earliest.SelectedAt != nil {
-		floor := earliest.SelectedAt.Add(-lookback)
-		if (first && floor.Before(start)) || (!first && floor.After(start)) {
-			start = floor
-		}
-	}
-	if end.Sub(start) > time.Hour {
-		end = start.Add(time.Hour)
+		return start, end, err
 	}
 	rows, err := cli.History(ctx, start, end)
 	if err != nil {
@@ -203,16 +198,15 @@ const pendingRecheckLimit = 10
 // 每轮只取 pendingRecheckLimit 条并轮转偏移量，超出的记录在后续轮次补上，不会被永久跳过。
 // 已经落在本轮增量窗口里的记录不再重复请求。
 func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provider string, cli source, from, to time.Time) error {
-	retention := cfg.ScanRetention()
 	offset := p.pendingOffset[provider]
-	times, err := p.st.PendingTimes(ctx, provider, retention, offset, pendingRecheckLimit)
+	times, err := p.st.PendingTimes(ctx, provider, offset, pendingRecheckLimit)
 	if err != nil {
 		return err
 	}
 	if len(times) == 0 && offset > 0 {
 		// 上一轮已经读到末尾：回到开头继续轮转。
 		offset = 0
-		if times, err = p.st.PendingTimes(ctx, provider, retention, 0, pendingRecheckLimit); err != nil {
+		if times, err = p.st.PendingTimes(ctx, provider, 0, pendingRecheckLimit); err != nil {
 			return err
 		}
 	}
@@ -224,7 +218,7 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 			continue // 本轮增量扫描已经读过这条记录
 		}
 		start, stop := at.Add(-lookback), at.Add(lookback)
-		if !covered.IsZero() && !start.After(covered) {
+		if !covered.IsZero() && !stop.After(covered) {
 			continue // 与上一笔的补查窗口重叠，已在上一次查询中读到
 		}
 		rows, err := cli.History(ctx, start, stop)
@@ -267,7 +261,7 @@ func (p *Poller) Run(ctx context.Context) {
 					next[provider] = time.Now().Add(time.Duration(cfg.ProviderInterval(provider)) * time.Second)
 				}
 			}
-			if err := p.st.Expire(ctx, cfg.Order.SlotGraceSeconds, cfg.ScanRetention()); err != nil && ctx.Err() == nil {
+			if err := p.st.Expire(ctx, cfg.Order.SlotGraceSeconds); err != nil && ctx.Err() == nil {
 				slog.Error("订单过期状态写入失败")
 			}
 		}
@@ -309,4 +303,55 @@ func (p *Poller) monitorGRAM(ctx context.Context) {
 		})
 	}
 	wg.Wait()
+}
+
+// scanBounds never skips a previously unscanned gap, including time after cancellation.
+func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider string, end time.Time) (time.Time, time.Time, error) {
+	cursor, err := p.st.Cursor(ctx, provider)
+	if err != nil {
+		return end, end, err
+	}
+	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
+	first := cursor.ScannedUntil.IsZero()
+	start := cursor.ScannedUntil.Add(-lookback)
+	if first {
+		start = end.Add(-cfg.InitialScanLookback())
+	}
+	// 仍在等待付款的订单必须被完整覆盖：首次扫描没有任何覆盖，起点可能比最早一张订单的
+	// 窗口更晚，必须回溯；已有游标时始终覆盖其后的全部对账历史。
+	var earliest model.Order
+	if e := p.st.DB().WithContext(ctx).Where("status = ? AND provider = ?", model.Ready, provider).Order("selected_at").First(&earliest).Error; e == nil && earliest.SelectedAt != nil {
+		floor := earliest.SelectedAt.Add(-lookback)
+		if first && floor.Before(start) {
+			start = floor
+		}
+	}
+	if end.Sub(start) > time.Hour {
+		end = start.Add(time.Hour)
+	}
+	return start, end, nil
+}
+
+func (p *Poller) scanTON(ctx context.Context, cfg *config.Config, cli interface {
+	HistoryPage(context.Context, model.TONScanCheckpoint) ([]model.Transaction, model.TONScanCheckpoint, error)
+}, end time.Time) error {
+	cp, err := p.st.TONCheckpoint(ctx, cfg.TON.Address)
+	if err != nil {
+		return err
+	}
+	if !cp.Active {
+		start, stop, err := p.scanBounds(ctx, cfg, config.ProviderTON, end)
+		if err != nil {
+			return err
+		}
+		cp = model.TONScanCheckpoint{Receiver: cfg.TON.Address, From: start, To: stop, Active: true}
+		if err = p.st.StartTONCheckpoint(ctx, cp); err != nil {
+			return err
+		}
+	}
+	rows, next, err := cli.HistoryPage(ctx, cp)
+	if err != nil {
+		return err
+	}
+	return p.st.SaveTONPage(ctx, cp, next, rows)
 }

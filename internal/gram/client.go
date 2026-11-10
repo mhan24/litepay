@@ -157,12 +157,31 @@ func (c *Client) decode(raw rawTransaction) (model.Transaction, uint64, error) {
 		return result, lt, nil
 	}
 	dsc, ok := tx.Description.(tlb.TransactionDescriptionOrdinary)
-	if !ok || dsc.Aborted || dsc.Destroyed || dsc.BouncePhase != nil {
+	if !ok || dsc.Destroyed || dsc.BouncePhase != nil {
 		result.Reason = "failed_or_bounced"
 		return result, lt, nil
 	}
-	vm, ok := dsc.ComputePhase.Phase.(tlb.ComputePhaseVM)
-	if !ok || !vm.Success || dsc.ActionPhase != nil && !dsc.ActionPhase.Success {
+	switch phase := dsc.ComputePhase.Phase.(type) {
+	case tlb.ComputePhaseVM:
+		if dsc.Aborted || !phase.Success || dsc.ActionPhase != nil && !dsc.ActionPhase.Success {
+			result.Reason = "failed_execution"
+			return result, lt, nil
+		}
+	case tlb.ComputePhaseSkipped:
+		// A non-bounceable no-state transfer can credit an uninitialized account even though
+		// aborted=true (no action phase ran). Prove the positive credit/fee balance explicitly.
+		if phase.Reason.Type != tlb.ComputeSkipReasonNoState || msg.Bounce || !dsc.CreditFirst || dsc.ActionPhase != nil ||
+			(tx.OrigStatus != tlb.AccountStatusUninit && tx.OrigStatus != tlb.AccountStatusNonExist) || tx.EndStatus != tlb.AccountStatusUninit ||
+			dsc.CreditPhase == nil || dsc.StoragePhase == nil || dsc.StoragePhase.StatusChange.Type != tlb.AccStatusChangeUnchanged ||
+			dsc.StoragePhase.StorageFeesDue != nil && dsc.StoragePhase.StorageFeesDue.Nano().Sign() != 0 ||
+			dsc.CreditPhase.DueFeesCollected != nil && dsc.CreditPhase.DueFeesCollected.Nano().Sign() != 0 ||
+			!dsc.CreditPhase.Credit.ExtraCurrencies.IsEmpty() || dsc.CreditPhase.Credit.Coins.Nano().Cmp(msg.Amount.Nano()) != 0 ||
+			!tx.TotalFees.ExtraCurrencies.IsEmpty() || tx.TotalFees.Coins.Nano().Cmp(dsc.StoragePhase.StorageFeesCollected.Nano()) != 0 ||
+			msg.Amount.Nano().Cmp(tx.TotalFees.Coins.Nano()) <= 0 {
+			result.Reason = "unproven_skipped_credit"
+			return result, lt, nil
+		}
+	default:
 		result.Reason = "failed_execution"
 		return result, lt, nil
 	}

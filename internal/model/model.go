@@ -79,12 +79,17 @@ type Transaction struct {
 func (t Transaction) Amount() string { return amount.String(t.Units) }
 
 type Callback struct {
-	OrderID     uint `gorm:"primaryKey"`
-	Attempts    int
-	NextAt      time.Time `gorm:"index"`
-	DeliveredAt *time.Time
-	LastError   string
-	UpdatedAt   time.Time
+	AttemptBase  int    `gorm:"not null;default:0"`
+	AttemptLimit int    `gorm:"not null;default:0"`
+	State        string `gorm:"index;not null;default:queued"`
+	LeaseUntil   time.Time
+	Recoveries   int  `gorm:"not null;default:0"`
+	OrderID      uint `gorm:"primaryKey"`
+	Attempts     int
+	NextAt       time.Time `gorm:"index"`
+	DeliveredAt  *time.Time
+	LastError    string
+	UpdatedAt    time.Time
 }
 type NotifyLog struct {
 	ID         uint `gorm:"primaryKey"`
@@ -115,4 +120,37 @@ type Credential struct {
 	Value     string
 	UpdatedBy string
 	UpdatedAt time.Time
+}
+
+// ConfirmationTask survives restarts and the incremental scan cursor. Deadline never slides.
+type ConfirmationTask struct {
+	Provider   string `gorm:"primaryKey"`
+	EventID    string `gorm:"primaryKey"`
+	OrderID    *uint  `gorm:"index"`
+	OccurredAt time.Time
+	Deadline   time.Time `gorm:"index"`
+	State      string    `gorm:"index"` // pending, resolved, manual_review
+	UpdatedAt  time.Time
+}
+
+// TONScanCheckpoint stores the next inclusive LT/hash boundary for one fixed time range.
+type TONScanCheckpoint struct {
+	Receiver  string `gorm:"primaryKey"`
+	From      time.Time
+	To        time.Time
+	LT        string
+	Hash      string
+	OldestAt  time.Time
+	Pages     int
+	Active    bool
+	UpdatedAt time.Time
+}
+
+type CallbackRecovery struct {
+	ID               uint `gorm:"primaryKey"`
+	OrderID          uint `gorm:"index"`
+	Operator         string
+	Reason           string
+	PreviousAttempts int
+	CreatedAt        time.Time
 }

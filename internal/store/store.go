@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -20,9 +21,43 @@ import (
 	"litepay/internal/model"
 )
 
-type Store struct{ db *gorm.DB }
+type Store struct {
+	db   *gorm.DB
+	lock *os.File
+}
 
 func Open(path string) (*Store, error) {
+	var lock *os.File
+	if path != ":memory:" {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		if err = os.MkdirAll(filepath.Dir(absolute), 0700); err != nil {
+			return nil, err
+		}
+		if canonical, e := filepath.EvalSymlinks(absolute); e == nil {
+			absolute = canonical
+		} else if canonical, e = filepath.EvalSymlinks(filepath.Dir(absolute)); e == nil {
+			absolute = filepath.Join(canonical, filepath.Base(absolute))
+		}
+		path = absolute
+		lock, err = os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			return nil, err
+		}
+		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			lock.Close()
+			return nil, errors.New("数据库已有运行实例或恢复任务持有锁")
+		}
+	}
+	success := false
+	defer func() {
+		if !success && lock != nil {
+			lock.Close()
+		}
+	}()
+
 	if path != ":memory:" {
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			return nil, err
@@ -49,13 +84,13 @@ func Open(path string) (*Store, error) {
 	if err = db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables).Error; err != nil {
 		return fail(err)
 	}
-	if version != 8 && tables > 0 {
+	if version != 8 && version != 9 && tables > 0 {
 		return fail(errors.New("旧数据库不兼容，请配置一个新的空数据库"))
 	}
-	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}); err != nil {
+	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}); err != nil {
 		return fail(err)
 	}
-	if err = db.Exec("PRAGMA user_version=8").Error; err != nil {
+	if err = db.Exec("PRAGMA user_version=9").Error; err != nil {
 		return fail(err)
 	}
 	if path != ":memory:" {
@@ -63,10 +98,14 @@ func Open(path string) (*Store, error) {
 			return fail(err)
 		}
 	}
-	return &Store{db}, nil
+	success = true
+	return &Store{db: db, lock: lock}, nil
 }
 func (s *Store) DB() *gorm.DB { return s.db }
 func (s *Store) Close() error {
+	if s.lock != nil {
+		defer s.lock.Close()
+	}
 	d, e := s.db.DB()
 	if e != nil {
 		return e
@@ -308,6 +347,15 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			return e
 		}
 		finish := func(reason string) error { result = reason; return db.Model(&t).Update("reason", reason).Error }
+		if t.State == model.Unconfirmed {
+			if err := ensureConfirmationTask(db, t); err != nil {
+				return err
+			}
+		} else {
+			if err := db.Model(&model.ConfirmationTask{}).Where("provider = ? AND event_id = ? AND state = ?", t.Provider, t.EventID, "pending").Update("state", "resolved").Error; err != nil {
+				return err
+			}
+		}
 		if t.State != model.Confirmed {
 			result = t.State
 			return nil
@@ -329,6 +377,17 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			return finish("multiple_orders")
 		}
 		o := candidates[0]
+		var check model.ConfirmationTask
+		if e := db.Where("provider = ? AND event_id = ?", t.Provider, t.EventID).First(&check).Error; e == nil {
+			if check.State == "manual_review" || !time.Now().Before(check.Deadline) {
+				if e = db.Model(&check).Update("state", "manual_review").Error; e != nil {
+					return e
+				}
+				return finish("confirmation_review_required")
+			}
+		} else if !errors.Is(e, gorm.ErrRecordNotFound) {
+			return e
+		}
 		if expectedTrade != "" && o.TradeNo != expectedTrade {
 			return finish("other_order")
 		}
@@ -357,31 +416,23 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			return e
 		}
 		result = "paid"
-		return db.Create(&model.Callback{OrderID: o.ID, NextAt: now}).Error
+		return db.Create(&model.Callback{OrderID: o.ID, NextAt: now, State: "queued"}).Error
 	})
 	return result, err
 }
 
-// heldOpen keeps an order open while an exchange-unconfirmed deposit inside its payment window
-// may still be confirmed into it. The retention argument bounds that wait, so an abandoned
-// deposit cannot pin an order or the scanner forever.
-const heldOpen = `NOT EXISTS (
-	SELECT 1 FROM transactions t
-	WHERE t.provider = orders.provider AND t.receiver = orders.receiver AND t.currency = orders.currency
-		AND t.state = ? AND t.occurred_at >= orders.selected_at AND t.occurred_at <= orders.expires_at
-		AND t.occurred_at >= ?
-)`
-
-// Expire closes orders only once a successful scan has covered their whole payment window,
-// so a failing or lagging exchange query can never close an order the payer can still settle
-// on time. It is the only place that releases a payment window: Process derives claimability
-// from the reservation rows this method removes.
-func (s *Store) Expire(ctx context.Context, grace int, retention time.Duration) error {
-	window := -time.Duration(grace) * time.Second
+// Expire requires complete scan coverage and no live confirmation task tied to the order.
+func (s *Store) Expire(ctx context.Context, grace int) error {
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		now := time.Now()
-		// A pending order holds no amount tier and no deposit can be matched to it yet.
-		if err := db.Model(&model.Order{}).Where("status = ? AND expires_at < ?", model.Pending, now.Add(window)).Update("status", model.Expired).Error; err != nil {
+		if err := backfillConfirmationTasks(db); err != nil {
+			return err
+		}
+		if err := db.Model(&model.ConfirmationTask{}).Where("state = ? AND deadline <= ?", "pending", now).Update("state", "manual_review").Error; err != nil {
+			return err
+		}
+		cutoff := now.Add(-time.Duration(grace) * time.Second)
+		if err := db.Model(&model.Order{}).Where("status = ? AND expires_at < ?", model.Pending, cutoff).Update("status", model.Expired).Error; err != nil {
 			return err
 		}
 		var cursors []model.ScanCursor
@@ -393,17 +444,11 @@ func (s *Store) Expire(ctx context.Context, grace int, retention time.Duration) 
 			if covered.After(now) {
 				covered = now
 			}
-			// Coverage is only what a successful query actually scanned; a provider that never
-			// succeeded keeps its orders open instead of closing them blind.
-			if err := db.Model(&model.Order{}).
-				Where("status = ? AND provider = ? AND expires_at < ?", model.Ready, cursor.Provider, covered.Add(window)).
-				Where(heldOpen, model.Unconfirmed, now.Add(-retention)).
-				Update("status", model.Expired).Error; err != nil {
+			if err := db.Model(&model.Order{}).Where("status = ? AND provider = ? AND expires_at < ?", model.Ready, cursor.Provider, covered.Add(-time.Duration(grace)*time.Second)).
+				Where("NOT EXISTS (SELECT 1 FROM confirmation_tasks q WHERE q.order_id = orders.id AND q.state = ? AND q.deadline > ?)", "pending", now).Update("status", model.Expired).Error; err != nil {
 				return err
 			}
 		}
-		// Closed orders no longer need their amount tier. Tiers left behind by reselect, cancel
-		// and payment stay reserved through their original cooldown.
 		open := db.Model(&model.Order{}).Select("id").Where("status IN ?", []string{model.Pending, model.Ready})
 		if err := db.Model(&model.Slot{}).Where("order_id IS NOT NULL AND order_id NOT IN (?)", open).Update("order_id", nil).Error; err != nil {
 			return err
@@ -412,50 +457,89 @@ func (s *Store) Expire(ctx context.Context, grace int, retention time.Duration) 
 	})
 }
 
-// ScanDue reports whether an exchange history query can still change any order: an order is
-// waiting for payment, or an unconfirmed deposit is recent enough to land in a payment window.
-// While neither holds, the caller skips the query and leaves the cursor untouched, so the next
-// real scan catches up from the last confirmed position instead of re-reading empty history.
-func (s *Store) ScanDue(ctx context.Context, provider string, retention time.Duration) (bool, error) {
+// IdleReconcileInterval keeps recording late/canceled-order deposits without creating claims.
+const IdleReconcileInterval = time.Minute
+
+func (s *Store) ScanDue(ctx context.Context, provider string) (bool, error) {
 	cursor, err := s.Cursor(ctx, provider)
 	if err != nil {
 		return false, err
 	}
-	if cursor.LastSuccess.IsZero() {
-		// The first successful query also proves the read-only credentials work.
+	if cursor.LastSuccess.IsZero() || time.Since(cursor.LastSuccess) >= IdleReconcileInterval {
 		return true, nil
 	}
-	db := s.db.WithContext(ctx)
 	var n int64
-	if err := db.Model(&model.Order{}).Where("status = ? AND provider = ?", model.Ready, provider).Count(&n).Error; err != nil || n > 0 {
+	db := s.db.WithContext(ctx)
+	if err = db.Model(&model.Order{}).Where("status = ? AND provider = ?", model.Ready, provider).Count(&n).Error; err != nil || n > 0 {
 		return n > 0, err
 	}
-	if err := db.Model(&model.Transaction{}).Where("provider = ? AND state = ? AND occurred_at >= ?", provider, model.Unconfirmed, time.Now().Add(-retention)).Count(&n).Error; err != nil {
+	if err = db.Model(&model.TONScanCheckpoint{}).Where("active = ?", true).Count(&n).Error; err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if provider == "ton" && n > 0 {
+		return true, nil
+	}
+	if err = backfillConfirmationTasks(db); err != nil {
+		return false, err
+	}
+	err = db.Model(&model.ConfirmationTask{}).Where("provider = ? AND state = ? AND deadline > ?", provider, "pending", time.Now()).Count(&n).Error
+	return n > 0, err
 }
 
-// PendingTimes returns the original occurrence time of unconfirmed deposits that are still
-// inside the retention window, oldest first, starting at offset and capped at limit. Exchange
-// history pages by record creation time and a later status change does not move the record, so
-// the scanner has to reopen exactly those moments; a regular incremental cursor that moved past
-// them can no longer see them. Callers rotate the offset, so records beyond limit are rechecked
-// on later rounds instead of starving. Deposits older than retention are excluded: they are
-// never attributed automatically, their evidence stays available for manual review.
-func (s *Store) PendingTimes(ctx context.Context, provider string, retention time.Duration, offset, limit int) ([]time.Time, error) {
+// ConfirmationWait is independent of the checkout's default validity. Linked tasks live until
+// the actual merchant payment window ends plus this bound; unlinked evidence gets the same bound.
+const ConfirmationWait = 48 * time.Hour
+
+func ensureConfirmationTask(db *gorm.DB, t model.Transaction) error {
+	var old model.ConfirmationTask
+	if err := db.Where("provider = ? AND event_id = ?", t.Provider, t.EventID).First(&old).Error; err == nil {
+		return nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	q := model.ConfirmationTask{Provider: t.Provider, EventID: t.EventID, OccurredAt: t.OccurredAt, Deadline: t.OccurredAt.Add(ConfirmationWait), State: "pending"}
+	var orders []model.Order
+	if err := db.Where("status = ? AND provider = ? AND receiver = ? AND currency = ? AND pay_units = ? AND selected_at <= ? AND expires_at >= ?", model.Ready, t.Provider, t.Receiver, t.Currency, t.Units, t.OccurredAt, t.OccurredAt).Find(&orders).Error; err != nil {
+		return err
+	}
+	if len(orders) == 1 {
+		q.OrderID = &orders[0].ID
+		q.Deadline = orders[0].ExpiresAt.Add(ConfirmationWait)
+	}
+	if !time.Now().Before(q.Deadline) {
+		q.State = "manual_review"
+	}
+	return db.Create(&q).Error
+}
+
+func backfillConfirmationTasks(db *gorm.DB) error {
 	var rows []model.Transaction
-	err := s.db.WithContext(ctx).
-		Where("provider = ? AND state = ? AND occurred_at >= ?", provider, model.Unconfirmed, time.Now().Add(-retention)).
-		Order("occurred_at").Offset(max(offset, 0)).Limit(limit).Find(&rows).Error
-	if err != nil {
+	if err := db.Where("state = ? AND NOT EXISTS (SELECT 1 FROM confirmation_tasks q WHERE q.provider = transactions.provider AND q.event_id = transactions.event_id)", model.Unconfirmed).Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := ensureConfirmationTask(db, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) PendingTimes(ctx context.Context, provider string, offset, limit int) ([]time.Time, error) {
+	db := s.db.WithContext(ctx)
+	if err := backfillConfirmationTasks(db); err != nil {
 		return nil, err
 	}
+	if err := db.Model(&model.ConfirmationTask{}).Where("state = ? AND deadline <= ?", "pending", time.Now()).Update("state", "manual_review").Error; err != nil {
+		return nil, err
+	}
+	var rows []model.ConfirmationTask
+	err := db.Where("provider = ? AND state = ? AND deadline > ?", provider, "pending", time.Now()).Where("EXISTS (SELECT 1 FROM transactions t WHERE t.provider = confirmation_tasks.provider AND t.event_id = confirmation_tasks.event_id AND t.state = ?)", model.Unconfirmed).Order("occurred_at, event_id").Offset(max(offset, 0)).Limit(limit).Find(&rows).Error
 	times := make([]time.Time, 0, len(rows))
 	for _, row := range rows {
 		times = append(times, row.OccurredAt)
 	}
-	return times, nil
+	return times, err
 }
 
 // PendingResult records the outcome of the unconfirmed-deposit recheck. It never touches
@@ -477,12 +561,20 @@ func (s *Store) PendingResult(ctx context.Context, provider string, recheckErr e
 func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (*model.Callback, *model.Order, error) {
 	var task model.Callback
 	var o model.Order
+	missing := false
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state <> ?", maxAttempts, time.Now(), "exhausted").Updates(map[string]any{"state": "exhausted"}).Error; err != nil {
+			return err
+		}
 		// Only paid orders are notified. Filtering here keeps a task whose order is not paid
 		// from blocking the queue: it would never become deliverable and every reservation
 		// would return the same row again.
 		paid := db.Model(&model.Order{}).Select("id").Where("status = ?", model.Paid)
-		if e := db.Where("delivered_at IS NULL AND attempts < ? AND next_at <= ? AND order_id IN (?)", maxAttempts, time.Now(), paid).Order("next_at").First(&task).Error; e != nil {
+		if e := db.Where("delivered_at IS NULL AND attempts < attempt_base + ? AND next_at <= ? AND order_id IN (?) AND state <> ?", maxAttempts, time.Now(), paid, "exhausted").Order("next_at").First(&task).Error; e != nil {
+			if errors.Is(e, gorm.ErrRecordNotFound) {
+				missing = true
+				return nil
+			}
 			return e
 		}
 		if e := db.First(&o, task.OrderID).Error; e != nil {
@@ -490,17 +582,28 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 		}
 		task.Attempts++
 		task.NextAt = time.Now().Add(time.Duration(timeout+5) * time.Second)
+		task.LeaseUntil = task.NextAt
+		task.State = "in_flight"
+		task.AttemptLimit = task.AttemptBase + maxAttempts
 		return db.Save(&task).Error
 	})
+	if err == nil && missing {
+		err = gorm.ErrRecordNotFound
+	}
 	return &task, &o, err
 }
 func (s *Store) FinishCallback(ctx context.Context, task model.Callback, status int, ok bool, message string, delay time.Duration) error {
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		updates := map[string]any{"last_error": message, "next_at": time.Now().Add(delay)}
+		state := "queued"
+		if !ok && task.Attempts >= task.AttemptLimit && task.AttemptLimit > 0 {
+			state = "exhausted"
+		}
+		updates := map[string]any{"last_error": message, "next_at": time.Now().Add(delay), "lease_until": time.Time{}, "state": state}
 		if ok {
 			updates["delivered_at"] = time.Now()
+			updates["state"] = "delivered"
 		}
-		r := db.Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND delivered_at IS NULL", task.OrderID, task.Attempts).Updates(updates)
+		r := db.Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(updates)
 		if r.Error != nil {
 			return r.Error
 		}

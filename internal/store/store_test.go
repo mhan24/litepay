@@ -175,7 +175,7 @@ func TestPendingEvidenceAndFinalDeadline(t *testing.T) {
 	if e := s.ScanResult(ctx, "binance", time.Now(), nil); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.Expire(ctx, 1, time.Hour); e != nil {
+	if e := s.Expire(ctx, 1); e != nil {
 		t.Fatal(e)
 	}
 	fresh, e := s.GetByTradeNo(ctx, closed.TradeNo)
@@ -202,7 +202,7 @@ func TestLateScanStillClaimsOnTimePayment(t *testing.T) {
 	if e := s.DB().Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("expires_at", time.Now().Add(-time.Minute)).Error; e != nil {
 		t.Fatal(e)
 	}
-	if e := s.Expire(ctx, 1, time.Hour); e != nil {
+	if e := s.Expire(ctx, 1); e != nil {
 		t.Fatal(e)
 	}
 	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Ready {
@@ -230,7 +230,7 @@ func TestExpireRequiresSuccessfulCoverage(t *testing.T) {
 	if e := s.ScanResult(ctx, "binance", windowEnd.Add(-time.Minute), nil); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.Expire(ctx, 0, time.Hour); e != nil {
+	if e := s.Expire(ctx, 0); e != nil {
 		t.Fatal(e)
 	}
 	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Ready {
@@ -245,7 +245,7 @@ func TestExpireRequiresSuccessfulCoverage(t *testing.T) {
 	if e := s.ScanResult(ctx, "binance", time.Now(), nil); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.Expire(ctx, 0, time.Hour); e != nil {
+	if e := s.Expire(ctx, 0); e != nil {
 		t.Fatal(e)
 	}
 	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Expired {
@@ -279,13 +279,16 @@ func TestUnconfirmedDepositHoldsOrderOpen(t *testing.T) {
 	if e := s.ScanResult(ctx, "binance", time.Now(), nil); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.Expire(ctx, 0, 10*time.Minute); e != nil {
+	if e := s.Expire(ctx, 0); e != nil {
 		t.Fatal(e)
 	}
 	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Ready {
 		t.Fatal("unconfirmed deposit dropped", fresh.Status)
 	}
-	if e := s.Expire(ctx, 0, time.Second); e != nil {
+	if e := s.DB().Model(&model.ConfirmationTask{}).Where("event_id = ?", tx.EventID).Update("deadline", time.Now().Add(-time.Second)).Error; e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Expire(ctx, 0); e != nil {
 		t.Fatal(e)
 	}
 	if fresh, _ := s.GetByTradeNo(ctx, o.TradeNo); fresh.Status != model.Expired {

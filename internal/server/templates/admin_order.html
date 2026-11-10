@@ -40,6 +40,7 @@
       </div>
     </section>
 
+    {{range .Confirmations}}<p class="banner" role="status">到账确认任务 · {{.State}} · 最迟自动确认 {{.Deadline}}。超过期限的记录需人工核对，不会自动标记付款。</p>{{end}}
     <h2>已认领资金事件</h2>
     <section class="card">
       <div class="card-b">
@@ -55,10 +56,20 @@
     <section class="card">
       <div class="card-b">
         {{range .Callbacks}}
-        <p>已尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
+        <p>状态 {{if .DeliveredAt}}已确认{{else if eq .State "exhausted"}}自动重试已耗尽{{else}}等待商城确认{{end}} · 累计尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
         {{else}}
         付款确认后创建通知任务
         {{end}}
+        {{if eq .Order.Status "PAID"}}{{range .Callbacks}}{{if not .DeliveredAt}}
+        <form method="post" action="{{adminPath}}/orders/{{$.Order.TradeNo}}/retry-notify" style="margin:16px 0">
+          <input type="hidden" name="csrf" value="{{$.Base.CSRF}}">
+          <label for="retry-reason">核对商城状态后的重试原因</label>
+          <input class="input" id="retry-reason" name="reason" required maxlength="300" placeholder="确认商城尚未交付，并记录核对结果">
+          <p class="hint">自动重试耗尽后可重新入队；商城须继续按原订单号幂等处理。</p>
+          <button class="btn btn-ghost" type="submit">重新通知商城</button>
+        </form>
+        {{end}}{{end}}{{end}}
+        {{range .Recoveries}}<p>重新入队 · {{.CreatedAt}} · {{.Operator}} · {{.Reason}} · 此前累计 {{.PreviousAttempts}} 次</p>{{end}}
         {{range .Logs}}
         <p>第 {{.Attempt}} 次 · HTTP {{.StatusCode}} · 确认 {{.Success}} · {{.Error}}</p>
         {{end}}

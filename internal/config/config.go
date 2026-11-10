@@ -76,6 +76,7 @@ func IsSupportedCurrency(currency string) bool {
 
 // ServerConfig HTTP 服务配置。
 type ServerConfig struct {
+	NotifyHosts    []string `yaml:"notify_hosts"`    // Exact callback hostnames in production; no wildcards.
 	StoreURL       string   `yaml:"store_url"`       // 根地址跳转目标；留空返回 404。
 	TrustedProxies []string `yaml:"trusted_proxies"` // Only explicit reverse proxies may supply client IP headers.
 	Addr           string   `yaml:"addr"`            // 监听地址，如 0.0.0.0:8080
@@ -245,6 +246,13 @@ func (c *Config) normalize() error {
 	if c.Server.BaseURL == "" {
 		c.Server.BaseURL = "http://127.0.0.1" + portSuffix(c.Server.Addr)
 	}
+	for i, host := range c.Server.NotifyHosts {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" || strings.ContainsAny(host, "/:@*?#\\") || strings.HasSuffix(host, ".") {
+			return fmt.Errorf("server.notify_hosts 只能填写精确主机名")
+		}
+		c.Server.NotifyHosts[i] = host
+	}
 	base, err := url.Parse(c.Server.BaseURL)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") {
 		return fmt.Errorf("server.base_url 必须是无路径、查询参数和用户信息的 HTTP(S) 站点地址")
@@ -408,9 +416,9 @@ func (c *Config) ProviderLookback(provider string) int {
 	return c.Binance.LookbackBuffer
 }
 
-// ScanRetention 是补查一笔到账的最长时间：订单有效期、宽限期与回看缓冲之和。
-// 超过这个时间仍未确认的到账不再自动归属订单，只保留证据交人工核对。
-func (c *Config) ScanRetention() time.Duration {
+// InitialScanLookback bounds only the initial history query. Confirmation tasks have their own
+// persistent deadline based on the actual order window, independent of this default.
+func (c *Config) InitialScanLookback() time.Duration {
 	return time.Duration(c.Order.ExpireMinutes+max(c.Binance.LookbackBuffer, c.OKX.LookbackBuffer, c.TON.LookbackBuffer))*time.Minute +
 		time.Duration(c.Order.SlotGraceSeconds)*time.Second
 }
@@ -489,4 +497,25 @@ func (c *Config) NormalizePaymentCurrencies() {
 
 func (c *Config) AnyProviderEnabled() bool {
 	return c.BinanceEnabled() || c.OKXEnabled() || c.TONEnabled()
+}
+
+// ValidateNotifyURL enforces transport and merchant identity in production. Development
+// HTTP gateways retain local integration support; production is selected by HTTPS base_url.
+func (c *Config) ValidateNotifyURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("notify_url 必须是有效的商户回调地址")
+	}
+	if strings.HasPrefix(c.Server.BaseURL, "https://") {
+		if u.Scheme != "https" || u.Port() != "" && u.Port() != "443" {
+			return fmt.Errorf("生产回调必须使用 HTTPS 标准端口")
+		}
+		for _, host := range c.Server.NotifyHosts {
+			if strings.EqualFold(u.Hostname(), host) {
+				return nil
+			}
+		}
+		return fmt.Errorf("商户回调主机未列入 server.notify_hosts")
+	}
+	return nil
 }
