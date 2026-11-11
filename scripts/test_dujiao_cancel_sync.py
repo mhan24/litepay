@@ -443,6 +443,37 @@ class SyncTest(unittest.TestCase):
         with sqlite3.connect(path) as state:
             self.assertEqual(state.execute('SELECT outcome FROM cancellations').fetchone()[0],'closed')
 
+    def test_paid_conflict_review_requires_gateway_refund_audit_and_replays_after_restore(self):
+        self.add(1)
+        self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)',(self.gateway,'a'*32));self.state.commit()
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:'paid_conflict',now=10)
+        result={'status_code':200,'data':{'trade_id':'trade1','order_id':'order1','generation':'a'*32,'refund_recorded':False}}
+        with patch.object(sync,'check_generation'),patch.object(sync,'cancel',return_value='paid_conflict'),patch.object(sync,'signed_post',return_value=result):
+            with self.assertRaises(ValueError):sync.review_conflict(self.path,self.state,self.gateway,'trade1','Refund not yet proved')
+            self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],1)
+            result['data']['refund_recorded']=True
+            sync.review_conflict(self.path,self.state,self.gateway,'trade1','Verified actual external refund and gateway audit')
+        self.assertEqual(self.state.execute('SELECT outcome FROM cancellations').fetchone()[0],'reviewed_conflict')
+        self.assertEqual(self.state.execute('SELECT count(*) FROM conflict_reviews').fetchone()[0],1)
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],0)
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:self.fail('reviewed conflict resent'),now=15)
+        with patch.object(sync,'signed_post',return_value={'status_code':200,'data':{'generation':'b'*32}}):sync.check_generation(self.path,self.state,self.gateway)
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:'paid_conflict',now=20)
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],1)
+        with patch.object(sync,'check_generation'),patch.object(sync,'cancel',return_value='paid_conflict'),patch.object(sync,'signed_post',return_value=result):
+            with self.assertRaises(ValueError):sync.review_conflict(self.path,self.state,self.gateway,'trade1','Old gateway refund audit')
+        self.assertEqual(self.state.execute('SELECT count(*) FROM conflict_reviews').fetchone()[0],1)
+
+    def test_paid_conflict_review_rechecks_merchant_identity_before_gateway(self):
+        self.add(1)
+        self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)',(self.gateway,'a'*32));self.state.commit()
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:'paid_conflict',now=10)
+        self.db.execute("UPDATE orders SET status='paid'");self.db.commit()
+        with patch.object(sync,'check_generation'),patch.object(sync,'cancel') as cancel:
+            with self.assertRaises(ValueError):sync.review_conflict(self.path,self.state,self.gateway,'trade1','merchant changed')
+            cancel.assert_not_called()
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],1)
+
     def test_manual_missing_review_is_audited_and_invalidated_by_new_generation(self):
         self.add(1)
         self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)',(self.gateway,'a'*32));self.state.commit()

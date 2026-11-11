@@ -740,7 +740,16 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 			return
 		}
 	}
-	c.HTML(200, "admin_dashboard.html", gin.H{"Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "Queues": queues, "CancelHealth": cancelHealth, "CancelWarning": cancelWarning, "CancelRequired": h.C().Server.CancelSyncRequired, "BinanceUsage": h.poller.BinanceUsage(), "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
+	var cancellationQueue []struct {
+		TradeNo  string
+		Provider string
+		EventID  string
+	}
+	if err := db.Table("cancellation_reviews r").Select("o.trade_no,r.provider,r.event_id").Joins("JOIN orders o ON o.id=r.order_id").Where("r.state<>'refund_recorded' OR r.review_generation<>(SELECT generation FROM gateway_recoveries WHERE id=1)").Order("r.id").Limit(10).Scan(&cancellationQueue).Error; err != nil {
+		h.renderAdminError(c, err)
+		return
+	}
+	c.HTML(200, "admin_dashboard.html", gin.H{"CancellationReviewQueue": cancellationQueue, "Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "Queues": queues, "CancelHealth": cancelHealth, "CancelWarning": cancelWarning, "CancelRequired": h.C().Server.CancelSyncRequired, "ProviderHealths": h.providerHealths(c), "BinanceUsage": h.poller.BinanceUsage(), "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
 }
 func (h *Handlers) AdminOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
@@ -787,13 +796,36 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 	var attempts []model.PaymentAttempt
 	var paymentRecoveries []model.PaymentRecovery
 	var history []model.HistoricalScan
-	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&recoveries).Error, db.Where("order_id = ?", o.ID).Find(&checks).Error, db.Where("order_id = ?", o.ID).Order("id").Find(&attempts).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&paymentRecoveries).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&history).Error} {
+	var reviews []model.CancellationReview
+	var reviewAudits []model.CancellationReviewAudit
+	for _, err := range []error{db.Where("order_id = ?", o.ID).Find(&reviews).Error, db.Where("review_id IN (SELECT id FROM cancellation_reviews WHERE order_id=?)", o.ID).Order("id").Find(&reviewAudits).Error, db.Where("order_id = ?", o.ID).Find(&tx).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&logs).Error, db.Where("order_id = ?", o.ID).Find(&tasks).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&recoveries).Error, db.Where("order_id = ?", o.ID).Find(&checks).Error, db.Where("order_id = ?", o.ID).Order("id").Find(&attempts).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&paymentRecoveries).Error, db.Where("order_id = ?", o.ID).Order("id DESC").Find(&history).Error} {
 		if err != nil {
 			h.renderAdminError(c, err)
 			return
 		}
 	}
-	c.HTML(200, "admin_order.html", gin.H{"Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts, "PaymentAttempts": attempts, "PaymentRecoveries": paymentRecoveries, "HistoricalScans": history})
+	type reviewView struct {
+		model.CancellationReview
+		Amount        string
+		Currency      string
+		EvidenceState string
+		Receiver      string
+	}
+	views := make([]reviewView, 0, len(reviews))
+	for _, review := range reviews {
+		var receipt model.Transaction
+		if err := db.First(&receipt, "provider=? AND event_id=?", review.Provider, review.EventID).Error; err != nil {
+			h.renderAdminError(c, err)
+			return
+		}
+		views = append(views, reviewView{CancellationReview: review, Amount: amount.String(receipt.Units), Currency: receipt.Currency, EvidenceState: receipt.State, Receiver: receipt.Receiver})
+	}
+	recovery, recoveryErr := h.st.Recovery(c.Request.Context())
+	if recoveryErr != nil {
+		h.renderAdminError(c, recoveryErr)
+		return
+	}
+	c.HTML(200, "admin_order.html", gin.H{"CancellationReviews": views, "CancellationReviewAudits": reviewAudits, "ReviewGeneration": recovery.Generation, "Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts, "PaymentAttempts": attempts, "PaymentRecoveries": paymentRecoveries, "HistoricalScans": history})
 }
 func (h *Handlers) AdminIntegration(c *gin.Context) {
 	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken, "PendingNotifyCount": h.pendingNotifyCount(c), "CanRotateToken": !h.C().Server.Production || h.C().Server.MerchantKeyVersions})
@@ -844,4 +876,16 @@ type pendingCallbackView struct {
 	model.Callback
 	TradeNo    string
 	OutTradeNo string
+}
+
+func (h *Handlers) AdminRecordRefund(c *gin.Context) {
+	no := c.Param("trade_no")
+	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
+	err := h.st.RecordCancellationRefund(c.Request.Context(), no, c.PostForm("provider"), c.PostForm("event_id"), c.GetString("admin_user"), c.PostForm("reference"), c.PostForm("reason"))
+	if err != nil {
+		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
+		return
+	}
+	h.log.Warn("管理员登记取消到账的外部退款凭证", "trade_id", no, "operator", c.GetString("admin_user"))
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("退款凭证已登记；请在原付款账户确认实际到账"))
 }

@@ -238,7 +238,29 @@ class DiscoveryHealthDBTest(RecoveryDBTest):
             tool.validate(self.path)
         self.db.execute('UPDATE integration_healths SET discovery_pending=1,discovery_lag_seconds=300')
         self.db.commit()
-        self.assertEqual(tool.drill(self.path)['schema'],15)
+        self.assertEqual(tool.drill(self.path)['schema'],self.expected_schema)
+
+
+class CancellationReviewDBTest(DiscoveryHealthDBTest):
+    expected_schema = 16
+
+    def setUp(self):
+        super().setUp()
+        self.db.executescript("""PRAGMA user_version=16;
+            CREATE TABLE cancellation_reviews(id INTEGER PRIMARY KEY,order_id,provider,event_id,state,review_generation,operator,reason,refund_reference,resolved_at);
+            CREATE TABLE cancellation_review_audits(id INTEGER PRIMARY KEY,review_id,generation,operator,reason,refund_reference);
+        """)
+        self.db.commit()
+
+    def test_refund_audit_survives_restore_without_changing_payment_ownership(self):
+        self.db.execute("INSERT INTO cancellation_reviews VALUES(1,1,'okx','deposit','refund_recorded',?,'operator','checked actual refund','external-refund','2026-11-11')",('a'*32,))
+        self.db.execute("INSERT INTO cancellation_review_audits VALUES(1,1,?,'operator','checked actual refund','external-refund')",('a'*32,))
+        self.db.execute("UPDATE callbacks SET state='canceled_refunded'")
+        self.db.execute("UPDATE transactions SET units=100 WHERE event_id='deposit'")
+        self.db.commit()
+        self.assertEqual(tool.drill(self.path)['schema'],16)
+        self.db.execute('DELETE FROM cancellation_review_audits');self.db.commit()
+        with self.assertRaises(ValueError):tool.validate(self.path)
 
 
 if __name__ == '__main__':

@@ -42,36 +42,39 @@ func (h *Handlers) C() *config.Config { return h.cfg.Get() }
 
 // CashierData 收银台模板数据。
 type CashierData struct {
-	NotifyStatus      string
-	SettlementPending bool
-	MerchantReview    bool
-	Title             string
-	Provider          string
-	ProviderName      string
-	TradeNo           string
-	OutTradeNo        string
-	Name              string
-	Amount            string // 精确应付金额，如 10.01
-	Currency          string
-	RateUSD           string
-	TransferURL       string
-	PaymentQR         template.URL
-	OriginMoney       string
-	UID               string
-	HasPayee          bool
-	Note              string
-	RemainSeconds     int
-	TotalSeconds      int
-	ReturnURL         string
-	Status            string
-	CreatedAt         string
-	ExpiredAt         string
-	Providers         []providerOption
-	CurrencyOptions   []currencyOption
-	CanReselect       bool
-	NeedsProvider     bool
-	NeedsCurrency     bool
-	ProviderSubtitle  string
+	ReviewAmounts      []string
+	CancellationReview bool
+	RefundRecorded     bool
+	NotifyStatus       string
+	SettlementPending  bool
+	MerchantReview     bool
+	Title              string
+	Provider           string
+	ProviderName       string
+	TradeNo            string
+	OutTradeNo         string
+	Name               string
+	Amount             string // 精确应付金额，如 10.01
+	Currency           string
+	RateUSD            string
+	TransferURL        string
+	PaymentQR          template.URL
+	OriginMoney        string
+	UID                string
+	HasPayee           bool
+	Note               string
+	RemainSeconds      int
+	TotalSeconds       int
+	ReturnURL          string
+	Status             string
+	CreatedAt          string
+	ExpiredAt          string
+	Providers          []providerOption
+	CurrencyOptions    []currencyOption
+	CanReselect        bool
+	NeedsProvider      bool
+	NeedsCurrency      bool
+	ProviderSubtitle   string
 }
 
 // -----------------------------------------------------------------------------
@@ -309,10 +312,6 @@ func currencyAllowedByLimit(limit string, currency string) bool {
 }
 
 func (h *Handlers) CashierPage(c *gin.Context) {
-	if h.paymentOperationsBlocked(c) {
-		h.renderError(c, 503, "收款暂时暂停", "商城取消同步异常或核对未完成，请稍后刷新，勿继续转账。")
-		return
-	}
 	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Param("trade_no"))
 	if err != nil {
 		h.renderError(c, 404, "未找到订单", "请返回商户页面核对订单。")
@@ -320,6 +319,10 @@ func (h *Handlers) CashierPage(c *gin.Context) {
 	}
 	if o.Status == model.Paid || o.Status == model.Expired || o.Status == model.Canceled || time.Now().After(o.ExpiresAt) {
 		h.renderResult(c, o)
+		return
+	}
+	if h.paymentOperationsBlocked(c) {
+		h.renderError(c, 503, "收款暂时暂停", "商城取消同步异常或核对未完成，请稍后刷新，勿继续转账。")
 		return
 	}
 	h.renderCashier(c, o)
@@ -377,7 +380,24 @@ func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 	if err := h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil && cb.DeliveredAt != nil {
 		ack = "SUCCESS"
 	}
-	c.HTML(200, "result.html", CashierData{Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
+	review, refunded, reviewErr := h.st.CancellationReviewState(c.Request.Context(), o.ID)
+	if reviewErr != nil {
+		h.renderError(c, 503, "暂时无法查询到账核对记录", "请稍后刷新或联系商户客服。")
+		return
+	}
+	var receipts []model.Transaction
+	var reviewAmounts []string
+	if review {
+		if err := h.st.DB().WithContext(c.Request.Context()).Table("transactions t").Select("t.*").Joins("JOIN cancellation_reviews r ON r.provider=t.provider AND r.event_id=t.event_id").Where("r.order_id=? AND t.state=?", o.ID, model.Confirmed).Order("r.id").Find(&receipts).Error; err != nil {
+			h.renderError(c, 503, "暂时无法查询到账核对记录", "请稍后刷新或联系商户客服。")
+			return
+		}
+		for _, receipt := range receipts {
+			reviewAmounts = append(reviewAmounts, amount.String(receipt.Units)+" "+receipt.Currency)
+		}
+	}
+
+	c.HTML(200, "result.html", CashierData{ReviewAmounts: reviewAmounts, CancellationReview: review, RefundRecorded: refunded, Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
 }
 func (h *Handlers) renderError(c *gin.Context, status int, title, detail string) {
 	c.HTML(status, "error.html", gin.H{"Title": title, "Detail": detail})
@@ -421,24 +441,25 @@ func (h *Handlers) Ready(c *gin.Context) {
 		c.JSON(503, gin.H{"ready": false, "reason": "商城取消同步存在未解决的已支付冲突"})
 		return
 	}
-	if !cfg.AnyProviderEnabled() {
-		c.JSON(503, gin.H{"ready": false, "reason": "未配置收款账户"})
-		return
-	}
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
-		if !cfg.ProviderEnabled(provider) {
-			continue
-		}
-		if ready, err := h.poller.ProviderReady(ctx, cfg, provider); err != nil || !ready {
-			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
-			return
+
+	states := h.providerHealths(c)
+	available, failed := 0, 0
+	for _, state := range states {
+		if state.Ready {
+			available++
+		} else if state.Configured {
+			failed++
 		}
 	}
-	if cfg.TONEnabled() && !h.poller.GRAM.Snapshot().Fresh {
-		c.JSON(503, gin.H{"ready": false, "reason": "GRAM/USD 行情检测尚未就绪"})
+	if available == 0 {
+		c.JSON(503, gin.H{"ready": false, "reason": "无可用收款平台", "providers": states})
 		return
 	}
-	h.Health(c)
+	if err := h.st.Ping(ctx); err != nil {
+		c.JSON(503, gin.H{"ready": false, "reason": "数据库暂不可用"})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "ready": true, "degraded": failed > 0, "providers": states})
 }
 func (h *Handlers) Index(c *gin.Context) {
 	if target := externalURL(h.C().Server.StoreURL); target != "" {

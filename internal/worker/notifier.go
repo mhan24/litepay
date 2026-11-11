@@ -86,6 +86,12 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 				return false, n.st.ReleaseCallback(save, *task)
 			}
 		}
+		allowed, guardErr := n.st.CallbackCanSend(ctx, *task)
+		if guardErr != nil || !allowed {
+			save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			defer done()
+			return false, n.st.ReleaseCallback(save, *task)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		var response []byte
 		status, response, err = n.http.Do(req)

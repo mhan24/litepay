@@ -105,6 +105,18 @@ func TestProviderAdmissionRequiresCurrentAccountAndScanAndRecovers(t *testing.T)
 	if err = p.Scan(ctx, "binance"); err != nil {
 		t.Fatal(err)
 	}
+	if w := getRequest(engine, "/readyz"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
+		t.Fatal("one failed provider removed healthy service", w.Code, w.Body.String())
+	}
+	if w := getRequest(engine, "/readyz/providers/binance"); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := getRequest(engine, "/readyz/providers/okx"); w.Code != 503 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := getRequest(engine, "/readyz/providers/unknown"); w.Code != 404 {
+		t.Fatal(w.Code)
+	}
 	no := createOrderViaBEpusdt(t, engine, mgr.Get().BEpusdt.APIToken, "https://shop.example")
 	if got := submit(no, "binance"); got != 200 {
 		t.Fatal(got)

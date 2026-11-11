@@ -112,6 +112,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	r.POST("/api/v1/order/cancel-transaction", h.BEpusdtCancelOrder)
 	r.POST("/api/v1/order/cancel-sync-status", h.CancelSyncHeartbeat)
 	r.POST("/api/v1/order/cancel-sync-generation", h.CancelSyncGeneration)
+	r.POST("/api/v1/order/cancellation-review", h.CancellationReviewStatus)
 
 	// ---- 收银台 ----
 	r.GET("/pay/:trade_no", h.LimitPublicRead, h.CashierPage)
@@ -123,6 +124,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	// ---- 运维 ----
 	r.GET("/healthz", h.Health)
 	r.GET("/readyz", h.Ready)
+	r.GET("/readyz/providers/:provider", h.ProviderReady)
 	r.GET("/", h.Index)
 
 	// ---- 后台管理 ----
@@ -148,6 +150,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.POST("/orders/:trade_no/retry-notify", h.AdminRetryNotify)
 		adm.POST("/orders/:trade_no/reconcile", h.AdminReconcilePayment)
 		adm.POST("/orders/:trade_no/rescan", h.AdminHistoricalScan)
+		adm.POST("/orders/:trade_no/refund-record", h.AdminRecordRefund)
 		adm.GET("/integration", h.AdminIntegration)
 		adm.GET("/settings", h.AdminSettings)
 		adm.GET("/gram/status", h.GRAMStatus)

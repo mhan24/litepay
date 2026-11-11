@@ -21,6 +21,8 @@
 
     <section class="card"><div class="card-b">
       <h2>队列与取消同步</h2>
+      {{if .Queues.CancellationReviewWaiting}}<p class="banner" role="alert">{{.Queues.CancellationReviewWaiting}} 笔取消后到账等待核对或退款。请到对应订单登记实际退款凭证。</p>{{range .CancellationReviewQueue}}<p style="overflow-wrap:anywhere"><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.TradeNo}}</a> · {{.Provider}} / {{.EventID}} · 到账待核对</p>{{end}}{{end}}
+      {{range .ProviderHealths}}{{if .Configured}}<p {{if not .Ready}}class="banner" role="alert"{{end}}>{{.Provider}}：{{if .Ready}}平台就绪{{else}}{{.Reason}}{{end}}</p>{{end}}{{end}}
       <p>待确认通知 {{.Queues.CallbackWaiting}} 笔 · 发送中 {{.Queues.CallbackInFlight}} 笔 · 最老待确认通知已等待 {{.Queues.OldestCallbackSeconds}} 秒</p>
       <p>历史补扫 {{.Queues.HistoricalPending}} 项 · 剩余窗口 {{.Queues.HistoricalRemainingSeconds}} 秒 · 最早窗口距今 {{.Queues.OldestHistoricalSeconds}} 秒</p>
       <p>最终复核尚未覆盖 {{.Queues.FinalReviewWaiting}} 份付款尝试 · 最早窗口距今 {{.Queues.OldestFinalWindowSeconds}} 秒，包含尚未排入扫描任务的窗口。</p>

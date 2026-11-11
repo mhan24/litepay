@@ -79,7 +79,7 @@ def eligible(rows, gateway):
 def enqueue(state, rows, gateway, now):
     for payment_id, trade_id, order_id, _ in eligible(rows, gateway):
         # Keys contain identities only. API credentials are fetched again before sending.
-        state.execute("INSERT INTO cancellations VALUES(?,?,?,?,'queued',0,?,?) ON CONFLICT(gateway,payment_id,trade_id,order_id) DO UPDATE SET outcome='queued',next_at=excluded.next_at,updated_at=excluded.updated_at WHERE cancellations.outcome='merchant_changed' OR (cancellations.outcome IN ('closed','reviewed_missing','missing_gateway','paid_conflict') AND EXISTS(SELECT 1 FROM gateway_epochs e WHERE e.gateway=cancellations.gateway AND NOT EXISTS(SELECT 1 FROM epoch_receipts r WHERE r.gateway=cancellations.gateway AND r.payment_id=cancellations.payment_id AND r.trade_id=cancellations.trade_id AND r.order_id=cancellations.order_id AND r.generation=e.generation)))",
+        state.execute("INSERT INTO cancellations VALUES(?,?,?,?,'queued',0,?,?) ON CONFLICT(gateway,payment_id,trade_id,order_id) DO UPDATE SET outcome='queued',next_at=excluded.next_at,updated_at=excluded.updated_at WHERE cancellations.outcome='merchant_changed' OR (cancellations.outcome IN ('closed','reviewed_missing','reviewed_conflict','missing_gateway','paid_conflict') AND EXISTS(SELECT 1 FROM gateway_epochs e WHERE e.gateway=cancellations.gateway AND NOT EXISTS(SELECT 1 FROM epoch_receipts r WHERE r.gateway=cancellations.gateway AND r.payment_id=cancellations.payment_id AND r.trade_id=cancellations.trade_id AND r.order_id=cancellations.order_id AND r.generation=e.generation)))",
                       (gateway, payment_id, trade_id, order_id, now, now))
 
 
@@ -202,6 +202,7 @@ def journal(path):
         CREATE TABLE IF NOT EXISTS gateway_epochs(gateway TEXT PRIMARY KEY,generation TEXT NOT NULL,audit_id INTEGER NOT NULL DEFAULT 0,scanned INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS epoch_receipts(gateway TEXT,payment_id INTEGER,trade_id TEXT,order_id TEXT,generation TEXT,outcome TEXT,updated_at REAL,
             PRIMARY KEY(gateway,payment_id,trade_id,order_id,generation));
+        CREATE TABLE IF NOT EXISTS conflict_reviews(id INTEGER PRIMARY KEY,gateway TEXT,payment_id INTEGER,trade_id TEXT,order_id TEXT,generation TEXT,operator TEXT,reason TEXT,created_at REAL);
         CREATE TABLE IF NOT EXISTS missing_reviews(id INTEGER PRIMARY KEY,gateway TEXT,payment_id INTEGER,trade_id TEXT,order_id TEXT,generation TEXT,operator TEXT,reason TEXT,created_at REAL);
     """)
     return db
@@ -360,6 +361,38 @@ def review_missing(database, state, gateway, trade_id, reason):
             state.execute("INSERT OR REPLACE INTO epoch_receipts VALUES(?,?,?,?,?,?,?)",(gateway,pid,tid,oid,generation,outcome,time.time()))
 
 
+def review_conflict(database, state, gateway, trade_id, reason):
+    import getpass
+    if not reason.strip() or len(reason)>300:
+        raise ValueError('a review reason (1-300 characters) is required')
+    check_generation(database,state,gateway)
+    rows=state.execute("SELECT payment_id,trade_id,order_id FROM cancellations WHERE gateway=? AND trade_id=? AND outcome='paid_conflict'",(gateway,trade_id)).fetchall()
+    if len(rows)!=1:
+        raise ValueError('exactly one unresolved paid conflict must match')
+    pid,tid,oid=rows[0]
+    source=source_connect(database)
+    try:
+        valid=list(eligible(payment_rows(source,'p.id=?',(pid,)),gateway))
+    finally:
+        source.close()
+    if len(valid)!=1 or valid[0][:3]!=(pid,tid,oid):
+        raise ValueError('merchant cancellation identity changed')
+    if cancel(gateway,tid,oid,valid[0][3])!='paid_conflict':
+        raise ValueError('gateway payment state changed; recheck funds')
+    result=signed_post(gateway,'/api/v1/order/cancellation-review',{'timestamp':str(int(time.time())),'trade_id':tid,'order_id':oid},valid[0][3])
+    data=result.get('data') or {}
+    epoch=state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?',(gateway,)).fetchone()
+    if not epoch or data.get('generation')!=epoch[0] or data.get('trade_id')!=tid or data.get('order_id')!=oid or data.get('refund_recorded') is not True:
+        raise ValueError('gateway has no current audited refund record')
+    generation=epoch[0]
+    with state:
+        if state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?',(gateway,)).fetchone()[0]!=generation:
+            raise ValueError('gateway generation changed during review')
+        state.execute('INSERT INTO conflict_reviews(gateway,payment_id,trade_id,order_id,generation,operator,reason,created_at) VALUES(?,?,?,?,?,?,?,?)',(gateway,pid,tid,oid,generation,getpass.getuser(),reason.strip(),time.time()))
+        state.execute("UPDATE cancellations SET outcome='reviewed_conflict',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",(time.time(),gateway,pid,tid,oid))
+        state.execute("INSERT OR REPLACE INTO epoch_receipts VALUES(?,?,?,?,?,?,?)",(gateway,pid,tid,oid,generation,'reviewed_conflict',time.time()))
+
+
 def run_cycle(database, state, gateway, report=False, now=None):
     healthy=True;reported=True
     try:
@@ -409,7 +442,9 @@ def main():
     parser.add_argument('--state', required=True)
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--once', action='store_true')
-    parser.add_argument('--review-missing', help='Gateway trade ID requiring audited operator review')
+    reviews=parser.add_mutually_exclusive_group()
+    reviews.add_argument('--review-conflict', help='Reconcile one paid conflict after an audited external refund is recorded at the gateway')
+    reviews.add_argument('--review-missing', help='Gateway trade ID requiring audited operator review')
     parser.add_argument('--reason', default='', help='Required factual review reason')
     parser.add_argument('--report-health', action='store_true')
     parser.add_argument('--rescan-history', action='store_true', help='Restart bounded historical discovery without clearing deduplication or retries')
@@ -431,6 +466,12 @@ def main():
             state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
             state.execute("UPDATE discovery SET canceled_at='',order_id=0,audit_payment_id=0,next_audit=0 WHERE gateway=?", (gateway,))
             state.execute('DELETE FROM discovery_health WHERE gateway=?', (gateway,))
+    if args.review_conflict:
+        try:
+            review_conflict(database,state,gateway,args.review_conflict,args.reason)
+        except Exception as error:
+            parser.exit(1,'Paid-conflict review failed: '+type(error).__name__+'; verify merchant cancellation and the gateway refund record.\n')
+        return
     if args.review_missing:
         try:
             review_missing(database,state,gateway,args.review_missing,args.reason)

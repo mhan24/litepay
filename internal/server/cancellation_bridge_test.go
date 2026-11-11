@@ -60,6 +60,7 @@ func TestPythonCancellationBridgeAgainstGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The token is passed through stdin, never a process argument or test output.
+	bridgeRoot := t.TempDir()
 	cmd := exec.CommandContext(ctx, python, "-c", `
 import importlib.util,json,sqlite3,sys,pathlib
 spec=importlib.util.spec_from_file_location('sync',sys.argv[1]);s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
@@ -75,7 +76,7 @@ assert s.sync_once(path,state,gateway)==2
 assert dict(state.execute('SELECT trade_id,outcome FROM cancellations'))=={'bridge-cancel':'closed','bridge-paid':'paid_conflict'}
 assert s.sync_once(path,state,gateway)==0
 s.report_health(path,state,gateway,True)
-`, script, gateway.URL, t.TempDir())
+`, script, gateway.URL, bridgeRoot)
 	encoded, _ := json.Marshal(mgr.Get().BEpusdt.APIToken)
 	cmd.Stdin = strings.NewReader(string(encoded))
 	if output, e := cmd.CombinedOutput(); e != nil {
@@ -96,5 +97,26 @@ s.report_health(path,state,gateway,True)
 	st.DB().Model(&model.Callback{}).Where("order_id = ?", canceled.ID).Count(&count)
 	if count != 0 {
 		t.Fatal("canceled order got callback")
+	}
+
+	if err = st.RecordCancellationRefund(ctx, "bridge-paid", "binance", "bridge-paid", "operator", "actual-refund-proof", "verified merchant cancellation and completed external refund"); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.CommandContext(ctx, python, "-c", `
+import importlib.util,json,sys,pathlib
+spec=importlib.util.spec_from_file_location('sync',sys.argv[1]);s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+gateway=sys.argv[2];json.load(sys.stdin);root=pathlib.Path(sys.argv[3]);state=s.journal(root/'journal.db')
+s.review_conflict(root/'commerce.db',state,gateway,'bridge-paid','Actual external refund recorded and independently checked')
+assert state.execute("SELECT outcome FROM cancellations WHERE trade_id='bridge-paid'").fetchone()[0]=='reviewed_conflict'
+assert s.queue_status(state,gateway)['conflicts']==0
+assert s.sync_once(root/'commerce.db',state,gateway)==0
+`, script, gateway.URL, bridgeRoot)
+	cmd.Stdin = strings.NewReader(string(encoded))
+	if output, e := cmd.CombinedOutput(); e != nil {
+		t.Fatalf("refund conflict integration: %v: %s", e, output)
+	}
+	var cb model.Callback
+	if err = st.DB().First(&cb, "order_id=(SELECT id FROM orders WHERE trade_no=?)", "bridge-paid").Error; err != nil || cb.State != "canceled_refunded" {
+		t.Fatal(cb, err)
 	}
 }

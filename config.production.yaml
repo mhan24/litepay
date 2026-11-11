@@ -8,7 +8,8 @@ server:
   trusted_proxies: []
   callback_workers: 8
   merchant_key_versions: false
-  cancel_sync_required: false
+  # Dujiao Next production requires the signed cancellation sync service.
+  cancel_sync_required: true
 database:
   path: "/app/data/litepay.db"
 admin:

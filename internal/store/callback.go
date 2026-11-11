@@ -26,6 +26,13 @@ func (s *Store) RetryCallback(ctx context.Context, tradeNo, operator, reason str
 		if o.Status != model.Paid {
 			return errors.New("仅已支付订单可重新通知")
 		}
+		var held int64
+		if err := db.Model(&model.CancellationReview{}).Where("order_id=?", o.ID).Count(&held).Error; err != nil {
+			return err
+		}
+		if held > 0 {
+			return errors.New("该订单已有商城取消到账核对记录，不得重新通知交付")
+		}
 		var proof int64
 		if err := db.Model(&model.Transaction{}).Where("order_id = ? AND state = ?", o.ID, model.Confirmed).Count(&proof).Error; err != nil {
 			return err

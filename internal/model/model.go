@@ -288,3 +288,30 @@ func (o Order) PaymentPhase(now time.Time) string {
 	}
 	return "accepting_payment"
 }
+
+// CancellationReview records funds requiring an external refund after merchant cancellation.
+// Order and transaction payment state remain the original receipt evidence.
+type CancellationReview struct {
+	ID               uint   `gorm:"primaryKey"`
+	OrderID          uint   `gorm:"not null;index"`
+	Provider         string `gorm:"not null;uniqueIndex:cancellation_event"`
+	EventID          string `gorm:"not null;uniqueIndex:cancellation_event"`
+	State            string `gorm:"not null;default:open"`
+	ReviewGeneration string
+	Operator         string
+	Reason           string
+	RefundReference  string
+	ResolvedAt       *time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type CancellationReviewAudit struct {
+	ID              uint `gorm:"primaryKey"`
+	ReviewID        uint `gorm:"not null;index"`
+	Generation      string
+	Operator        string
+	Reason          string
+	RefundReference string
+	CreatedAt       time.Time
+}

@@ -8,6 +8,7 @@ import (
 )
 
 type QueueStats struct {
+	CancellationReviewWaiting  int64 `json:"cancellation_review_waiting"`
 	FinalReviewWaiting         int64 `json:"final_review_waiting"`
 	OldestFinalWindowSeconds   int64 `json:"oldest_final_window_seconds"`
 	CallbackWaiting            int64 `json:"callback_waiting"`
@@ -22,8 +23,12 @@ type QueueStats struct {
 func (s *Store) QueueStats(ctx context.Context) (QueueStats, error) {
 	var out QueueStats
 	db := s.db.WithContext(ctx)
-	err := db.Raw(`SELECT COUNT(*) callback_waiting,CAST(COALESCE(MAX((julianday('now')-julianday(o.paid_at))*86400),0) AS INTEGER) oldest_callback_seconds FROM callbacks c JOIN orders o ON o.id=c.order_id WHERE o.status='PAID' AND c.delivered_at IS NULL AND c.state NOT IN ('merchant_review','exhausted')`).Scan(&out).Error
+
+	err := db.Raw(`SELECT COUNT(*) callback_waiting,CAST(COALESCE(MAX((julianday('now')-julianday(o.paid_at))*86400),0) AS INTEGER) oldest_callback_seconds FROM callbacks c JOIN orders o ON o.id=c.order_id WHERE o.status='PAID' AND c.delivered_at IS NULL AND c.state NOT IN ('merchant_review','exhausted','canceled_refunded')`).Scan(&out).Error
 	if err != nil {
+		return out, err
+	}
+	if err := db.Model(&model.CancellationReview{}).Where("state<>? OR review_generation<>(SELECT generation FROM gateway_recoveries WHERE id=1)", "refund_recorded").Count(&out.CancellationReviewWaiting).Error; err != nil {
 		return out, err
 	}
 	if err = db.Model(&model.Callback{}).Where("state='in_flight' AND delivered_at IS NULL").Count(&out.CallbackInFlight).Error; err != nil {

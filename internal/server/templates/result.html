@@ -31,7 +31,10 @@
 </head>
 <body>
   <main class="card">
-    {{if eq .Status "PAID"}}
+    {{if .CancellationReview}}
+    <div class="icon exp"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+    {{if .RefundRecorded}}<h1>退款凭证已登记</h1><p>请在原付款账户核对实际到账。如有疑问，请联系商户客服；请勿重复付款。</p>{{else}}<h1>商城已取消，到账核对中</h1><p>款项已记录，正在核对取消与交付状态。请联系商户客服核对与退款，请勿重复付款。</p>{{end}}
+    {{else if eq .Status "PAID"}}
     <div class="icon ok"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></div>
     <h1>支付成功</h1>
     <p>款项已确认到账，请返回商户页面查看订单进度。</p>
@@ -50,7 +53,7 @@
     <p>该订单的自动结算已结束，请返回商户查看订单。<br>如已付款，请联系商户客服处理。</p>
     {{end}}
 
-    <div class="amount">{{.Amount}}<span>{{.Currency}}</span></div>
+    {{if .CancellationReview}}{{range .ReviewAmounts}}<div class="amount">{{.}}</div>{{end}}{{else}}<div class="amount">{{.Amount}}<span>{{.Currency}}</span></div>{{end}}
     <div class="meta">
       <div><span>商品名称</span><b>{{if .Name}}{{.Name}}{{else}}未填写{{end}}</b></div>
       <div><span>商户订单号</span><b class="mono">{{.OutTradeNo}}</b></div>

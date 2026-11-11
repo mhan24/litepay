@@ -84,10 +84,10 @@ func Open(path string) (*Store, error) {
 	if err = db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables).Error; err != nil {
 		return fail(err)
 	}
-	if version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13 && version != 14 && version != 15 && tables > 0 {
+	if version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13 && version != 14 && version != 15 && version != 16 && tables > 0 {
 		return fail(errors.New("旧数据库不兼容，请配置一个新的空数据库"))
 	}
-	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}, &model.IntegrationHealth{}, &model.HistoryCoverage{}, &model.GatewayRecovery{}, &model.CancellationIntent{}); err != nil {
+	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}, &model.IntegrationHealth{}, &model.HistoryCoverage{}, &model.GatewayRecovery{}, &model.CancellationIntent{}, &model.CancellationReview{}, &model.CancellationReviewAudit{}); err != nil {
 		return fail(err)
 	}
 	if err = migratePaymentAttempts(db); err != nil {
@@ -116,7 +116,12 @@ func Open(path string) (*Store, error) {
 			return fail(err)
 		}
 	}
-	if err = db.Exec("PRAGMA user_version=15").Error; err != nil {
+	if version < 16 {
+		if err = backfillCancellationReviews(db); err != nil {
+			return fail(err)
+		}
+	}
+	if err = db.Exec("PRAGMA user_version=16").Error; err != nil {
 		return fail(err)
 	}
 	if path != ":memory:" {
@@ -307,12 +312,16 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 	return &o, err
 }
 func (s *Store) Cancel(ctx context.Context, no string) error {
-	_, err := s.CancelReference(ctx, no, "")
+	_, err := s.cancelReference(ctx, no, "", false)
 	return err
 }
 
 // CancelReference accepts either signed identifier and checks agreement when both are supplied.
 func (s *Store) CancelReference(ctx context.Context, tradeNo, outTradeNo string) (*model.Order, error) {
+	return s.cancelReference(ctx, tradeNo, outTradeNo, true)
+}
+func (s *Store) cancelReference(ctx context.Context, tradeNo, outTradeNo string, merchant bool) (*model.Order, error) {
+	var paidConflict bool
 	var o model.Order
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		if tradeNo == "" && outTradeNo == "" {
@@ -356,7 +365,21 @@ func (s *Store) CancelReference(ctx context.Context, tradeNo, outTradeNo string)
 			return nil
 		}
 		if o.Status == model.Paid {
-			return errors.New("已支付订单不能关闭")
+			if !merchant {
+				return errors.New("已支付订单不能关闭")
+			}
+			var rows []model.Transaction
+			if err := db.Where("order_id=? AND state=?", o.ID, model.Confirmed).Limit(2).Find(&rows).Error; err != nil {
+				return err
+			}
+			if len(rows) != 1 {
+				return errors.New("已支付订单缺少唯一到账证据，需人工核对")
+			}
+			if err := ensureCancellationReview(db, o, rows[0]); err != nil {
+				return err
+			}
+			paidConflict = true
+			return nil
 		}
 		if o.Status != model.Pending && o.Status != model.Ready && o.Status != model.Expired {
 			return errors.New("订单不能关闭")
@@ -367,6 +390,9 @@ func (s *Store) CancelReference(ctx context.Context, tradeNo, outTradeNo string)
 		o.Status = model.Canceled
 		return db.Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("order_id", nil).Error
 	})
+	if err == nil && paidConflict {
+		err = errors.New("已支付订单不能关闭")
+	}
 	return &o, err
 }
 
@@ -442,8 +468,19 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			return err
 		}
 		if reason != "" {
-			if reason == "additional_payment" {
+			if reason == "additional_payment" || reason == "order_closed" && o.Status == model.Canceled {
 				if err := db.Model(&t).Update("attempt_id", attempt.ID).Error; err != nil {
+					return err
+				}
+			}
+			var cancellationHeld int64
+			if reason == "additional_payment" {
+				if err := db.Model(&model.CancellationReview{}).Where("order_id=?", o.ID).Count(&cancellationHeld).Error; err != nil {
+					return err
+				}
+			}
+			if reason == "order_closed" && o.Status == model.Canceled || reason == "additional_payment" && cancellationHeld > 0 {
+				if err := ensureCancellationReview(db, o, t); err != nil {
 					return err
 				}
 			}
@@ -580,14 +617,14 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 	var o model.Order
 	missing := false
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state NOT IN ?", maxAttempts, time.Now(), []string{"exhausted", "merchant_review"}).Updates(map[string]any{"state": "exhausted"}).Error; err != nil {
+		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state NOT IN ?", maxAttempts, time.Now(), []string{"exhausted", "merchant_review", "canceled_refunded"}).Updates(map[string]any{"state": "exhausted"}).Error; err != nil {
 			return err
 		}
 		// Only paid orders are notified. Filtering here keeps a task whose order is not paid
 		// from blocking the queue: it would never become deliverable and every reservation
 		// would return the same row again.
 		paid := db.Model(&model.Order{}).Select("id").Where("status = ?", model.Paid)
-		if e := db.Where("delivered_at IS NULL AND attempts < attempt_base + ? AND next_at <= ? AND order_id IN (?) AND state NOT IN ?", maxAttempts, time.Now(), paid, []string{"exhausted", "merchant_review"}).Order("next_at").First(&task).Error; e != nil {
+		if e := db.Where("delivered_at IS NULL AND attempts < attempt_base + ? AND next_at <= ? AND order_id IN (?) AND state NOT IN ?", maxAttempts, time.Now(), paid, []string{"exhausted", "merchant_review", "canceled_refunded"}).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Order("next_at").First(&task).Error; e != nil {
 			if errors.Is(e, gorm.ErrRecordNotFound) {
 				missing = true
 				return nil
@@ -613,7 +650,7 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 // ReleaseCallback returns an unsent reservation without consuming the merchant retry
 // budget. The lease fence prevents an old worker from releasing a newer attempt.
 func (s *Store) ReleaseCallback(ctx context.Context, task model.Callback) error {
-	return s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(map[string]any{"attempts": task.Attempts - 1, "next_at": time.Now(), "lease_until": time.Time{}, "state": "queued"}).Error
+	return s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(map[string]any{"attempts": task.Attempts - 1, "next_at": time.Now(), "lease_until": time.Time{}, "state": gorm.Expr("CASE WHEN EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id) THEN 'merchant_review' ELSE 'queued' END")}).Error
 }
 
 func (s *Store) FinishCallback(ctx context.Context, task model.Callback, status int, ok bool, message string, delay time.Duration) error {
@@ -621,6 +658,13 @@ func (s *Store) FinishCallback(ctx context.Context, task model.Callback, status 
 		state := "queued"
 		if !ok && task.Attempts >= task.AttemptLimit && task.AttemptLimit > 0 {
 			state = "exhausted"
+		}
+		var holds int64
+		if err := db.Model(&model.CancellationReview{}).Where("order_id=?", task.OrderID).Count(&holds).Error; err != nil {
+			return err
+		}
+		if holds > 0 {
+			state = "merchant_review"
 		}
 		updates := map[string]any{"last_error": message, "next_at": time.Now().Add(delay), "lease_until": time.Time{}, "state": state}
 		if ok {

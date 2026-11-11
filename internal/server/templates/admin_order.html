@@ -40,6 +40,23 @@
       </div>
     </section>
 
+    {{if .CancellationReviews}}<section class="card" style="margin-top:16px"><div class="card-b">
+      <h2>商城取消后的到账核对</h2>
+      <p class="hint">请先核对商城取消状态、交付记录和原始到账。请在原始平台流水核实付款方账户，完成实际退款后在此登记凭证。资金核销历史保留，不重新通知交付。</p>
+      {{range .CancellationReviews}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.EventID}} · 实际到账 {{.Amount}} {{.Currency}} · 收款账户 {{.Receiver}} · 证据 {{if eq .EvidenceState "confirmed"}}已确认{{else}}{{.EvidenceState}}{{end}} · {{if eq .State "refund_recorded"}}已登记退款 · {{.RefundReference}} · {{.Operator}}{{else}}等待人工核对与退款{{end}}</p>
+      {{if or (ne .State "refund_recorded") (ne .ReviewGeneration $.ReviewGeneration)}}
+      <form method="post" action="{{adminPath}}/orders/{{$.Order.TradeNo}}/refund-record">
+        <input type="hidden" name="csrf" value="{{$.Base.CSRF}}"><input type="hidden" name="provider" value="{{.Provider}}"><input type="hidden" name="event_id" value="{{.EventID}}">
+        <div class="form-grid">
+          <div class="field full"><label for="refund-reference-{{.ID}}">实际退款凭证编号</label><input id="refund-reference-{{.ID}}" class="input" name="reference" required maxlength="200" value="{{.RefundReference}}"></div>
+          <div class="field full"><label for="refund-reason-{{.ID}}">取消、交付与退款核对结果</label><input id="refund-reason-{{.ID}}" class="input" name="reason" required maxlength="300"></div>
+        </div>
+        <p class="hint">恢复后需重新核对已有凭证，请勿据此重复转出退款。</p>
+        <button class="btn btn-ghost" type="submit">登记已完成的退款</button>
+      </form>{{end}}{{end}}
+      {{range .CancellationReviewAudits}}<p style="overflow-wrap:anywhere">退款核对审计 · {{.CreatedAt}} · {{.Operator}} · {{.RefundReference}} · {{.Reason}}</p>{{end}}
+    </div></section>{{end}}
+
     {{range .Confirmations}}<p class="banner" role="status">到账确认任务 · {{.State}} · 最迟自动确认 {{.Deadline}}。超过期限的记录需人工核对，不会自动标记付款。</p>{{end}}
     <h2>付款尝试记录</h2>
     <section class="card"><div class="card-b">{{range .PaymentAttempts}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.Receiver}} · {{.Currency}} · 精确应付 {{.Amount}} · {{.SelectedAt}} 至 {{.ExpiresAt}}</p>{{else}}尚未选择付款方式{{end}}</div></section>
@@ -55,6 +72,7 @@
         <button class="btn btn-ghost" type="submit" style="margin-top:12px">核对证据并补单</button>
       </form></div></section>{{end}}
     {{range .PaymentRecoveries}}<p>补单审计 · {{.CreatedAt}} · {{.Operator}} · {{.Provider}} / {{.EventID}} · {{.Reason}}</p>{{end}}
+
     <h2>已认领资金事件</h2>
     <section class="card">
       <div class="card-b">
@@ -70,11 +88,11 @@
     <section class="card">
       <div class="card-b">
         {{range .Callbacks}}
-        <p>状态 {{if .DeliveredAt}}已确认{{else if eq .State "merchant_review"}}等待核对商城交付状态{{else if eq .State "exhausted"}}自动重试已耗尽{{else}}等待商城确认{{end}} · 累计尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
+        <p>状态 {{if .DeliveredAt}}已确认{{else if eq .State "canceled_refunded"}}取消到账已登记退款{{else if eq .State "merchant_review"}}等待核对商城交付状态{{else if eq .State "exhausted"}}自动重试已耗尽{{else}}等待商城确认{{end}} · 累计尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
         {{else}}
         付款确认后创建通知任务
         {{end}}
-        {{if eq .Order.Status "PAID"}}{{range .Callbacks}}{{if not .DeliveredAt}}
+        {{if and (eq .Order.Status "PAID") (not .CancellationReviews)}}{{range .Callbacks}}{{if not .DeliveredAt}}
         <form method="post" action="{{adminPath}}/orders/{{$.Order.TradeNo}}/retry-notify" style="margin:16px 0">
           <input type="hidden" name="csrf" value="{{$.Base.CSRF}}">
           <label for="retry-reason">核对商城状态后的重试原因</label>

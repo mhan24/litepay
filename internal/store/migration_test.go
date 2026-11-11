@@ -298,12 +298,56 @@ func TestSchema14AddsDiscoveryHealthAndInvalidatesUnprovenHeartbeat(t *testing.T
 	}
 	var version int
 	s.DB().Raw("PRAGMA user_version").Scan(&version)
-	if version != 15 {
+	if version != 16 {
 		t.Fatal(version)
 	}
 	var count int64
 	s.DB().Model(&model.Callback{}).Where("order_id=?", o.ID).Count(&count)
 	if count != 1 {
 		t.Fatal(count)
+	}
+}
+
+func TestSchema15BackfillsCanceledReceiptReviewWithoutClaimingFunds(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "schema15.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "v15-canceled-money")
+	if err = s.Cancel(ctx, o.TradeNo); err != nil {
+		t.Fatal(err)
+	}
+	event := evidence(o, "v15-canceled-event")
+	if _, err = s.Process(ctx, event, ""); err != nil {
+		t.Fatal(err)
+	}
+	recovery, _ := s.Recovery(ctx)
+	s.DB().Migrator().DropTable(&model.CancellationReviewAudit{}, &model.CancellationReview{})
+	s.DB().Exec("PRAGMA user_version=15")
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var review model.CancellationReview
+	if err = s.DB().First(&review).Error; err != nil || review.OrderID != o.ID || review.State != "open" {
+		t.Fatal(review, err)
+	}
+	var tx model.Transaction
+	s.DB().First(&tx, "event_id=?", event.EventID)
+	if tx.OrderID != nil || tx.AttemptID == nil || tx.State != model.Confirmed {
+		t.Fatal(tx)
+	}
+	after, _ := s.Recovery(ctx)
+	if after.Generation != recovery.Generation {
+		t.Fatal("migration rotated recovery generation")
+	}
+	var callbacks int64
+	s.DB().Model(&model.Callback{}).Count(&callbacks)
+	if callbacks != 0 {
+		t.Fatal("migration manufactured delivery")
 	}
 }

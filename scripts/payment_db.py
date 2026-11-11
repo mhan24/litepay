@@ -32,12 +32,13 @@ def validate(path):
         if db.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('foreign key check failed')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (8, 9, 10, 11, 12, 13, 14, 15):
+        if version not in (8, 9, 10, 11, 12, 13, 14, 15, 16):
             raise ValueError('unsupported payment schema')
         tables = BASE_TABLES + (NEW_TABLES if version >= 9 else ())
         tables += ATTEMPT_TABLES if version >= 10 else ()
         tables += ('integration_healths', 'history_coverages') if version >= 12 else ()
         tables += ('gateway_recoveries', 'cancellation_intents') if version >= 14 else ()
+        tables += ('cancellation_reviews','cancellation_review_audits') if version >= 16 else ()
         counts = {name: db.execute('SELECT count(*) FROM ' + name).fetchone()[0] for name in tables}
         problems = [
             "SELECT count(*) FROM orders o WHERE o.status='PAID' AND ((SELECT count(*) FROM transactions t WHERE t.order_id=o.id AND t.state='confirmed')<>1 OR (SELECT count(*) FROM callbacks c WHERE c.order_id=o.id)<>1)",
@@ -63,9 +64,10 @@ def validate(path):
                 "SELECT count(*) FROM historical_scans h LEFT JOIN payment_attempts a ON a.id=h.attempt_id WHERE a.id IS NULL OR a.order_id<>h.order_id OR h.cursor<h.\"from\" OR h.cursor>h.\"to\" OR h.reason='' OR h.operator=''",
             ]
         if version >= 11:
+            callback_states="'queued','sending','in_flight','delivered','exhausted','merchant_review'"+(",'canceled_refunded'" if version>=16 else "")
             problems += [
                 "SELECT count(*) FROM orders WHERE selection_changes<0 OR (status='READY' AND (next_expiry_check_at IS NULL OR next_expiry_check_at<'0002-01-01'))",
-                "SELECT count(*) FROM callbacks WHERE state NOT IN ('queued','sending','in_flight','delivered','exhausted','merchant_review') OR (state='merchant_review' AND delivered_at IS NOT NULL)",
+                "SELECT count(*) FROM callbacks WHERE state NOT IN ("+callback_states+") OR (state IN ('merchant_review','canceled_refunded') AND delivered_at IS NOT NULL)",
             ]
         if version >= 12:
             problems += [
@@ -86,6 +88,13 @@ def validate(path):
             ]
         if version >= 15:
             problems += ["SELECT count(*) FROM integration_healths WHERE discovery_pending NOT IN (0,1) OR discovery_lag_seconds<0"]
+        if version >= 16:
+            problems += [
+                "SELECT count(*) FROM callbacks c WHERE c.state='canceled_refunded' AND NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=c.order_id AND r.state='refund_recorded')",
+                "SELECT count(*) FROM cancellation_reviews r LEFT JOIN orders o ON o.id=r.order_id LEFT JOIN transactions t ON t.provider=r.provider AND t.event_id=r.event_id LEFT JOIN payment_attempts a ON a.id=t.attempt_id WHERE o.id IS NULL OR o.status NOT IN ('CANCELED','PAID') OR t.event_id IS NULL OR t.state<>'confirmed' OR t.units IS NULL OR t.units<=0 OR (t.order_id IS NOT NULL AND t.order_id<>r.order_id) OR (t.order_id IS NULL AND (a.id IS NULL OR a.order_id<>r.order_id)) OR r.state NOT IN ('open','refund_recorded')",
+                "SELECT count(*) FROM cancellation_reviews r WHERE r.state='refund_recorded' AND (r.refund_reference='' OR r.operator='' OR r.reason='' OR r.resolved_at IS NULL OR length(r.review_generation)<>32 OR NOT EXISTS(SELECT 1 FROM cancellation_review_audits a WHERE a.review_id=r.id AND a.generation=r.review_generation AND a.refund_reference=r.refund_reference))",
+                "SELECT count(*) FROM cancellation_review_audits a LEFT JOIN cancellation_reviews r ON r.id=a.review_id WHERE r.id IS NULL OR a.operator='' OR a.reason='' OR a.refund_reference='' OR length(a.generation)<>32",
+            ]
         if any(db.execute(sql).fetchone()[0] for sql in problems):
             raise ValueError('payment evidence, reservation, or recovery invariants failed')
         for (payload,) in db.execute('SELECT payload FROM settings'):
