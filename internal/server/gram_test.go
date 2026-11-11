@@ -19,7 +19,6 @@ import (
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/store"
-	"litepay/internal/worker"
 )
 
 func TestGRAMCashierAndSettings(t *testing.T) {
@@ -38,7 +37,7 @@ func TestGRAMCashierAndSettings(t *testing.T) {
 	if err = mgr.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
-	p := worker.NewPoller(mgr, st)
+	p := verifiedPoller(t, mgr, st)
 	engine, err := New(mgr, st, p)
 	if err != nil {
 		t.Fatal(err)

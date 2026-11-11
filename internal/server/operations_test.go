@@ -1,13 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"litepay/internal/config"
 	"litepay/internal/model"
 	"litepay/internal/settings"
+	"litepay/internal/sign"
 	"litepay/internal/store"
-	"litepay/internal/worker"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -58,7 +61,8 @@ func TestRequiredCancellationHeartbeatControlsReadiness(t *testing.T) {
 	if err = mgr.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
-	engine, err := New(mgr, st, worker.NewPoller(mgr, st))
+	p := verifiedPoller(t, mgr, st)
+	engine, err := New(mgr, st, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +75,7 @@ func TestRequiredCancellationHeartbeatControlsReadiness(t *testing.T) {
 	if err = st.AcknowledgeRecovery(ctx, recovery.Generation, true, health); err != nil {
 		t.Fatal(err)
 	}
+	primeScanners(t, p, mgr)
 	if w := getRequest(engine, "/readyz"); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -126,6 +131,7 @@ func TestRequiredCancellationHeartbeatControlsReadiness(t *testing.T) {
 	if err = st.AcknowledgeRecovery(ctx, recovery.Generation, true, health); err != nil {
 		t.Fatal(err)
 	}
+	primeScanners(t, p, mgr)
 	if w := getRequest(engine, "/readyz"); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -159,7 +165,8 @@ func TestMissingGatewayPreventsHealthyReadinessEvenWhenSignedHealthy(t *testing.
 	if err = mgr.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
-	engine, err := New(mgr, st, worker.NewPoller(mgr, st))
+	p := verifiedPoller(t, mgr, st)
+	engine, err := New(mgr, st, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +203,8 @@ func TestPaidConflictRemainsUnreadyAfterAcknowledgement(t *testing.T) {
 			if err = mgr.Load(ctx); err != nil {
 				t.Fatal(err)
 			}
-			engine, err := New(mgr, st, worker.NewPoller(mgr, st))
+			p := verifiedPoller(t, mgr, st)
+			engine, err := New(mgr, st, p)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -208,6 +216,7 @@ func TestPaidConflictRemainsUnreadyAfterAcknowledgement(t *testing.T) {
 			if err = st.AcknowledgeRecovery(ctx, r.Generation, true, health); err != nil {
 				t.Fatal(err)
 			}
+			primeScanners(t, p, mgr)
 			if w := getRequest(engine, "/readyz"); w.Code != 200 {
 				t.Fatal(w.Code, w.Body.String())
 			}
@@ -229,5 +238,52 @@ func TestPaidConflictRemainsUnreadyAfterAcknowledgement(t *testing.T) {
 				t.Fatal("lost acknowledged recovery")
 			}
 		})
+	}
+}
+
+func TestSignedHeartbeatCannotHideUndiscoveredSourceWork(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Server.CancelSyncRequired = true
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := st.Recovery(ctx)
+	body := map[string]any{"generation": r.Generation, "timestamp": fmt.Sprint(time.Now().Unix()), "source": "sqlite", "healthy": "true", "pending": "0", "failures": "0", "missing": "0", "conflicts": "0", "replay_complete": "true"}
+	send := func() string {
+		t.Helper()
+		body["signature"] = sign.BEpusdtSignGeneric(body, mgr.Get().BEpusdt.APIToken)
+		raw, _ := json.Marshal(body)
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/order/cancel-sync-status", bytes.NewReader(raw)))
+		return w.Body.String()
+	}
+	if result := send(); strings.Contains(result, `"status_code":200`) {
+		t.Fatal("legacy report without discovery evidence accepted", result)
+	}
+	delete(body, "signature")
+	body["discovery_pending"] = "1"
+	body["discovery_lag_seconds"] = "120"
+	if result := send(); !strings.Contains(result, `"status_code":200`) {
+		t.Fatal(result)
+	}
+	health, err := st.IntegrationHealth(ctx)
+	if err != nil || health.Healthy || health.DiscoveryPending != 1 || health.DiscoveryLagSeconds != 120 {
+		t.Fatal(health, err)
+	}
+	r, _ = st.Recovery(ctx)
+	if r.Acknowledged {
+		t.Fatal("empty local queue hid unread source backlog")
 	}
 }

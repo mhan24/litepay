@@ -32,7 +32,7 @@ def validate(path):
         if db.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('foreign key check failed')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (8, 9, 10, 11, 12, 13, 14):
+        if version not in (8, 9, 10, 11, 12, 13, 14, 15):
             raise ValueError('unsupported payment schema')
         tables = BASE_TABLES + (NEW_TABLES if version >= 9 else ())
         tables += ATTEMPT_TABLES if version >= 10 else ()
@@ -84,6 +84,8 @@ def validate(path):
                 "SELECT count(*) FROM integration_healths WHERE missing<0",
                 "SELECT count(*) FROM cancellation_intents i WHERE i.trade_no='' OR i.out_trade_no='' OR EXISTS(SELECT 1 FROM orders o WHERE o.trade_no=i.trade_no OR o.out_trade_no=i.out_trade_no)",
             ]
+        if version >= 15:
+            problems += ["SELECT count(*) FROM integration_healths WHERE discovery_pending NOT IN (0,1) OR discovery_lag_seconds<0"]
         if any(db.execute(sql).fetchone()[0] for sql in problems):
             raise ValueError('payment evidence, reservation, or recovery invariants failed')
         for (payload,) in db.execute('SELECT payload FROM settings'):

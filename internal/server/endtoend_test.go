@@ -282,6 +282,8 @@ func TestEndToEndOKXPaymentLoop(t *testing.T) {
 
 	poller := worker.NewPoller(mgr, st)
 	poller.UseTestTransports()
+	setDeposits(`{"code":"0","data":[]}`)
+	primeScanners(t, poller, mgr)
 	engine, e := New(mgr, st, poller)
 	if e != nil {
 		t.Fatal(e)
@@ -476,6 +478,8 @@ func TestEndToEndBinancePaymentLoop(t *testing.T) {
 
 	poller := worker.NewPoller(mgr, st)
 	poller.UseTestTransports()
+	payPayload = `{"code":"000000","message":"success","success":true,"data":[]}`
+	primeScanners(t, poller, mgr)
 	engine, e := New(mgr, st, poller)
 	if e != nil {
 		t.Fatal(e)

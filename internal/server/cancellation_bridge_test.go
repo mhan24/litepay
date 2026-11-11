@@ -14,7 +14,6 @@ import (
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/store"
-	"litepay/internal/worker"
 )
 
 // Exercise the shipped Python bridge against Gin and real payment invariants.
@@ -35,7 +34,7 @@ func TestPythonCancellationBridgeAgainstGateway(t *testing.T) {
 	if err = mgr.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
-	engine, err := New(mgr, st, worker.NewPoller(mgr, st))
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
 	if err != nil {
 		t.Fatal(err)
 	}

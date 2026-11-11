@@ -43,7 +43,7 @@ func TestGatewayRestoreReplaysIndependentClosedJournalBeforeAcceptingPayment(t *
 		if err := mgr.Load(ctx); err != nil {
 			t.Fatal(err)
 		}
-		p := worker.NewPoller(mgr, st)
+		p := verifiedPoller(t, mgr, st)
 		engine, err := New(mgr, st, p)
 		if err != nil {
 			t.Fatal(err)
@@ -135,6 +135,7 @@ assert s.execute('SELECT count(*) FROM epoch_receipts').fetchone()[0]==2
 	if canceled.Status != model.Canceled {
 		t.Fatal("old journal success suppressed recovery replay", canceled)
 	}
+	primeScanners(t, poller, mgr)
 	if w := getRequest(engine, "/readyz"); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}

@@ -16,7 +16,6 @@ import (
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/store"
-	"litepay/internal/worker"
 )
 
 func TestSettingsFormScopeAndSectionClear(t *testing.T) {
@@ -63,7 +62,7 @@ func TestOrderCloseAuthenticationSignaturesAndPaidProtection(t *testing.T) {
 	if err = mgr.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
-	engine, err := New(mgr, st, worker.NewPoller(mgr, st))
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
 	if err != nil {
 		t.Fatal(err)
 	}

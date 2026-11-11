@@ -329,10 +329,44 @@ class SyncTest(unittest.TestCase):
             sync.report_health(self.path,self.state,self.gateway,True)
         self.assertEqual(post.call_args[0][2]['healthy'],'false')
         self.state.execute("UPDATE gateway_epochs SET scanned=1")
+        self.state.execute("INSERT INTO discovery_health VALUES(?,0,0,0)",(self.gateway,))
         self.state.commit()
         with patch.object(sync,'signed_post',return_value={'status_code':200}) as post:
             sync.report_health(self.path,self.state,self.gateway,True)
         self.assertEqual(post.call_args[0][2]['healthy'],'true')
+
+    def test_unread_cancellations_block_health_with_an_empty_local_queue(self):
+        self.add(3)
+        self.db.executemany("INSERT INTO orders VALUES(?,'canceled',NULL,'2026-01-01',NULL)",[(1,),(2,)])
+        self.db.commit()
+        path = Path(self.tmp.name) / 'lookahead.db'
+        state = sync.journal(path)
+        now = __import__('time').time()
+        state.execute("INSERT INTO discovery(gateway,max_payment_id,next_audit) VALUES(?,?,?)",(self.gateway,3,now+1000))
+        state.execute("INSERT INTO gateway_epochs(gateway,generation,scanned) VALUES(?,?,1)",(self.gateway,'a'*32))
+        state.commit()
+        with patch.object(sync,'RECENT_ORDER_BATCH',2):
+            self.assertEqual(sync.sync_once(self.path,state,self.gateway,lambda *a:self.fail('first page has no gateway payments'),now=now),0)
+        status=sync.queue_status(state,self.gateway)
+        self.assertEqual(status['pending'],0)
+        self.assertEqual(status['failures'],0)
+        self.assertEqual(status['discovery_pending'],1)
+        self.assertGreater(status['discovery_lag_seconds'],0)
+        self.assertFalse(status['replay_complete'])
+        state.close()
+        state=sync.journal(path)
+        self.addCleanup(state.close)
+        self.assertEqual(sync.queue_status(state,self.gateway)['discovery_pending'],1)
+        with patch.object(sync,'signed_post',return_value={'status_code':200}) as post:
+            sync.report_health(self.path,state,self.gateway,True)
+        self.assertEqual(post.call_args[0][2]['healthy'],'false')
+        self.assertEqual(post.call_args[0][2]['pending'],'0')
+        self.assertEqual(post.call_args[0][2]['discovery_pending'],'1')
+        self.assertEqual(sync.sync_once(self.path,state,self.gateway,lambda *a:'closed',now=now+5),1)
+        status=sync.queue_status(state,self.gateway)
+        self.assertEqual(status['discovery_pending'],0)
+        self.assertEqual(status['discovery_lag_seconds'],0)
+        self.assertTrue(status['replay_complete'])
 
     def test_gateway_generation_replays_closed_receipts_and_survives_restart(self):
         self.add(1)

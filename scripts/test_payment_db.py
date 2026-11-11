@@ -218,5 +218,28 @@ class RecoveryDBTest(FairQueueDBTest):
         self.assertEqual(tool.drill(self.path)['drill'],'passed')
 
 
+
+
+class DiscoveryHealthDBTest(RecoveryDBTest):
+    expected_schema = 15
+
+    def setUp(self):
+        super().setUp()
+        self.db.executescript('''PRAGMA user_version=15;
+            ALTER TABLE integration_healths ADD COLUMN discovery_pending INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE integration_healths ADD COLUMN discovery_lag_seconds INTEGER NOT NULL DEFAULT 0;
+        ''')
+        self.db.commit()
+
+    def test_invalid_discovery_metrics_are_rejected(self):
+        self.db.execute("INSERT INTO integration_healths(name,pending,failures,conflicts,reported_at,missing,discovery_pending,discovery_lag_seconds) VALUES('dujiao_cancel_sync',0,0,0,1,0,2,0)")
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+        self.db.execute('UPDATE integration_healths SET discovery_pending=1,discovery_lag_seconds=300')
+        self.db.commit()
+        self.assertEqual(tool.drill(self.path)['schema'],15)
+
+
 if __name__ == '__main__':
     unittest.main()

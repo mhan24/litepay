@@ -184,6 +184,14 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 	if req.Timeout >= 120 {
 		ttl = time.Duration(req.Timeout) * time.Second
 	}
+	if h.paymentOperationsBlocked(c) {
+		h.bepusdtFail(c, "商城取消同步异常或核对未完成，暂停接单")
+		return
+	}
+	if !h.anyProviderAccepting(c, cfg, &model.Order{CurrencyLimit: req.Currencies}) {
+		h.bepusdtFail(c, "收款扫描尚未就绪，暂停接单")
+		return
+	}
 	tradeNo := generateTradeNo()
 	order, err := h.st.Create(c.Request.Context(), model.Order{SigningKeyID: cfg.BEpusdt.TokenVersion, TradeNo: tradeNo, OutTradeNo: req.OrderID, Name: strings.TrimSpace(req.Name), OriginUnits: units, NotifyURL: req.NotifyURL, ReturnURL: req.RedirectURL, ExpiresAt: time.Now().Add(ttl), CurrencyLimit: req.Currencies, Reselect: reselect})
 	if err != nil {

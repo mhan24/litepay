@@ -32,16 +32,21 @@ func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
 		h.bepusdtFail(c, "invalid source")
 		return
 	}
-	counts := make([]int64, 4)
-	for i, key := range []string{"pending", "failures", "conflicts", "missing"} {
-		counts[i], err = strconv.ParseInt(text(key), 10, 64)
-		if err != nil || counts[i] < 0 || counts[i] > 100000000 {
+	counts := make([]int64, 6)
+	for i, key := range []string{"pending", "failures", "conflicts", "missing", "discovery_pending", "discovery_lag_seconds"} {
+		value := text(key)
+		counts[i], err = strconv.ParseInt(value, 10, 64)
+		limit := int64(100000000)
+		if key == "discovery_lag_seconds" {
+			limit = 1000000000000
+		}
+		if err != nil || counts[i] < 0 || counts[i] > limit || key == "discovery_pending" && counts[i] > 1 {
 			h.bepusdtFail(c, "invalid count")
 			return
 		}
 	}
 	generation := text("generation")
-	report := model.IntegrationHealth{Generation: generation, Missing: counts[3], Name: "dujiao_cancel_sync", Source: source, ReportedAt: stamp, Healthy: text("healthy") == "true", Pending: counts[0], Failures: counts[1], Conflicts: counts[2]}
+	report := model.IntegrationHealth{DiscoveryPending: counts[4], DiscoveryLagSeconds: counts[5], Generation: generation, Missing: counts[3], Name: "dujiao_cancel_sync", Source: source, ReportedAt: stamp, Healthy: text("healthy") == "true", Pending: counts[0], Failures: counts[1], Conflicts: counts[2]}
 	if err = h.st.AcknowledgeRecovery(c.Request.Context(), generation, text("replay_complete") == "true", report); err != nil {
 		h.bepusdtFail(c, "health write failed")
 		return

@@ -16,7 +16,6 @@ import (
 	"litepay/internal/settings"
 	"litepay/internal/sign"
 	"litepay/internal/store"
-	"litepay/internal/worker"
 )
 
 func TestSignedCashierAndAdminPages(t *testing.T) {
@@ -37,7 +36,7 @@ func TestSignedCashierAndAdminPages(t *testing.T) {
 	if e = mgr.Load(context.Background()); e != nil {
 		t.Fatal(e)
 	}
-	engine, e := New(mgr, st, worker.NewPoller(mgr, st))
+	engine, e := New(mgr, st, verifiedPoller(t, mgr, st))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -119,7 +118,7 @@ func TestBEpusdtCreateRejectsInteroperabilityRange(t *testing.T) {
 	if e = mgr.Load(context.Background()); e != nil {
 		t.Fatal(e)
 	}
-	engine, e := New(mgr, st, worker.NewPoller(mgr, st))
+	engine, e := New(mgr, st, verifiedPoller(t, mgr, st))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -178,7 +177,7 @@ func TestPaymentSelectionRejectsAlignmentOverflow(t *testing.T) {
 	if e = mgr.Load(context.Background()); e != nil {
 		t.Fatal(e)
 	}
-	engine, e := New(mgr, st, worker.NewPoller(mgr, st))
+	engine, e := New(mgr, st, verifiedPoller(t, mgr, st))
 	if e != nil {
 		t.Fatal(e)
 	}

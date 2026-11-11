@@ -190,17 +190,19 @@ type SigningKey struct {
 }
 
 type IntegrationHealth struct {
-	Generation    string `gorm:"not null;default:''"`
-	Missing       int64  `gorm:"not null;default:0"`
-	Name          string `gorm:"primaryKey"`
-	Source        string
-	ReportedAt    int64
-	ReceivedAt    time.Time
-	LastSuccessAt time.Time
-	Healthy       bool
-	Pending       int64
-	Failures      int64
-	Conflicts     int64
+	DiscoveryPending    int64  `gorm:"not null;default:0"`
+	DiscoveryLagSeconds int64  `gorm:"not null;default:0"`
+	Generation          string `gorm:"not null;default:''"`
+	Missing             int64  `gorm:"not null;default:0"`
+	Name                string `gorm:"primaryKey"`
+	Source              string
+	ReportedAt          int64
+	ReceivedAt          time.Time
+	LastSuccessAt       time.Time
+	Healthy             bool
+	Pending             int64
+	Failures            int64
+	Conflicts           int64
 }
 
 type GatewayRecovery struct {

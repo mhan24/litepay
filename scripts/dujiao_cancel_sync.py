@@ -5,6 +5,7 @@ The commerce database is read-only. Only the separate retry journal is written.
 Run under the commerce DB owner; credentials remain in its existing channel config.
 """
 import argparse
+import datetime
 import hashlib
 import json
 import logging
@@ -102,6 +103,22 @@ def discover(source, state, gateway, now):
         orders = source_query(source, 'SELECT canceled_at,id FROM orders WHERE canceled_at IS NOT NULL ORDER BY canceled_at,id LIMIT ?',
                               (RECENT_ORDER_BATCH,)).fetchall()
 
+    next_stamp, next_id = (str(orders[-1][0]), orders[-1][1]) if orders else (stamp, order_id)
+    # One indexed lookahead detects unread source work even when this page contains
+    # no eligible payments. Do not COUNT or rescan the complete cancellation history.
+    unread = source_query(source, 'SELECT canceled_at FROM orders WHERE canceled_at=? AND id>? ORDER BY id LIMIT 1',
+                          (next_stamp, next_id)).fetchone() if next_stamp else None
+    if unread is None:
+        unread = source_query(source, 'SELECT canceled_at FROM orders WHERE canceled_at>? ORDER BY canceled_at,id LIMIT 1',
+                              (next_stamp,)).fetchone() if next_stamp else source_query(source, 'SELECT canceled_at FROM orders WHERE canceled_at IS NOT NULL ORDER BY canceled_at,id LIMIT 1').fetchone()
+    oldest_unread = 0
+    if unread:
+        try:
+            at = datetime.datetime.fromisoformat(str(unread[0]).replace('Z', '+00:00'))
+            oldest_unread = at.replace(tzinfo=at.tzinfo or datetime.timezone.utc).timestamp()
+        except (ValueError, OverflowError):
+            pass
+
     with state:
         for at, oid in orders:
             state.execute('INSERT OR IGNORE INTO discovery_orders VALUES(?,?,0)', (gateway, oid))
@@ -109,6 +126,8 @@ def discover(source, state, gateway, now):
             stamp, order_id = str(orders[-1][0]), orders[-1][1]
         state.execute('UPDATE discovery SET canceled_at=?,order_id=?,max_payment_id=? WHERE gateway=?',
                       (stamp, order_id, current_max, gateway))
+        state.execute('INSERT INTO discovery_health VALUES(?,?,?,?) ON CONFLICT(gateway) DO UPDATE SET pending=excluded.pending,oldest_unread_at=excluded.oldest_unread_at,checked_at=excluded.checked_at',
+                      (gateway, int(unread is not None), oldest_unread, now))
         if current_max < maximum:
             state.execute('UPDATE discovery SET audit_payment_id=0,next_audit=0 WHERE gateway=?', (gateway,))
     # Recently canceled orders expand into payment identities in bounded, resumable pages.
@@ -176,6 +195,8 @@ def journal(path):
             max_payment_id INTEGER NOT NULL DEFAULT 0,next_audit REAL NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS discovery_orders(gateway TEXT NOT NULL,order_id INTEGER NOT NULL,
             after_payment_id INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(gateway,order_id));
+        CREATE TABLE IF NOT EXISTS discovery_health(gateway TEXT PRIMARY KEY,pending INTEGER NOT NULL,
+            oldest_unread_at REAL NOT NULL,checked_at REAL NOT NULL);
     """)
     db.executescript("""
         CREATE TABLE IF NOT EXISTS gateway_epochs(gateway TEXT PRIMARY KEY,generation TEXT NOT NULL,audit_id INTEGER NOT NULL DEFAULT 0,scanned INTEGER NOT NULL DEFAULT 0);
@@ -194,8 +215,12 @@ def queue_status(state, gateway):
     pending = counts.get('queued', 0) + counts.get('retry', 0)
     pending += state.execute('SELECT count(*) FROM discovery_orders WHERE gateway=?', (gateway,)).fetchone()[0]
     epoch = state.execute('SELECT generation,scanned FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
+    discovery = state.execute('SELECT pending,oldest_unread_at FROM discovery_health WHERE gateway=?', (gateway,)).fetchone()
+    discovery_pending = discovery[0] if discovery else 1
+    lag = max(0, int(time.time()-discovery[1])) if discovery and discovery[0] and discovery[1] else 0
     return {'pending': pending, 'failures': failures, 'missing': missing, 'conflicts': conflicts,
-            'generation': epoch[0] if epoch else '', 'replay_complete': bool(epoch and epoch[1] and pending == 0 and failures == 0 and conflicts==0)}
+            'discovery_pending': discovery_pending, 'discovery_lag_seconds': lag,
+            'generation': epoch[0] if epoch else '', 'replay_complete': bool(epoch and epoch[1] and pending == 0 and failures == 0 and conflicts==0 and discovery_pending==0)}
 
 
 def replay_generation(source, state, gateway, now):
@@ -302,6 +327,7 @@ def report_health(database, state, gateway, healthy):
     body = {'source': 'postgresql' if str(database).startswith(('postgresql://', 'postgres://')) else 'sqlite',
             'timestamp': str(int(time.time())), 'healthy': 'true' if healthy and status['failures']==0 and status['conflicts']==0 and status['pending']==0 and status['replay_complete'] else 'false',
             'pending': str(status['pending']), 'failures': str(status['failures']), 'conflicts': str(status['conflicts']),
+            'discovery_pending': str(status['discovery_pending']), 'discovery_lag_seconds': str(status['discovery_lag_seconds']),
             'missing': str(status['missing']), 'generation': status['generation'], 'replay_complete': 'true' if status['replay_complete'] else 'false'}
     return signed_post(gateway, '/api/v1/order/cancel-sync-status', body, gateway_token(database, gateway))
 
@@ -352,7 +378,7 @@ def run_cycle(database, state, gateway, report=False, now=None):
         except Exception as error:
             reported=False
             logging.error('health report failed error_type=%s',type(error).__name__)
-    success=healthy and reported and status['failures']==0 and status['conflicts']==0 and status['pending']==0 and (not report or status['replay_complete'])
+    success=healthy and reported and status['failures']==0 and status['conflicts']==0 and status['pending']==0 and status['discovery_pending']==0 and (not report or status['replay_complete'])
     state.execute('CREATE TABLE IF NOT EXISTS health(id INTEGER PRIMARY KEY,last_attempt REAL,last_success REAL)')
     with state:
         state.execute('INSERT INTO health VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET last_attempt=excluded.last_attempt,last_success=CASE WHEN excluded.last_success>0 THEN excluded.last_success ELSE last_success END',(now,now if success else 0))
@@ -404,6 +430,7 @@ def main():
         with state:
             state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
             state.execute("UPDATE discovery SET canceled_at='',order_id=0,audit_payment_id=0,next_audit=0 WHERE gateway=?", (gateway,))
+            state.execute('DELETE FROM discovery_health WHERE gateway=?', (gateway,))
     if args.review_missing:
         try:
             review_missing(database,state,gateway,args.review_missing,args.reason)

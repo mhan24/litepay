@@ -97,7 +97,7 @@ func TestSignedCancellationMakesExpiredOrderIneligibleForManualRecovery(t *testi
 }
 
 func TestPaymentOperationsRequireFreshCompleteCurrentGenerationHealth(t *testing.T) {
-	for _, failure := range []string{"source", "pending", "retry", "missing", "conflict", "heartbeat", "last_success", "generation", "incomplete"} {
+	for _, failure := range []string{"source", "pending", "retry", "missing", "conflict", "discovery", "heartbeat", "last_success", "generation", "incomplete"} {
 		t.Run(failure, func(t *testing.T) {
 			s := testStore(t)
 			ctx := context.Background()
@@ -122,6 +122,8 @@ func TestPaymentOperationsRequireFreshCompleteCurrentGenerationHealth(t *testing
 				h.Missing = 1
 			case "conflict":
 				h.Conflicts = 1
+			case "discovery":
+				h.DiscoveryPending = 1
 			case "incomplete":
 				complete = false
 			}

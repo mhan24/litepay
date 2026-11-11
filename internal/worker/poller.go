@@ -28,11 +28,12 @@ type connection struct {
 
 // Each provider serializes its own clients, request budgets and account verification.
 type Poller struct {
-	cfg       *settings.Manager
-	st        *store.Store
-	mu        sync.Mutex
-	scanLocks map[string]*sync.Mutex
-	clients   map[string]*connection
+	cfg          *settings.Manager
+	st           *store.Store
+	mu           sync.Mutex
+	scanLocks    map[string]*sync.Mutex
+	clients      map[string]*connection
+	scannedScope map[string]string
 	// 每个平台下一轮补查未确认到账的偏移量，用于有界轮转。
 	pendingOffset map[string]int
 	GRAM          *gram.Monitor
@@ -41,7 +42,7 @@ type Poller struct {
 }
 
 func NewPoller(cfg *settings.Manager, st *store.Store) *Poller {
-	return &Poller{GRAM: gram.NewMonitor(), cfg: cfg, st: st, clients: map[string]*connection{}, scanLocks: map[string]*sync.Mutex{"binance": {}, "okx": {}, "ton": {}}, pendingOffset: map[string]int{}}
+	return &Poller{GRAM: gram.NewMonitor(), cfg: cfg, st: st, clients: map[string]*connection{}, scannedScope: map[string]string{}, scanLocks: map[string]*sync.Mutex{"binance": {}, "okx": {}, "ton": {}}, pendingOffset: map[string]int{}}
 }
 
 // UseTestTransports 只用于端到端测试：调度器创建的交易所客户端只访问本地模拟服务，
@@ -50,6 +51,7 @@ func (p *Poller) UseTestTransports() {
 	p.mu.Lock()
 	p.testTransports = true
 	p.clients = map[string]*connection{}
+	p.scannedScope = map[string]string{}
 	p.mu.Unlock()
 }
 func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string) (source, error) {
@@ -139,6 +141,15 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	}()
 	// Active orders and durable confirmation tasks scan frequently; idle accounts still reconcile.
 	due, err := p.st.ScanDue(ctx, provider, cfg.TON.Address)
+	if err == nil {
+		ready, readyErr := p.ProviderReady(ctx, cfg, provider)
+		if readyErr != nil {
+			return readyErr
+		}
+		if !ready {
+			due = true
+		}
+	}
 	if err != nil || !due {
 		return err
 	}
@@ -152,7 +163,11 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 			if pages, ok := cli.(interface {
 				HistoryPage(context.Context, model.TONScanCheckpoint) ([]model.Transaction, model.TONScanCheckpoint, error)
 			}); ok {
-				err = p.scanTON(ctx, cfg, pages, end)
+				var complete bool
+				complete, err = p.scanTON(ctx, cfg, pages, end)
+				if err == nil && complete {
+					p.recordScanScope(cfg, provider)
+				}
 				if err != nil {
 					save, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 					defer cancel()
@@ -177,6 +192,9 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	defer saveCancel()
 	if e := p.st.ScanResult(saveCtx, provider, end, err); e != nil {
 		return e
+	}
+	if err == nil {
+		p.recordScanScope(cfg, provider)
 	}
 	if rechecked {
 		// 补查是独立的一路：结果单独记录，不影响扫描游标与订单过期判断。
@@ -373,26 +391,27 @@ func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider st
 
 func (p *Poller) scanTON(ctx context.Context, cfg *config.Config, cli interface {
 	HistoryPage(context.Context, model.TONScanCheckpoint) ([]model.Transaction, model.TONScanCheckpoint, error)
-}, end time.Time) error {
+}, end time.Time) (bool, error) {
 	cp, err := p.st.TONCheckpoint(ctx, cfg.TON.Address)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !cp.Active {
 		start, stop, err := p.scanBounds(ctx, cfg, config.ProviderTON, end)
 		if err != nil {
-			return err
+			return false, err
 		}
 		cp = model.TONScanCheckpoint{Receiver: cfg.TON.Address, From: start, To: stop, Active: true}
 		if err = p.st.StartTONCheckpoint(ctx, cp); err != nil {
-			return err
+			return false, err
 		}
 	}
 	rows, next, err := cli.HistoryPage(ctx, cp)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return p.st.SaveTONPage(ctx, cp, next, rows)
+	err = p.st.SaveTONPage(ctx, cp, next, rows)
+	return !next.Active && err == nil, err
 }
 
 func (p *Poller) BinanceUsage() binance.Usage {

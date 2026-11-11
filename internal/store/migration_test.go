@@ -245,3 +245,65 @@ func TestVersion13RecoveryMigrationPreservesClaimsAndRequiresHandshake(t *testin
 		t.Fatal(health, err)
 	}
 }
+
+func TestSchema14AddsDiscoveryHealthAndInvalidatesUnprovenHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "schema14.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "v14-payment")
+	if _, err = s.Process(ctx, evidence(o, "v14-event"), ""); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := s.Recovery(ctx)
+	health := model.IntegrationHealth{Name: "dujiao_cancel_sync", Generation: r.Generation, Healthy: true, ReportedAt: time.Now().Unix()}
+	if err = s.AcknowledgeRecovery(ctx, r.Generation, true, health); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"discovery_pending", "discovery_lag_seconds"} {
+		if err = s.DB().Migrator().DropColumn(&model.IntegrationHealth{}, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.DB().Exec("PRAGMA user_version=14")
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	fresh, err := s.GetByTradeNo(ctx, o.TradeNo)
+	if err != nil || fresh.Status != model.Paid {
+		t.Fatal(fresh, err)
+	}
+	after, _ := s.Recovery(ctx)
+	if after.Generation != r.Generation || !after.Acknowledged {
+		t.Fatal("migration changed recovery identity", after)
+	}
+	current, err := s.IntegrationHealth(ctx)
+	if err != nil || current.Healthy || current.DiscoveryPending != 0 || current.DiscoveryLagSeconds != 0 {
+		t.Fatal(current, err)
+	}
+	if ready, e := s.PaymentOperationsReady(ctx); e != nil || ready {
+		t.Fatal("pre-probe heartbeat released admission", ready, e)
+	}
+	health.ReportedAt++
+	if err = s.AcknowledgeRecovery(ctx, r.Generation, true, health); err != nil {
+		t.Fatal(err)
+	}
+	if ready, e := s.PaymentOperationsReady(ctx); e != nil || !ready {
+		t.Fatal(ready, e)
+	}
+	var version int
+	s.DB().Raw("PRAGMA user_version").Scan(&version)
+	if version != 15 {
+		t.Fatal(version)
+	}
+	var count int64
+	s.DB().Model(&model.Callback{}).Where("order_id=?", o.ID).Count(&count)
+	if count != 1 {
+		t.Fatal(count)
+	}
+}

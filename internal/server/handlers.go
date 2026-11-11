@@ -110,6 +110,10 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		needsCurrency = true
 		provider = selectedProvider
 	}
+	if needsProvider && !h.anyProviderAccepting(c, cfg, o) || !needsProvider && (!h.providerAccepting(c, cfg, provider) || !needsCurrency && !h.orderProviderAccepting(c, cfg, o)) {
+		h.renderError(c, 503, "收款平台暂不可用", "收款扫描尚未就绪，请稍后刷新或返回商城选择其他付款平台，勿继续转账。")
+		return
+	}
 	if needsProvider {
 		uid = ""
 		note = ""
@@ -151,6 +155,10 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		!reselectRequested && cfg.ProviderEnabled(provider)
 
 	currencyOptions := currencyOptionsFor(cfg, o, provider)
+	options := providerOptions(cfg, o)
+	for i := range options {
+		options[i].Enabled = options[i].Enabled && h.providerAccepting(c, cfg, options[i].Key)
+	}
 
 	transferURL := ""
 	var paymentQR template.URL
@@ -184,7 +192,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		Status:           o.Status,
 		CreatedAt:        o.CreatedAt.Format("2006-01-02 15:04:05"),
 		ExpiredAt:        o.ExpiresAt.Format("15:04:05"),
-		Providers:        providerOptionForQuery(providerOptions(cfg, o), selectedProvider),
+		Providers:        providerOptionForQuery(options, selectedProvider),
 		CurrencyOptions:  currencyOptions,
 		CanReselect:      canReselect,
 		NeedsProvider:    needsProvider,
@@ -331,6 +339,10 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 			c.JSON(400, gin.H{"code": 1, "msg": "付款方式不可用"})
 			return
 		}
+		if !h.providerAccepting(c, cfg, provider) {
+			c.JSON(503, gin.H{"code": 1, "msg": "该平台收款扫描尚未就绪，暂不接受付款"})
+			return
+		}
 		receiver := cfg.Checkout.Binance.UID
 		if provider == config.ProviderOKX {
 			receiver = cfg.Checkout.OKX.UID
@@ -382,10 +394,11 @@ func (h *Handlers) OrderStatus(c *gin.Context) {
 		ack = cb.DeliveredAt != nil
 	}
 	phase := o.PaymentPhase(time.Now())
-	if h.paymentOperationsBlocked(c) && (o.Status == model.Pending || o.Status == model.Ready) {
+	accepting := !h.paymentOperationsBlocked(c) && time.Now().Before(o.ExpiresAt) && (o.Status == model.Pending || o.Status == model.Ready) && h.orderProviderAccepting(c, h.C(), o)
+	if !accepting && (o.Status == model.Pending || o.Status == model.Ready) {
 		phase = "settling"
 	}
-	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": !h.paymentOperationsBlocked(c) && time.Now().Before(o.ExpiresAt) && (o.Status == model.Pending || o.Status == model.Ready), "merchant_review_required": cb.State == "merchant_review"}})
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": accepting, "merchant_review_required": cb.State == "merchant_review"}})
 }
 func (h *Handlers) Health(c *gin.Context) {
 	if err := h.st.Ping(c.Request.Context()); err != nil {
@@ -395,8 +408,7 @@ func (h *Handlers) Health(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true})
 }
 
-// Ready 只在“现在确实需要扫描”时要求游标新鲜。空闲期间扫描器主动不请求交易所，
-// 游标陈旧是预期状态，此时只要该平台曾经成功查询过就算就绪。
+// Ready uses the same provider admission policy as new payment instructions.
 func (h *Handlers) Ready(c *gin.Context) {
 	ctx := c.Request.Context()
 	cfg := h.C()
@@ -417,17 +429,7 @@ func (h *Handlers) Ready(c *gin.Context) {
 		if !cfg.ProviderEnabled(provider) {
 			continue
 		}
-		cursor, err := h.st.Cursor(ctx, provider)
-		if err != nil || cursor.LastSuccess.IsZero() {
-			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
-			return
-		}
-		due, err := h.st.ScanDue(ctx, provider, cfg.TON.Address)
-		if err != nil {
-			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
-			return
-		}
-		if due && (cursor.LastError != "" || time.Since(cursor.LastSuccess) > 2*time.Minute || time.Since(cursor.ScannedUntil) > 3*time.Minute) {
+		if ready, err := h.poller.ProviderReady(ctx, cfg, provider); err != nil || !ready {
 			c.JSON(503, gin.H{"ready": false, "reason": "收款扫描尚未就绪"})
 			return
 		}
