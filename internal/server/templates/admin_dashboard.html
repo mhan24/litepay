@@ -12,6 +12,7 @@
   {{template "admin_nav" .}}
   <main class="shell">
     {{template "admin_flash" .}}
+    {{if .CancelWarning}}<p class="banner" role="alert">商城取消同步异常。{{if .CancelRequired}}已暂停新接单、付款指令和自动商户通知；到账扫描继续运行。{{end}}请检查同步服务并核对已支付冲突（{{.CancelHealth.Conflicts}} 笔）。</p>{{end}}
     {{if or .ExhaustedCallbacks .ReviewConfirmations .MerchantReviewCallbacks}}<p class="banner" role="alert">{{.ExhaustedCallbacks}} 笔商城通知重试已耗尽；{{.ReviewConfirmations}} 笔到账确认已转人工核对；{{.MerchantReviewCallbacks}} 笔超时后到账需核对商城状态。请按订单号检查通知和到账证据。</p>{{end}}
     <header class="pagehead">
       <h1>{{.Base.Title}}</h1>
