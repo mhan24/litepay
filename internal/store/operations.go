@@ -28,7 +28,7 @@ func (s *Store) QueueStats(ctx context.Context) (QueueStats, error) {
 	if err != nil {
 		return out, err
 	}
-	if err := db.Model(&model.CancellationReview{}).Where("state<>? OR review_generation<>(SELECT generation FROM gateway_recoveries WHERE id=1)", "refund_recorded").Count(&out.CancellationReviewWaiting).Error; err != nil {
+	if err := db.Raw(`SELECT count(*) FROM (` + cancellationReviewQueueSQL + `)`).Scan(&out.CancellationReviewWaiting).Error; err != nil {
 		return out, err
 	}
 	if err = db.Model(&model.Callback{}).Where("state='in_flight' AND delivered_at IS NULL").Count(&out.CallbackInFlight).Error; err != nil {

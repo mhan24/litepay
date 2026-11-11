@@ -298,7 +298,7 @@ func TestSchema14AddsDiscoveryHealthAndInvalidatesUnprovenHeartbeat(t *testing.T
 	}
 	var version int
 	s.DB().Raw("PRAGMA user_version").Scan(&version)
-	if version != 16 {
+	if version != 17 {
 		t.Fatal(version)
 	}
 	var count int64
@@ -349,5 +349,64 @@ func TestSchema15BackfillsCanceledReceiptReviewWithoutClaimingFunds(t *testing.T
 	s.DB().Model(&model.Callback{}).Count(&callbacks)
 	if callbacks != 0 {
 		t.Fatal("migration manufactured delivery")
+	}
+}
+
+func TestSchema16BackfillsAdditionalCancellationReceiptAndPreservesRefundAudit(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "schema16.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "v16-extra-cancel")
+	first, second := evidence(o, "v16-A"), evidence(o, "v16-B")
+	for _, e := range []model.Transaction{first, second} {
+		if _, err = s.Process(ctx, e, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.CancelReference(ctx, o.TradeNo, o.OutTradeNo)
+	if err = s.RecordCancellationRefund(ctx, o.TradeNo, first.Provider, first.EventID, "operator", "existing-refund-A", "original actual refund"); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce schema 16's omission and premature terminal callback.
+	if err = s.DB().Where("event_id=?", second.EventID).Delete(&model.CancellationReview{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.DB().Model(&model.Callback{}).Where("order_id=?", o.ID).Update("state", "canceled_refunded")
+	recovery, _ := s.Recovery(ctx)
+	s.DB().Exec("PRAGMA user_version=16")
+	s.Close()
+	for i := 0; i < 2; i++ {
+		s, err = Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary, e := s.CancellationReviewSummary(ctx, o.ID)
+		if e != nil || summary.Total != 2 || summary.Pending != 1 || summary.Current() || summary.Generation != recovery.Generation {
+			t.Fatal(summary, e)
+		}
+		var audits int64
+		s.DB().Model(&model.CancellationReviewAudit{}).Count(&audits)
+		if audits != 1 {
+			t.Fatal("migration changed actual refund audit", audits)
+		}
+		var cb model.Callback
+		s.DB().First(&cb, "order_id=?", o.ID)
+		if cb.State != "merchant_review" {
+			t.Fatal(cb)
+		}
+		var claim model.Transaction
+		s.DB().First(&claim, "provider=? AND event_id=?", first.Provider, first.EventID)
+		if claim.OrderID == nil || *claim.OrderID != o.ID {
+			t.Fatal("original unique claim lost", claim)
+		}
+		var version int
+		s.DB().Raw("PRAGMA user_version").Scan(&version)
+		if version != 17 {
+			t.Fatal(version)
+		}
+		s.Close()
 	}
 }

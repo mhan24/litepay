@@ -65,7 +65,7 @@ type Slot struct {
 // RawAmount keeps the exact original amount text of records rejected for amount reasons
 // (invalid_amount / conflicting_amount), so manual reconciliation never depends on rounding.
 type Transaction struct {
-	AttemptID        *uint
+	AttemptID        *uint `gorm:"index"`
 	MasterchainSeqno int64
 	LogicalTime      string
 	Provider         string `gorm:"primaryKey"`

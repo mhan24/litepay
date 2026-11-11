@@ -121,3 +121,108 @@ func TestCancellationRefundReviewRequiresAdminCSRFAndFreshSignedStatus(t *testin
 		t.Fatal("old-generation refund review accepted", w.Body.String())
 	}
 }
+
+func TestPaidCancellationStatusTracksEachRefundAndRecoveryGeneration(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Password = "local-refund-status"
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.Create(ctx, model.Order{TradeNo: "paid-refunds", OutTradeNo: "merchant-paid-refunds", OriginUnits: 10000000, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Select(ctx, "paid-refunds", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"payment-A", "payment-B"} {
+		if _, err = st.Process(ctx, model.Transaction{Provider: "binance", EventID: id, Receiver: "receiver", Currency: "USDT", Units: o.PayUnits, OccurredAt: time.Now(), State: model.Confirmed}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertStatus := func(want string, current bool) {
+		t.Helper()
+		w := getRequest(engine, "/api/order/status?order_id="+o.TradeNo)
+		var response struct {
+			Data struct {
+				Status    string `json:"status"`
+				Phase     string `json:"payment_phase"`
+				Review    string `json:"cancellation_review_status"`
+				Current   bool   `json:"refund_review_generation_current"`
+				Accepting bool   `json:"accepting_payment"`
+			}
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String(), err)
+		}
+		if response.Data.Status != model.Paid || response.Data.Phase != "paid" || response.Data.Review != want || response.Data.Current != current || response.Data.Accepting {
+			t.Fatal(response, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "private-refund") || strings.Contains(w.Body.String(), "review_generation\"") {
+			t.Fatal("public status leaked private data", w.Body.String())
+		}
+		query := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "timestamp": fmt.Sprint(time.Now().Unix())}
+		query["signature"] = sign.BEpusdtSignGeneric(query, mgr.Get().BEpusdt.APIToken)
+		raw, _ := json.Marshal(query)
+		signed := httptest.NewRecorder()
+		engine.ServeHTTP(signed, httptest.NewRequest("POST", "/api/v1/order/cancellation-review", bytes.NewReader(raw)))
+		if !strings.Contains(signed.Body.String(), fmt.Sprintf(`"refund_recorded":%t`, current)) {
+			t.Fatal("signed and public status disagree", signed.Body.String())
+		}
+	}
+	assertStatus("none", false)
+	if _, err = st.CancelReference(ctx, o.TradeNo, o.OutTradeNo); err == nil {
+		t.Fatal("paid order canceled")
+	}
+	assertStatus("pending", false)
+	refund := func(id string) {
+		t.Helper()
+		if err := st.RecordCancellationRefund(ctx, o.TradeNo, "binance", id, "operator", "private-refund-"+id, "actual external refund verified"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refund("payment-A")
+	assertStatus("pending", false)
+	if w := getRequest(engine, "/pay/"+o.TradeNo); strings.Contains(w.Body.String(), "<h1>退款凭证已登记</h1>") || !strings.Contains(w.Body.String(), "商城已取消，到账核对中") {
+		t.Fatal("partial refund shown complete", w.Body.String())
+	}
+	refund("payment-B")
+	assertStatus("refund_recorded", true)
+	if w := getRequest(engine, "/pay/"+o.TradeNo); !strings.Contains(w.Body.String(), "<h1>退款凭证已登记</h1>") || strings.Contains(w.Body.String(), "private-refund") {
+		t.Fatal(w.Body.String())
+	}
+	if err = st.BeginRecovery(ctx, "restored payment database"); err != nil {
+		t.Fatal(err)
+	}
+	assertStatus("recheck_required", false)
+	if w := getRequest(engine, "/pay/"+o.TradeNo); !strings.Contains(w.Body.String(), "退款记录待重新核对") || strings.Contains(w.Body.String(), "<h1>退款凭证已登记</h1>") {
+		t.Fatal("result page trusted stale generation", w.Body.String())
+	}
+	cookie, _, err := newAdminAuth(mgr.Get()).issue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "/admin/orders/"+o.TradeNo, nil)
+	r.AddCookie(&http.Cookie{Name: adminCookieName, Value: cookie})
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "历史退款凭证，待重新核对") || !strings.Contains(w.Body.String(), "payment-B") {
+		t.Fatal("admin disagrees with result status", w.Code, w.Body.String())
+	}
+	refund("payment-A")
+	assertStatus("recheck_required", false)
+	refund("payment-B")
+	assertStatus("refund_recorded", true)
+}

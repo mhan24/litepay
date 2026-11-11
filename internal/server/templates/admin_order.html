@@ -40,11 +40,13 @@
       </div>
     </section>
 
-    {{if .CancellationReviews}}<section class="card" style="margin-top:16px"><div class="card-b">
+    {{if or .CancellationReviews .UncoveredCancellationReceipts}}<section class="card" style="margin-top:16px"><div class="card-b">
       <h2>商城取消后的到账核对</h2>
+      {{if .RefundReviewGenerationCurrent}}<p class="hint">全部已关联到账的退款凭证已在当前恢复代际核对。</p>{{else}}<p class="banner" role="alert">退款核对尚未完成。请逐笔处理待办；历史退款凭证需要在当前恢复代际重新核对，请勿重复退款。</p>{{end}}
+      {{if .UncoveredCancellationReceipts}}<p class="banner" role="alert">另有 {{.UncoveredCancellationReceipts}} 笔关联证据尚不能唯一确认归属，请在下方交易证据中人工核查。它们不会被视为已退款。</p>{{end}}
       <p class="hint">请先核对商城取消状态、交付记录和原始到账。请在原始平台流水核实付款方账户，完成实际退款后在此登记凭证。资金核销历史保留，不重新通知交付。</p>
-      {{range .CancellationReviews}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.EventID}} · 实际到账 {{.Amount}} {{.Currency}} · 收款账户 {{.Receiver}} · 证据 {{if eq .EvidenceState "confirmed"}}已确认{{else}}{{.EvidenceState}}{{end}} · {{if eq .State "refund_recorded"}}已登记退款 · {{.RefundReference}} · {{.Operator}}{{else}}等待人工核对与退款{{end}}</p>
-      {{if or (ne .State "refund_recorded") (ne .ReviewGeneration $.ReviewGeneration)}}
+      {{range .CancellationReviews}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.EventID}} · 实际到账 {{.Amount}} {{.Currency}} · 收款账户 {{.Receiver}} · 证据 {{if eq .EvidenceState "confirmed"}}已确认{{else}}{{.EvidenceState}}{{end}} · {{if eq .State "refund_recorded"}}{{if not .Current}}历史退款凭证，待重新核对 ·{{else}}已登记退款 ·{{end}} {{.RefundReference}} · {{.Operator}}{{else}}等待人工核对与退款{{end}}</p>
+      {{if not .Current}}
       <form method="post" action="{{adminPath}}/orders/{{$.Order.TradeNo}}/refund-record">
         <input type="hidden" name="csrf" value="{{$.Base.CSRF}}"><input type="hidden" name="provider" value="{{.Provider}}"><input type="hidden" name="event_id" value="{{.EventID}}">
         <div class="form-grid">

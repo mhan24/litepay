@@ -200,3 +200,169 @@ func TestAdditionalDepositAfterCancellationRequiresItsOwnRefundAudit(t *testing.
 		t.Fatal(n)
 	}
 }
+
+func TestMerchantCancellationCollectsAllEarlierDepositsBeforeRefundCompletes(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "cancel-two-earlier-deposits")
+	first, second := evidence(o, "earlier-A"), evidence(o, "earlier-B")
+	for i, e := range []model.Transaction{first, second} {
+		want := []string{"paid", "additional_payment"}[i]
+		if result, err := s.Process(ctx, e, ""); err != nil || result != want {
+			t.Fatal(result, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := s.CancelReference(ctx, o.TradeNo, o.OutTradeNo); err == nil {
+			t.Fatal("paid order was canceled")
+		}
+	}
+	var reviews int64
+	if err := s.DB().Model(&model.CancellationReview{}).Where("order_id=?", o.ID).Count(&reviews).Error; err != nil || reviews != 2 {
+		t.Fatal("earlier additional receipt missing or duplicated", reviews, err)
+	}
+	if err := s.RecordCancellationRefund(ctx, o.TradeNo, first.Provider, first.EventID, "operator", "refund-A", "verified actual refund A"); err != nil {
+		t.Fatal(err)
+	}
+	if summary, err := s.CancellationReviewSummary(ctx, o.ID); err != nil || summary.Current() || summary.Status() != "pending" || summary.Pending != 1 {
+		t.Fatal("A refund prematurely completed B", summary, err)
+	}
+	if reviewed, err := s.CancellationRefundReviewed(ctx, o.TradeNo, o.OutTradeNo); err != nil || reviewed {
+		t.Fatal(reviewed, err)
+	}
+	var cb model.Callback
+	s.DB().First(&cb, "order_id=?", o.ID)
+	if cb.State != "merchant_review" {
+		t.Fatal("partial refund terminated notification hold", cb)
+	}
+	if _, _, err := s.ReserveCallback(ctx, 5, 15); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatal("partial refund allowed callback", err)
+	}
+	stats, err := s.QueueStats(ctx)
+	if err != nil || stats.CancellationReviewWaiting != 1 {
+		t.Fatal(stats, err)
+	}
+	if err = s.RecordCancellationRefund(ctx, o.TradeNo, second.Provider, second.EventID, "operator", "refund-B", "verified actual refund B"); err != nil {
+		t.Fatal(err)
+	}
+	if summary, err := s.CancellationReviewSummary(ctx, o.ID); err != nil || !summary.Current() || summary.Status() != "refund_recorded" {
+		t.Fatal(summary, err)
+	}
+	s.DB().First(&cb, "order_id=?", o.ID)
+	if cb.State != "canceled_refunded" {
+		t.Fatal(cb)
+	}
+	var stored model.Transaction
+	s.DB().First(&stored, "provider=? AND event_id=?", second.Provider, second.EventID)
+	if stored.OrderID != nil || stored.AttemptID == nil || stored.Reason != "additional_payment" || stored.State != model.Confirmed {
+		t.Fatal("extra payment evidence mutated", stored)
+	}
+	fresh, _ := s.GetByTradeNo(ctx, o.TradeNo)
+	if fresh.Status != model.Paid {
+		t.Fatal("original paid status lost", fresh)
+	}
+}
+
+func TestCancellationCannotTreatAmbiguousAdditionalReceiptAsRefunded(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "cancel-uncertain-extra")
+	first, extra := evidence(o, "unique-A"), evidence(o, "uncertain-B")
+	for _, e := range []model.Transaction{first, extra} {
+		if _, err := s.Process(ctx, e, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A separately imported instruction makes the extra receipt's ownership uncertain.
+	other := readyOrder(t, s, "other-uncertain-extra")
+	var a model.PaymentAttempt
+	s.DB().Where("order_id=?", o.ID).First(&a)
+	a.ID = 0
+	a.OrderID = other.ID
+	if err := s.DB().Create(&a).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CancelReference(ctx, o.TradeNo, o.OutTradeNo); err == nil {
+		t.Fatal("paid order was canceled")
+	}
+	if err := s.RecordCancellationRefund(ctx, o.TradeNo, first.Provider, first.EventID, "operator", "refund-A", "claimed payment refunded"); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := s.CancellationReviewSummary(ctx, o.ID)
+	if err != nil || summary.Current() || summary.Uncovered != 1 || summary.Status() != "pending" {
+		t.Fatal("uncertain receipt silently considered refunded", summary, err)
+	}
+	stats, statsErr := s.QueueStats(ctx)
+	queue, queueErr := s.CancellationReviewQueue(ctx)
+	if statsErr != nil || queueErr != nil || stats.CancellationReviewWaiting != 1 || len(queue) != 1 || queue[0].EventID != extra.EventID {
+		t.Fatal("uncertain receipt disappeared from operations", stats, queue, statsErr, queueErr)
+	}
+	if err := s.RecordCancellationRefund(ctx, o.TradeNo, extra.Provider, extra.EventID, "operator", "fake", "uncertain"); err == nil {
+		t.Fatal("uncertain evidence approved")
+	}
+}
+
+func TestEveryRefundReviewRequiresItsOwnAuditInCurrentGeneration(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "cancel-every-audit")
+	first, second := evidence(o, "audit-A"), evidence(o, "audit-B")
+	for _, e := range []model.Transaction{first, second} {
+		if _, err := s.Process(ctx, e, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.CancelReference(ctx, o.TradeNo, o.OutTradeNo)
+	for _, e := range []model.Transaction{first, second} {
+		if err := s.RecordCancellationRefund(ctx, o.TradeNo, e.Provider, e.EventID, "operator", "refund-"+e.EventID, "actual refund checked"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.DB().Where("review_id IN (SELECT id FROM cancellation_reviews WHERE event_id=?)", second.EventID).Delete(&model.CancellationReviewAudit{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reviewed, err := s.CancellationRefundReviewed(ctx, o.TradeNo, o.OutTradeNo); err != nil || reviewed {
+		t.Fatal("one audit incorrectly validated both receipts", reviewed, err)
+	}
+	if summary, err := s.CancellationReviewSummary(ctx, o.ID); err != nil || summary.Status() != "recheck_required" || summary.Stale != 1 {
+		t.Fatal(summary, err)
+	}
+	if err := s.RecordCancellationRefund(ctx, o.TradeNo, second.Provider, second.EventID, "operator", "refund-"+second.EventID, "existing actual refund rechecked"); err != nil {
+		t.Fatal(err)
+	}
+	if reviewed, err := s.CancellationRefundReviewed(ctx, o.TradeNo, o.OutTradeNo); err != nil || !reviewed {
+		t.Fatal(reviewed, err)
+	}
+}
+
+func TestCancellationCollectsCrossPlatformHistoricalAttemptWithoutOtherOrderFunds(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	old := readyOrder(t, s, "cancel-cross-platform")
+	allowSelectionFixture(t, s, old.TradeNo)
+	newChoice, err := s.Select(ctx, old.TradeNo, "okx", "USDC", "other-receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := readyOrder(t, s, "not-canceled-order")
+	for _, e := range []model.Transaction{evidence(old, "binance-A"), evidence(newChoice, "okx-B"), evidence(other, "unrelated-C")} {
+		if _, err = s.Process(ctx, e, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = s.CancelReference(ctx, old.TradeNo, old.OutTradeNo); err == nil {
+		t.Fatal("paid cancellation accepted")
+	}
+	var rows []model.CancellationReview
+	if err = s.DB().Order("id").Find(&rows).Error; err != nil || len(rows) != 2 {
+		t.Fatal(rows, err)
+	}
+	for _, r := range rows {
+		if r.OrderID != old.ID || r.EventID == "unrelated-C" {
+			t.Fatal("other order included in refund review", r)
+		}
+	}
+	if rows[0].Provider == rows[1].Provider {
+		t.Fatal("historical platform omitted", rows)
+	}
+}

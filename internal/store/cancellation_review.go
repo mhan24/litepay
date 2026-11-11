@@ -28,7 +28,7 @@ func ensureCancellationReview(db *gorm.DB, o model.Order, t model.Transaction) e
 		return errors.New("取消到账核对记录归属冲突")
 	}
 	// Existing callbacks are held per order; a request already on the wire cannot be recalled.
-	return db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL AND state NOT IN ('in_flight','canceled_refunded')", o.ID).Update("state", "merchant_review").Error
+	return refreshCancellationCallback(db, o.ID)
 }
 
 func (s *Store) RecordCancellationRefund(ctx context.Context, tradeNo, provider, eventID, operator, reference, reason string) error {
@@ -64,8 +64,15 @@ func (s *Store) RecordCancellationRefund(ctx context.Context, tradeNo, provider,
 			if err := db.First(&a, *t.AttemptID).Error; err != nil {
 				return err
 			}
-			if a.OrderID != o.ID || a.Provider != t.Provider || a.Receiver != t.Receiver || a.Currency != t.Currency || a.Units != t.Units {
+			if a.OrderID != o.ID || a.Provider != t.Provider || a.Receiver != t.Receiver || a.Currency != t.Currency || a.Units != t.Units || t.OccurredAt.Before(a.SelectedAt) || t.OccurredAt.After(a.ExpiresAt) {
 				return errors.New("付款尝试不匹配")
+			}
+			_, matched, _, err := matchAttempt(db, t, false)
+			if err != nil {
+				return err
+			}
+			if matched.ID != o.ID {
+				return errors.New("额外到账归属尚不唯一，请人工核查")
 			}
 		}
 		var sending int64
@@ -79,34 +86,178 @@ func (s *Store) RecordCancellationRefund(ctx context.Context, tradeNo, provider,
 		if err := db.First(&r, 1).Error; err != nil {
 			return err
 		}
-		if review.State == "refund_recorded" && review.ReviewGeneration == r.Generation {
+		current, err := cancellationReviewCurrent(db, review.ID)
+		if err != nil {
+			return err
+		}
+		if current {
 			return errors.New("该笔退款已登记，不能重复登记")
 		}
 		audit := model.CancellationReviewAudit{ReviewID: review.ID, Generation: r.Generation, Operator: operator, Reason: reason, RefundReference: reference}
 		if err := db.Create(&audit).Error; err != nil {
 			return err
 		}
-		if err := db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL", o.ID).Update("state", "canceled_refunded").Error; err != nil {
+		if err := db.Model(&review).Updates(map[string]any{"state": "refund_recorded", "review_generation": r.Generation, "operator": operator, "reason": reason, "refund_reference": reference, "resolved_at": time.Now()}).Error; err != nil {
 			return err
 		}
-		return db.Model(&review).Updates(map[string]any{"state": "refund_recorded", "review_generation": r.Generation, "operator": operator, "reason": reason, "refund_reference": reference, "resolved_at": time.Now()}).Error
+		if err := db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL AND state='in_flight' AND lease_until<=?", o.ID, time.Now()).Update("state", "merchant_review").Error; err != nil {
+			return err
+		}
+		return refreshCancellationCallback(db, o.ID)
 	})
 }
 
+// All consumers use the same per-receipt audit predicate and recovery snapshot.
+const currentCancellationReviewSQL = `r.state='refund_recorded' AND r.review_generation=g.generation AND r.refund_reference<>''
+ AND EXISTS(SELECT 1 FROM cancellation_review_audits a WHERE a.review_id=r.id AND a.generation=g.generation AND a.refund_reference=r.refund_reference)
+ AND EXISTS(SELECT 1 FROM transactions t WHERE t.provider=r.provider AND t.event_id=r.event_id AND t.state='confirmed' AND t.units>0 AND (t.provider<>'ton' OR t.masterchain_seqno>0)
+ AND (t.order_id=r.order_id OR (t.order_id IS NULL AND EXISTS(SELECT 1 FROM payment_attempts p WHERE p.id=t.attempt_id AND p.order_id=r.order_id AND p.provider=t.provider AND p.receiver=t.receiver AND p.currency=t.currency AND p.units=t.units AND p.selected_at<=t.occurred_at AND p.expires_at>=t.occurred_at)
+ AND NOT EXISTS(SELECT 1 FROM payment_attempts p WHERE p.order_id<>r.order_id AND p.provider=t.provider AND p.receiver=t.receiver AND p.currency=t.currency AND p.units=t.units AND p.selected_at<=t.occurred_at AND p.expires_at>=t.occurred_at))))`
+
+func cancellationReviewCurrent(db *gorm.DB, reviewID uint) (bool, error) {
+	var current bool
+	err := db.Raw(`SELECT EXISTS(SELECT 1 FROM cancellation_reviews r CROSS JOIN gateway_recoveries g WHERE g.id=1 AND r.id=? AND `+currentCancellationReviewSQL+`)`, reviewID).Scan(&current).Error
+	return current, err
+}
+
+func (s *Store) CancellationReviewCurrent(ctx context.Context, reviewID uint) (bool, error) {
+	return cancellationReviewCurrent(s.db.WithContext(ctx), reviewID)
+}
+
+type CancellationReviewSummary struct {
+	Generation string
+	Total      int64
+	Pending    int64
+	Stale      int64
+	Uncovered  int64
+}
+
+func (r CancellationReviewSummary) Present() bool { return r.Total > 0 || r.Uncovered > 0 }
+func (r CancellationReviewSummary) Current() bool {
+	return r.Total > 0 && r.Pending == 0 && r.Stale == 0 && r.Uncovered == 0
+}
+func (r CancellationReviewSummary) Status() string {
+	switch {
+	case !r.Present():
+		return "none"
+	case r.Pending > 0 || r.Uncovered > 0:
+		return "pending"
+	case r.Stale > 0:
+		return "recheck_required"
+	default:
+		return "refund_recorded"
+	}
+}
+
+const uncoveredCancellationReceiptSQL = `t.order_id IS NULL AND t.state IN ('confirmed','ambiguous')
+ AND (o.status='CANCELED' OR EXISTS(SELECT 1 FROM cancellation_reviews cr WHERE cr.order_id=o.id))
+ AND NOT EXISTS(SELECT 1 FROM cancellation_reviews cr WHERE cr.provider=t.provider AND cr.event_id=t.event_id AND cr.order_id=o.id)`
+
+const cancellationReviewQueueSQL = `SELECT o.trade_no,r.provider,r.event_id FROM cancellation_reviews r JOIN orders o ON o.id=r.order_id CROSS JOIN gateway_recoveries g WHERE g.id=1 AND NOT (` + currentCancellationReviewSQL + `)
+ UNION ALL SELECT o.trade_no,t.provider,t.event_id FROM transactions t JOIN payment_attempts p ON p.id=t.attempt_id JOIN orders o ON o.id=p.order_id WHERE ` + uncoveredCancellationReceiptSQL + `
+`
+
+type CancellationReviewQueueItem struct {
+	TradeNo  string
+	Provider string
+	EventID  string
+}
+
+func (s *Store) CancellationReviewQueue(ctx context.Context) ([]CancellationReviewQueueItem, error) {
+	var rows []CancellationReviewQueueItem
+	err := s.db.WithContext(ctx).Raw(`SELECT * FROM (` + cancellationReviewQueueSQL + `) ORDER BY trade_no,provider,event_id LIMIT 10`).Scan(&rows).Error
+	return rows, err
+}
+
+func cancellationReviewSummary(db *gorm.DB, where string, args ...any) (CancellationReviewSummary, error) {
+	var result CancellationReviewSummary
+	query := db.Raw(`SELECT g.generation,
+ (SELECT count(*) FROM cancellation_reviews r WHERE r.order_id=o.id) total,
+ (SELECT count(*) FROM cancellation_reviews r WHERE r.order_id=o.id AND r.state<>'refund_recorded') pending,
+ (SELECT count(*) FROM cancellation_reviews r WHERE r.order_id=o.id AND r.state='refund_recorded' AND NOT (`+currentCancellationReviewSQL+`)) stale,
+ (SELECT count(*) FROM transactions t JOIN payment_attempts p ON p.id=t.attempt_id WHERE p.order_id=o.id AND `+uncoveredCancellationReceiptSQL+`) uncovered
+ FROM orders o CROSS JOIN gateway_recoveries g WHERE g.id=1 AND `+where, args...).Scan(&result)
+	if query.Error != nil {
+		return result, query.Error
+	}
+	if query.RowsAffected != 1 {
+		return result, gorm.ErrRecordNotFound
+	}
+	return result, nil
+}
+
+func (s *Store) CancellationReviewSummary(ctx context.Context, orderID uint) (CancellationReviewSummary, error) {
+	return cancellationReviewSummary(s.db.WithContext(ctx), "o.id=?", orderID)
+}
+
+func refreshCancellationCallback(db *gorm.DB, orderID uint) error {
+	summary, err := cancellationReviewSummary(db, "o.id=?", orderID)
+	if err != nil {
+		return err
+	}
+	state := "merchant_review"
+	if summary.Current() {
+		state = "canceled_refunded"
+	}
+	return db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL AND state<>'in_flight'", orderID).Update("state", state).Error
+}
+
 func (s *Store) CancellationRefundReviewStatus(ctx context.Context, tradeNo, outTradeNo string) (bool, string, error) {
-	var result struct {
-		Generation string
-		Reviewed   bool
+	summary, err := cancellationReviewSummary(s.db.WithContext(ctx), "o.trade_no=? AND o.out_trade_no=?", tradeNo, outTradeNo)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// A signed query for a mismatched identity is never evidence of a completed refund.
+		r, recoveryErr := s.Recovery(ctx)
+		return false, r.Generation, recoveryErr
 	}
-	query := s.db.WithContext(ctx).Raw(`SELECT g.generation,EXISTS(SELECT 1 FROM cancellation_reviews r JOIN orders o ON o.id=r.order_id JOIN transactions t ON t.provider=r.provider AND t.event_id=r.event_id WHERE t.state='confirmed' AND t.units>0 AND o.trade_no=? AND o.out_trade_no=? AND r.state='refund_recorded' AND r.review_generation=g.generation AND r.refund_reference<>'' AND EXISTS(SELECT 1 FROM cancellation_review_audits a WHERE a.review_id=r.id AND a.generation=r.review_generation AND a.refund_reference=r.refund_reference) AND NOT EXISTS(SELECT 1 FROM cancellation_reviews u WHERE u.order_id=o.id AND (u.state<>'refund_recorded' OR u.review_generation<>g.generation))) reviewed FROM gateway_recoveries g WHERE g.id=1`, tradeNo, outTradeNo).Scan(&result)
-	if query.Error == nil && query.RowsAffected != 1 {
-		return false, "", gorm.ErrRecordNotFound
-	}
-	return result.Reviewed, result.Generation, query.Error
+	return summary.Current(), summary.Generation, err
 }
 func (s *Store) CancellationRefundReviewed(ctx context.Context, tradeNo, outTradeNo string) (bool, error) {
 	reviewed, _, err := s.CancellationRefundReviewStatus(ctx, tradeNo, outTradeNo)
 	return reviewed, err
+}
+
+// The saved attempt identifies additional receipts discovered before merchant cancellation.
+// Recheck the full window and unique order match; uncertain evidence stays unrefunded.
+func collectCancellationReviews(db *gorm.DB, o model.Order, claimed model.Transaction) error {
+	if err := ensureCancellationReview(db, o, claimed); err != nil {
+		return err
+	}
+	return collectAdditionalCancellationReviews(db, o)
+}
+
+func collectAdditionalCancellationReviews(db *gorm.DB, o model.Order) error {
+	var rows []model.Transaction
+	if err := db.Where("order_id IS NULL AND state=? AND attempt_id IN (SELECT id FROM payment_attempts WHERE order_id=?)", model.Confirmed, o.ID).Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, t := range rows {
+		_, matched, reason, err := matchAttempt(db, t, false)
+		if err != nil {
+			return err
+		}
+		if matched.ID != o.ID || (reason != "additional_payment" && !(reason == "order_closed" && o.Status == model.Canceled)) {
+			continue
+		}
+		if err := ensureCancellationReview(db, o, t); err != nil {
+			return err
+		}
+	}
+	return refreshCancellationCallback(db, o.ID)
+}
+
+func backfillAdditionalCancellationReviews(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var orders []model.Order
+		if err := tx.Where("status IN ? AND EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=orders.id)", []string{model.Paid, model.Canceled}).Find(&orders).Error; err != nil {
+			return err
+		}
+		for _, o := range orders {
+			if err := collectAdditionalCancellationReviews(tx, o); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) CallbackCanSend(ctx context.Context, task model.Callback) (bool, error) {
@@ -141,12 +292,6 @@ func backfillCancellationReviews(db *gorm.DB) error {
 }
 
 func (s *Store) CancellationReviewState(ctx context.Context, orderID uint) (bool, bool, error) {
-	var n, open int64
-	if err := s.db.WithContext(ctx).Model(&model.CancellationReview{}).Where("order_id=?", orderID).Count(&n).Error; err != nil {
-		return false, false, err
-	}
-	if err := s.db.WithContext(ctx).Model(&model.CancellationReview{}).Where("order_id=? AND state<>'refund_recorded'", orderID).Count(&open).Error; err != nil {
-		return false, false, err
-	}
-	return n > 0, n > 0 && open == 0, nil
+	summary, err := s.CancellationReviewSummary(ctx, orderID)
+	return summary.Present(), summary.Current(), err
 }

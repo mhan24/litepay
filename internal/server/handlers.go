@@ -45,6 +45,7 @@ type CashierData struct {
 	ReviewAmounts      []string
 	CancellationReview bool
 	RefundRecorded     bool
+	RefundRecheck      bool
 	NotifyStatus       string
 	SettlementPending  bool
 	MerchantReview     bool
@@ -380,14 +381,14 @@ func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 	if err := h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil && cb.DeliveredAt != nil {
 		ack = "SUCCESS"
 	}
-	review, refunded, reviewErr := h.st.CancellationReviewState(c.Request.Context(), o.ID)
+	review, reviewErr := h.st.CancellationReviewSummary(c.Request.Context(), o.ID)
 	if reviewErr != nil {
 		h.renderError(c, 503, "暂时无法查询到账核对记录", "请稍后刷新或联系商户客服。")
 		return
 	}
 	var receipts []model.Transaction
 	var reviewAmounts []string
-	if review {
+	if review.Present() {
 		if err := h.st.DB().WithContext(c.Request.Context()).Table("transactions t").Select("t.*").Joins("JOIN cancellation_reviews r ON r.provider=t.provider AND r.event_id=t.event_id").Where("r.order_id=? AND t.state=?", o.ID, model.Confirmed).Order("r.id").Find(&receipts).Error; err != nil {
 			h.renderError(c, 503, "暂时无法查询到账核对记录", "请稍后刷新或联系商户客服。")
 			return
@@ -397,7 +398,7 @@ func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 		}
 	}
 
-	c.HTML(200, "result.html", CashierData{ReviewAmounts: reviewAmounts, CancellationReview: review, RefundRecorded: refunded, Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
+	c.HTML(200, "result.html", CashierData{ReviewAmounts: reviewAmounts, CancellationReview: review.Present(), RefundRecorded: review.Current(), RefundRecheck: review.Status() == "recheck_required", Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
 }
 func (h *Handlers) renderError(c *gin.Context, status int, title, detail string) {
 	c.HTML(status, "error.html", gin.H{"Title": title, "Detail": detail})
@@ -413,12 +414,17 @@ func (h *Handlers) OrderStatus(c *gin.Context) {
 	if err = h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil {
 		ack = cb.DeliveredAt != nil
 	}
+	review, err := h.st.CancellationReviewSummary(c.Request.Context(), o.ID)
+	if err != nil {
+		c.JSON(503, gin.H{"code": 1, "msg": "暂时无法查询到账核对记录"})
+		return
+	}
 	phase := o.PaymentPhase(time.Now())
 	accepting := !h.paymentOperationsBlocked(c) && time.Now().Before(o.ExpiresAt) && (o.Status == model.Pending || o.Status == model.Ready) && h.orderProviderAccepting(c, h.C(), o)
 	if !accepting && (o.Status == model.Pending || o.Status == model.Ready) {
 		phase = "settling"
 	}
-	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": accepting, "merchant_review_required": cb.State == "merchant_review"}})
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "cancellation_review_status": review.Status(), "refund_review_generation_current": review.Current(), "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": accepting, "merchant_review_required": cb.State == "merchant_review"}})
 }
 func (h *Handlers) Health(c *gin.Context) {
 	if err := h.st.Ping(c.Request.Context()); err != nil {

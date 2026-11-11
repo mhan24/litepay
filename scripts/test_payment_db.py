@@ -258,9 +258,35 @@ class CancellationReviewDBTest(DiscoveryHealthDBTest):
         self.db.execute("UPDATE callbacks SET state='canceled_refunded'")
         self.db.execute("UPDATE transactions SET units=100 WHERE event_id='deposit'")
         self.db.commit()
-        self.assertEqual(tool.drill(self.path)['schema'],16)
+        self.assertEqual(tool.drill(self.path)['schema'],self.expected_schema)
         self.db.execute('DELETE FROM cancellation_review_audits');self.db.commit()
         with self.assertRaises(ValueError):tool.validate(self.path)
+
+
+class CompleteCancellationReviewDBTest(CancellationReviewDBTest):
+    expected_schema = 17
+
+    def setUp(self):
+        super().setUp()
+        self.db.execute('PRAGMA user_version=17')
+        self.db.commit()
+
+    def test_partial_refund_cannot_be_a_terminal_callback(self):
+        self.db.execute("UPDATE transactions SET units=100 WHERE event_id='deposit'")
+        self.db.execute("INSERT INTO transactions(provider,event_id,state,attempt_id,receiver,currency,units,occurred_at) VALUES('okx','extra','confirmed',1,'receiver','USDT',100,'2026-11-10 00:30')")
+        self.db.execute("INSERT INTO cancellation_reviews VALUES(1,1,'okx','deposit','refund_recorded',?,'operator','actual refund A','proof-A','2026-11-11')", ('a'*32,))
+        self.db.execute("INSERT INTO cancellation_review_audits VALUES(1,1,?,'operator','actual refund A','proof-A')",('a'*32,))
+        self.db.execute("UPDATE callbacks SET state='canceled_refunded'")
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+        self.db.execute("INSERT INTO cancellation_reviews VALUES(2,1,'okx','extra','open','','','','',NULL)")
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+        self.db.execute("UPDATE callbacks SET state='merchant_review'")
+        self.db.commit()
+        self.assertEqual(tool.drill(self.path)['schema'],17)
 
 
 if __name__ == '__main__':

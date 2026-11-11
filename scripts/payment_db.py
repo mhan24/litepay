@@ -32,7 +32,7 @@ def validate(path):
         if db.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('foreign key check failed')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (8, 9, 10, 11, 12, 13, 14, 15, 16):
+        if version not in (8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
             raise ValueError('unsupported payment schema')
         tables = BASE_TABLES + (NEW_TABLES if version >= 9 else ())
         tables += ATTEMPT_TABLES if version >= 10 else ()
@@ -94,6 +94,11 @@ def validate(path):
                 "SELECT count(*) FROM cancellation_reviews r LEFT JOIN orders o ON o.id=r.order_id LEFT JOIN transactions t ON t.provider=r.provider AND t.event_id=r.event_id LEFT JOIN payment_attempts a ON a.id=t.attempt_id WHERE o.id IS NULL OR o.status NOT IN ('CANCELED','PAID') OR t.event_id IS NULL OR t.state<>'confirmed' OR t.units IS NULL OR t.units<=0 OR (t.order_id IS NOT NULL AND t.order_id<>r.order_id) OR (t.order_id IS NULL AND (a.id IS NULL OR a.order_id<>r.order_id)) OR r.state NOT IN ('open','refund_recorded')",
                 "SELECT count(*) FROM cancellation_reviews r WHERE r.state='refund_recorded' AND (r.refund_reference='' OR r.operator='' OR r.reason='' OR r.resolved_at IS NULL OR length(r.review_generation)<>32 OR NOT EXISTS(SELECT 1 FROM cancellation_review_audits a WHERE a.review_id=r.id AND a.generation=r.review_generation AND a.refund_reference=r.refund_reference))",
                 "SELECT count(*) FROM cancellation_review_audits a LEFT JOIN cancellation_reviews r ON r.id=a.review_id WHERE r.id IS NULL OR a.operator='' OR a.reason='' OR a.refund_reference='' OR length(a.generation)<>32",
+            ]
+        if version >= 17:
+            problems += [
+                "SELECT count(*) FROM callbacks c WHERE c.state='canceled_refunded' AND EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=c.order_id AND r.state<>'refund_recorded')",
+                "SELECT count(*) FROM callbacks c WHERE c.state='canceled_refunded' AND EXISTS(SELECT 1 FROM transactions t JOIN payment_attempts p ON p.id=t.attempt_id WHERE p.order_id=c.order_id AND t.order_id IS NULL AND t.state IN ('confirmed','ambiguous') AND NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=c.order_id AND r.provider=t.provider AND r.event_id=t.event_id))",
             ]
         if any(db.execute(sql).fetchone()[0] for sql in problems):
             raise ValueError('payment evidence, reservation, or recovery invariants failed')
