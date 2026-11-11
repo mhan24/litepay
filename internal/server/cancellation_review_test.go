@@ -218,7 +218,7 @@ func TestPaidCancellationStatusTracksEachRefundAndRecoveryGeneration(t *testing.
 	r.AddCookie(&http.Cookie{Name: adminCookieName, Value: cookie})
 	w := httptest.NewRecorder()
 	engine.ServeHTTP(w, r)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "历史退款凭证，待重新核对") || !strings.Contains(w.Body.String(), "payment-B") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "历史退款凭证，待重新核对") || !strings.Contains(w.Body.String(), "额外到账，未认领") || !strings.Contains(w.Body.String(), "取消到账核对未完成，通知已暂停") {
 		t.Fatal("admin disagrees with result status", w.Code, w.Body.String())
 	}
 	refund("payment-A")

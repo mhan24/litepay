@@ -75,13 +75,13 @@
       </form></div></section>{{end}}
     {{range .PaymentRecoveries}}<p>补单审计 · {{.CreatedAt}} · {{.Operator}} · {{.Provider}} / {{.EventID}} · {{.Reason}}</p>{{end}}
 
-    <h2>已认领资金事件</h2>
+    <h2>关联到账证据</h2>
     <section class="card">
       <div class="card-b">
         {{range .Transactions}}
-        <p>{{.Provider}} / {{.EventID}} · 外部查询编号 {{.Reference}} · 到账 {{.OccurredAt}}</p>
+        <p style="overflow-wrap:anywhere">{{.Provider}} / {{.EventID}} · {{if .OrderID}}已认领{{else if eq .Reason "additional_payment"}}额外到账，未认领{{else}}未认领，待核查{{end}} · {{.Amount}} {{.Currency}} · 证据 {{.State}} · 外部查询编号 {{.Reference}} · 到账 {{.OccurredAt}}</p>
         {{else}}
-        尚未核销到账流水
+        尚无关联到账证据
         {{end}}
       </div>
     </section>
@@ -90,7 +90,7 @@
     <section class="card">
       <div class="card-b">
         {{range .Callbacks}}
-        <p>状态 {{if .DeliveredAt}}已确认{{else if eq .State "canceled_refunded"}}取消到账已登记退款{{else if eq .State "merchant_review"}}等待核对商城交付状态{{else if eq .State "exhausted"}}自动重试已耗尽{{else}}等待商城确认{{end}} · 累计尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
+        <p>状态 {{if .DeliveredAt}}已确认{{else if or $.CancellationReviews $.UncoveredCancellationReceipts}}{{if $.RefundReviewGenerationCurrent}}取消到账已登记退款，通知已关闭{{else}}取消到账核对未完成，通知已暂停{{end}}{{else if eq .State "merchant_review"}}等待核对商城交付状态{{else if eq .State "exhausted"}}自动重试已耗尽{{else}}等待商城确认{{end}} · 累计尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
         {{else}}
         付款确认后创建通知任务
         {{end}}
