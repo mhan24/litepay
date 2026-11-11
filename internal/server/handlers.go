@@ -115,7 +115,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		provider = selectedProvider
 	}
 	if needsProvider && !h.anyProviderAccepting(c, cfg, o) || !needsProvider && (!h.providerAccepting(c, cfg, provider) || !needsCurrency && !h.orderProviderAccepting(c, cfg, o)) {
-		h.renderError(c, 503, "收款平台暂不可用", "收款扫描尚未就绪，请稍后刷新或返回商城选择其他付款平台，勿继续转账。")
+		h.renderError(c, 503, "收款平台暂不可用", "平台账户、收款扫描或行情暂不可用，请稍后刷新或返回商城选择其他付款平台，勿继续转账。")
 		return
 	}
 	if needsProvider {
@@ -343,8 +343,8 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 			c.JSON(400, gin.H{"code": 1, "msg": "付款方式不可用"})
 			return
 		}
-		if !h.providerAccepting(c, cfg, provider) {
-			c.JSON(503, gin.H{"code": 1, "msg": "该平台收款扫描尚未就绪，暂不接受付款"})
+		if state := h.providerState(c, cfg, provider); !state.Ready {
+			c.JSON(503, gin.H{"code": 1, "msg": state.Reason + "，暂不接受付款"})
 			return
 		}
 		receiver := cfg.Checkout.Binance.UID

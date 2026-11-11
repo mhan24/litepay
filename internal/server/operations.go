@@ -112,10 +112,10 @@ func (h *Handlers) CancellationReviewStatus(c *gin.Context) {
 		h.bepusdtFail(c, "invalid review request")
 		return
 	}
-	reviewed, generation, err := h.st.CancellationRefundReviewStatus(c.Request.Context(), text("trade_id"), text("order_id"))
+	review, err := h.st.CancellationReviewByReference(c.Request.Context(), text("trade_id"), text("order_id"))
 	if err != nil {
 		h.bepusdtFail(c, "review unavailable")
 		return
 	}
-	c.JSON(200, bepusdtResponse{StatusCode: 200, Message: "success", Data: gin.H{"trade_id": text("trade_id"), "order_id": text("order_id"), "generation": generation, "refund_recorded": reviewed}})
+	c.JSON(200, bepusdtResponse{StatusCode: 200, Message: "success", Data: gin.H{"trade_id": text("trade_id"), "order_id": text("order_id"), "generation": review.Generation, "refund_recorded": review.Current(), "cancellation_review_status": review.Status()}})
 }

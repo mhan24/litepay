@@ -79,10 +79,10 @@ spec=importlib.util.spec_from_file_location('bridge',sys.argv[2]);b=importlib.ut
 r=pathlib.Path(sys.argv[3]);gateway=sys.argv[4];token=json.load(sys.stdin)
 `
 	call(common + `d.snapshot(r/'live.db',r/'before.db')
-c=sqlite3.connect(r/'merchant.db');c.executescript('CREATE TABLE orders(id INTEGER PRIMARY KEY,status,paid_at,canceled_at,deleted_at); CREATE TABLE payments(id INTEGER PRIMARY KEY,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url);CREATE TABLE payment_channels(id,provider_type,config_json);')
+c=sqlite3.connect(r/'merchant.db');c.executescript('CREATE TABLE orders(id INTEGER PRIMARY KEY,status,paid_at,canceled_at,deleted_at); CREATE TABLE payments(id INTEGER PRIMARY KEY,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url,exception_code,updated_at);CREATE TABLE payment_channels(id,provider_type,config_json);')
 c.execute('INSERT INTO payment_channels VALUES(1,?,?)',('bepusdt',json.dumps({'gateway_url':gateway,'auth_token':token})))
 c.execute("INSERT INTO orders VALUES(1,'canceled',NULL,'2026-11-10',NULL)")
-c.execute("INSERT INTO payments VALUES(1,1,1,'bepusdt','expired',NULL,NULL,'restore-trade','restore-mall',?)",(gateway+'/pay/restore-trade',));c.commit();c.close()
+c.execute("INSERT INTO payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url) VALUES(1,1,1,'bepusdt','expired',NULL,NULL,'restore-trade','restore-mall',?)",(gateway+'/pay/restore-trade',));c.commit();c.close()
 s=b.journal(r/'bridge.db');assert b.run_cycle(r/'merchant.db',s,gateway,True)
 assert s.execute('SELECT outcome FROM cancellations').fetchone()[0]=='closed'
 `)

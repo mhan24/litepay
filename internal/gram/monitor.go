@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +46,18 @@ type Monitor struct {
 
 func NewMonitor() *Monitor {
 	return &Monitor{http: httpx.NewClient(8*time.Second, false), priceURL: "https://api.kraken.com/0/public/Ticker?pair=TONUSD"}
+}
+
+// UseTestPriceSource redirects price checks only to a loopback HTTP fixture.
+// Call before starting the monitor; production configuration never uses this hook.
+func (m *Monitor) UseTestPriceSource(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "http" || !net.ParseIP(u.Hostname()).IsLoopback() || u.User != nil {
+		return errors.New("行情测试源必须为本机 HTTP 地址")
+	}
+	m.priceURL = endpoint
+	m.http = httpx.NewClient(8*time.Second, true)
+	return nil
 }
 
 func positiveDecimal(raw string) (*big.Rat, error) {

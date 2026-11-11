@@ -65,11 +65,11 @@ func TestPythonCancellationBridgeAgainstGateway(t *testing.T) {
 import importlib.util,json,sqlite3,sys,pathlib
 spec=importlib.util.spec_from_file_location('sync',sys.argv[1]);s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
 gateway=sys.argv[2];token=json.load(sys.stdin);path=pathlib.Path(sys.argv[3])/'commerce.db';db=sqlite3.connect(path)
-db.executescript('CREATE TABLE orders(id,status,paid_at,canceled_at,deleted_at); CREATE TABLE payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url); CREATE TABLE payment_channels(id,provider_type,config_json);')
+db.executescript('CREATE TABLE orders(id,status,paid_at,canceled_at,deleted_at); CREATE TABLE payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url,exception_code,updated_at); CREATE TABLE payment_channels(id,provider_type,config_json);')
 db.execute('INSERT INTO payment_channels VALUES(1,?,?)',('bepusdt',json.dumps({'gateway_url':gateway,'auth_token':token})))
 for i,no in enumerate(['bridge-cancel','bridge-paid'],1):
  db.execute('INSERT INTO orders VALUES(?,?,NULL,?,NULL)',(i,'canceled','2026-11-10'))
- db.execute('INSERT INTO payments VALUES(?,?,1,?,?,NULL,NULL,?,?,?)',(i,i,'bepusdt','expired',no,no,gateway+'/pay/'+no))
+ db.execute('INSERT INTO payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url) VALUES(?,?,1,?,?,NULL,NULL,?,?,?)',(i,i,'bepusdt','expired',no,no,gateway+'/pay/'+no))
 db.commit();state=s.journal(str(path.parent/'journal.db'))
 s.check_generation(path,state,gateway)
 assert s.sync_once(path,state,gateway)==2

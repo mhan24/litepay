@@ -49,9 +49,23 @@ func TestGRAMCashierAndSettings(t *testing.T) {
 	// A missing current quote and invalid provider/currency combinations never reserve money.
 	for _, pair := range [][2]string{{"ton", "GRAM"}, {"ton", "USDT"}, {"binance", "GRAM"}} {
 		w := postForm(engine, "/api/order/payment", url.Values{"trade_no": {"gram-ui"}, "provider": {pair[0]}, "currency": {pair[1]}})
-		if w.Code != 400 {
+		want := 400
+		if pair == [2]string{"ton", "GRAM"} {
+			want = 503
+		}
+		if w.Code != want {
 			t.Fatal("invalid payment choice accepted", pair, w.Body.String())
 		}
+	}
+	price := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"error":[],"result":{"TONUSD":{"a":["1.11"],"b":["1.11"]}}}`))
+	}))
+	t.Cleanup(price.Close)
+	if err = p.GRAM.UseTestPriceSource(price.URL + "?fixture=1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.GRAM.CheckPrice(ctx); err != nil {
+		t.Fatal(err)
 	}
 	_, err = st.SelectGRAM(ctx, "gram-ui", gram.DefaultAddress, gram.Snapshot{Fresh: true, USD: "1.11", PriceAt: time.Now()}, 120)
 	if err != nil {

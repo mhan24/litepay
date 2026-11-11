@@ -189,7 +189,7 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		return
 	}
 	if !h.anyProviderAccepting(c, cfg, &model.Order{CurrencyLimit: req.Currencies}) {
-		h.bepusdtFail(c, "收款扫描尚未就绪，暂停接单")
+		h.bepusdtFail(c, "收款扫描尚未就绪或行情不可用，暂停接单")
 		return
 	}
 	tradeNo := generateTradeNo()

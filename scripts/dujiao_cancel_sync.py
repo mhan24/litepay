@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synchronize committed Dujiao cancellations to one BEpusdt gateway.
+"""Reconcile Dujiao cancellations and closed-order successful payments with one gateway.
 
 The commerce database is read-only. Only the separate retry journal is written.
 Run under the commerce DB owner; credentials remain in its existing channel config.
@@ -64,6 +64,122 @@ def payment_rows(source, predicate, params, limit=None):
         params = tuple(params) + (limit,)
     return source_query(source, sql, params).fetchall()
 
+
+
+# These codes can be emitted before the closed-order check (superseded/underpaid).
+# The order itself must still be canceled and unpaid; normal fulfilled payments never qualify.
+ANOMALY_CODES = ('closed_order_payment_succeeded', 'superseded_payment_succeeded',
+                 'duplicate_payment_succeeded', 'underpaid_payment_succeeded')
+ANOMALY_BATCH = 200
+
+
+def anomaly_rows(source, predicate, params):
+    return source_query(source, """
+        SELECT p.id,p.provider_ref,p.gateway_order_no,p.pay_url,c.config_json,p.exception_code,p.paid_at
+        FROM payments p JOIN orders o ON o.id=p.order_id JOIN payment_channels c ON c.id=p.channel_id
+        WHERE o.status='canceled' AND o.paid_at IS NULL AND o.canceled_at IS NOT NULL AND o.deleted_at IS NULL
+          AND p.provider_type='bepusdt' AND p.status='success' AND p.paid_at IS NOT NULL AND p.deleted_at IS NULL
+          AND p.exception_code IN (?,?,?,?) AND c.provider_type='bepusdt' AND """+predicate+' ORDER BY p.id',
+        ANOMALY_CODES+tuple(params)).fetchall()
+
+
+def eligible_anomalies(rows, gateway):
+    for row in rows:
+        for identity in eligible([row[:5]], gateway):
+            yield identity + (row[5], str(row[6]))
+
+
+def enqueue_anomalies(state, rows, gateway, now):
+    for pid,tid,oid,_,code,paid_at in eligible_anomalies(rows,gateway):
+        state.execute("""INSERT INTO payment_anomalies(gateway,payment_id,trade_id,order_id,exception_code,paid_at,outcome,next_at,updated_at)
+            VALUES(?,?,?,?,?,?,'queued',?,?) ON CONFLICT(gateway,payment_id,trade_id,order_id) DO UPDATE SET
+            exception_code=excluded.exception_code,paid_at=excluded.paid_at,outcome='queued',next_at=excluded.next_at,updated_at=excluded.updated_at
+            WHERE payment_anomalies.outcome='merchant_changed' OR payment_anomalies.exception_code<>excluded.exception_code OR payment_anomalies.paid_at<>excluded.paid_at
+               OR (payment_anomalies.outcome IN ('reviewed_conflict','paid_conflict','source_review') AND payment_anomalies.checked_generation<>COALESCE((SELECT generation FROM gateway_epochs WHERE gateway=excluded.gateway),''))""",
+            (gateway,pid,tid,oid,code,paid_at,now,now))
+
+
+def discover_anomalies(source,state,gateway,now):
+    state.execute('INSERT OR IGNORE INTO anomaly_discovery(gateway) VALUES(?)',(gateway,))
+    stamp,pid,maximum=state.execute('SELECT updated_at,payment_id,max_payment_id FROM anomaly_discovery WHERE gateway=?',(gateway,)).fetchone()
+    current_max=source_query(source,'SELECT COALESCE(MAX(id),0) FROM payments').fetchone()[0]
+    if current_max<maximum:
+        stamp,pid='',0
+    # UpdatedAt has a source index. Seek equality separately to bound large timestamp groups.
+    rows=source_query(source,'SELECT updated_at,id FROM payments WHERE updated_at=? AND id>? ORDER BY id LIMIT ?',
+                      (stamp,pid,ANOMALY_BATCH)).fetchall() if stamp else []
+    if len(rows)<ANOMALY_BATCH:
+        rows+=source_query(source,'SELECT updated_at,id FROM payments WHERE updated_at>? ORDER BY updated_at,id LIMIT ?',
+                           (stamp,ANOMALY_BATCH-len(rows))).fetchall() if stamp else source_query(source,
+                           'SELECT updated_at,id FROM payments WHERE updated_at IS NOT NULL ORDER BY updated_at,id LIMIT ?', (ANOMALY_BATCH,)).fetchall()
+    next_stamp,next_id=(str(rows[-1][0]),rows[-1][1]) if rows else (stamp,pid)
+    unread=source_query(source,'SELECT updated_at FROM payments WHERE updated_at=? AND id>? ORDER BY id LIMIT 1',
+                        (next_stamp,next_id)).fetchone() if next_stamp else None
+    if unread is None:
+        unread=source_query(source,'SELECT updated_at FROM payments WHERE updated_at>? ORDER BY updated_at,id LIMIT 1',(next_stamp,)).fetchone() if next_stamp else source_query(source,'SELECT updated_at FROM payments WHERE updated_at IS NOT NULL ORDER BY updated_at,id LIMIT 1').fetchone()
+    oldest=0
+    if unread:
+        try:
+            at=datetime.datetime.fromisoformat(str(unread[0]).replace('Z','+00:00'))
+            oldest=at.replace(tzinfo=at.tzinfo or datetime.timezone.utc).timestamp()
+        except (ValueError,OverflowError):
+            pass
+    ids=[r[1] for r in rows]
+    candidates=anomaly_rows(source,'p.id IN ('+','.join('?' for _ in ids)+')',ids) if ids else []
+    with state:
+        enqueue_anomalies(state,candidates,gateway,now)
+        state.execute('UPDATE anomaly_discovery SET updated_at=?,payment_id=?,max_payment_id=?,pending=?,oldest_unread_at=? WHERE gateway=?',
+                      (next_stamp,next_id,current_max,int(unread is not None),oldest,gateway))
+
+
+def inspect_anomaly(gateway,trade_id,order_id,token):
+    # CancelReference establishes a merchant review/hold when money is already PAID,
+    # or closes the old instruction while the scanner keeps collecting real evidence.
+    result=cancel(gateway,trade_id,order_id,token)
+    if result=='paid_conflict':
+        return 'paid_conflict'
+    status=signed_post(gateway,'/api/v1/order/cancellation-review',
+                       {'timestamp':str(int(time.time())),'trade_id':trade_id,'order_id':order_id},token).get('data') or {}
+    if status.get('trade_id')!=trade_id or status.get('order_id')!=order_id or status.get('cancellation_review_status') not in ('none','pending','recheck_required','refund_recorded'):
+        raise ValueError('gateway review response is incomplete')
+    return 'paid_conflict' if status['cancellation_review_status']!='none' else 'awaiting_funds'
+
+
+def due_anomalies(source,state,gateway,now):
+    due=state.execute("SELECT payment_id,trade_id,order_id,attempts FROM payment_anomalies WHERE gateway=? AND outcome IN ('queued','retry','awaiting_funds') AND next_at<=? ORDER BY next_at,updated_at,payment_id LIMIT ?",(gateway,now,SEND_BATCH)).fetchall()
+    ids=[r[0] for r in due]
+    rows=anomaly_rows(source,'p.id IN ('+','.join('?' for _ in ids)+')',ids) if ids else []
+    active={(gateway,pid,tid,oid):token for pid,tid,oid,token,_,_ in eligible_anomalies(rows,gateway)}
+    return due,active
+
+
+def send_anomalies(state,gateway,now,due,active,sender):
+    processed=0
+    deadline=time.monotonic()+5
+    for pid,tid,oid,previous in due:
+        key=(gateway,pid,tid,oid)
+        if key not in active:
+            # A previously observed successful payment is not silently cleared because
+            # a source record changed or disappeared. Keep a durable human-visible conflict.
+            with state:
+                state.execute("UPDATE payment_anomalies SET outcome='source_review',updated_at=?,checked_generation=COALESCE((SELECT generation FROM gateway_epochs WHERE gateway=?),'') WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",(now,gateway)+key)
+            continue
+        attempts=previous+1
+        try:
+            outcome=sender(gateway,tid,oid,active[key])
+            if outcome not in ('paid_conflict','awaiting_funds'):
+                raise ValueError('invalid anomaly outcome')
+        except Exception as error:
+            outcome='retry'
+            logging.warning('payment_id=%s anomaly retry error_type=%s',pid,type(error).__name__)
+        with state:
+            state.execute("UPDATE payment_anomalies SET outcome=?,attempts=?,next_at=?,updated_at=?,checked_generation=COALESCE((SELECT generation FROM gateway_epochs WHERE gateway=?),'') WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",
+                          (outcome,attempts,now+min(300,5*2**min(attempts-1,6)),now,gateway)+key)
+        logging.warning('payment_id=%s anomaly outcome=%s',pid,outcome)
+        processed+=1
+        if time.monotonic()>=deadline:
+            break
+    return processed
 
 def eligible(rows, gateway):
     for payment_id, trade_id, order_id, pay_url, raw in rows:
@@ -137,8 +253,10 @@ def discover(source, state, gateway, now):
         ids = [r[0] for r in source_query(source, 'SELECT id FROM payments WHERE order_id=? AND id>? ORDER BY id LIMIT ?',
                                         (oid, after, ORDER_PAYMENT_BATCH)).fetchall()]
         rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
+        anomalies = anomaly_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
         with state:
             enqueue(state, rows, gateway, now)
+            enqueue_anomalies(state, anomalies, gateway, now)
             if len(ids) < ORDER_PAYMENT_BATCH:
                 state.execute('DELETE FROM discovery_orders WHERE gateway=? AND order_id=?', (gateway, oid))
             else:
@@ -149,8 +267,10 @@ def discover(source, state, gateway, now):
         ids = [r[0] for r in source_query(source, 'SELECT id FROM payments WHERE id>? ORDER BY id LIMIT ?',
                                         (audit_id, AUDIT_PAYMENT_BATCH)).fetchall()]
         rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
+        anomalies = anomaly_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
         with state:
             enqueue(state, rows, gateway, now)
+            enqueue_anomalies(state, anomalies, gateway, now)
             audit_id = ids[-1] if len(ids) == AUDIT_PAYMENT_BATCH else 0
             state.execute('UPDATE discovery SET audit_payment_id=?,next_audit=? WHERE gateway=?',
                           (audit_id, now+AUDIT_INTERVAL, gateway))
@@ -205,20 +325,35 @@ def journal(path):
         CREATE TABLE IF NOT EXISTS conflict_reviews(id INTEGER PRIMARY KEY,gateway TEXT,payment_id INTEGER,trade_id TEXT,order_id TEXT,generation TEXT,operator TEXT,reason TEXT,created_at REAL);
         CREATE TABLE IF NOT EXISTS missing_reviews(id INTEGER PRIMARY KEY,gateway TEXT,payment_id INTEGER,trade_id TEXT,order_id TEXT,generation TEXT,operator TEXT,reason TEXT,created_at REAL);
     """)
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS payment_anomalies(gateway TEXT NOT NULL,payment_id INTEGER NOT NULL,trade_id TEXT NOT NULL,order_id TEXT NOT NULL,
+            exception_code TEXT NOT NULL,paid_at TEXT NOT NULL,outcome TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_at REAL NOT NULL,updated_at REAL NOT NULL,
+            review_generation TEXT NOT NULL DEFAULT '',checked_generation TEXT NOT NULL DEFAULT '',PRIMARY KEY(gateway,payment_id,trade_id,order_id));
+        CREATE INDEX IF NOT EXISTS payment_anomalies_due ON payment_anomalies(gateway,outcome,next_at,updated_at);
+        CREATE TABLE IF NOT EXISTS anomaly_discovery(gateway TEXT PRIMARY KEY,updated_at TEXT NOT NULL DEFAULT '',payment_id INTEGER NOT NULL DEFAULT 0,
+            max_payment_id INTEGER NOT NULL DEFAULT 0,pending INTEGER NOT NULL DEFAULT 1,oldest_unread_at REAL NOT NULL DEFAULT 0);
+    """)
     return db
 
 
 def queue_status(state, gateway):
     counts = dict(state.execute("SELECT outcome,count(*) FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry','missing_gateway','paid_conflict') GROUP BY outcome", (gateway,)))
     missing = counts.get('missing_gateway', 0)
-    conflicts = counts.get('paid_conflict', 0)
+    conflicts = state.execute("SELECT count(*) FROM (SELECT payment_id,trade_id,order_id FROM cancellations WHERE gateway=? AND outcome='paid_conflict' UNION SELECT payment_id,trade_id,order_id FROM payment_anomalies WHERE gateway=? AND outcome IN ('paid_conflict','source_review'))",(gateway,gateway)).fetchone()[0]
     failures = counts.get('retry', 0) + missing
     pending = counts.get('queued', 0) + counts.get('retry', 0)
+    anomalies = dict(state.execute('SELECT outcome,count(*) FROM payment_anomalies WHERE gateway=? GROUP BY outcome',(gateway,)))
+    failures += anomalies.get('retry',0)
+    pending += sum(anomalies.get(k,0) for k in ('queued','retry','awaiting_funds'))
     pending += state.execute('SELECT count(*) FROM discovery_orders WHERE gateway=?', (gateway,)).fetchone()[0]
     epoch = state.execute('SELECT generation,scanned FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
     discovery = state.execute('SELECT pending,oldest_unread_at FROM discovery_health WHERE gateway=?', (gateway,)).fetchone()
     discovery_pending = discovery[0] if discovery else 1
     lag = max(0, int(time.time()-discovery[1])) if discovery and discovery[0] and discovery[1] else 0
+    abnormal_discovery=state.execute('SELECT pending,oldest_unread_at FROM anomaly_discovery WHERE gateway=?',(gateway,)).fetchone()
+    discovery_pending=max(discovery_pending,abnormal_discovery[0] if abnormal_discovery else 1)
+    if abnormal_discovery and abnormal_discovery[0] and abnormal_discovery[1]:
+        lag=max(lag,max(0,int(time.time()-abnormal_discovery[1])))
     return {'pending': pending, 'failures': failures, 'missing': missing, 'conflicts': conflicts,
             'discovery_pending': discovery_pending, 'discovery_lag_seconds': lag,
             'generation': epoch[0] if epoch else '', 'replay_complete': bool(epoch and epoch[1] and pending == 0 and failures == 0 and conflicts==0 and discovery_pending==0)}
@@ -230,13 +365,15 @@ def replay_generation(source, state, gateway, now):
         return
     ids = [r[0] for r in source_query(source, 'SELECT id FROM payments WHERE id>? ORDER BY id LIMIT ?', (epoch[1], AUDIT_PAYMENT_BATCH)).fetchall()]
     rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
+    anomalies=anomaly_rows(source,'p.id IN ('+','.join('?' for _ in ids)+')',tuple(ids)) if ids else []
     with state:
         enqueue(state, rows, gateway, now)
+        enqueue_anomalies(state,anomalies,gateway,now)
         state.execute('UPDATE gateway_epochs SET audit_id=?,scanned=? WHERE gateway=? AND generation=?',
                       (ids[-1] if ids else epoch[1], int(len(ids)<AUDIT_PAYMENT_BATCH), gateway, epoch[0]))
 
 
-def sync_once(database, state, gateway, sender=cancel, now=None):
+def sync_once(database, state, gateway, sender=cancel, now=None, anomaly_sender=inspect_anomaly):
     now = time.time() if now is None else now
     with state:
         state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
@@ -244,6 +381,8 @@ def sync_once(database, state, gateway, sender=cancel, now=None):
     try:
         replay_generation(source, state, gateway, now)
         discover(source, state, gateway, now)
+        discover_anomalies(source,state,gateway,now)
+        anomaly_due,anomaly_active=due_anomalies(source,state,gateway,now)
         due = state.execute("SELECT payment_id,trade_id,order_id,attempts FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry') AND next_at<=? ORDER BY next_at,updated_at,payment_id LIMIT ?",
                             (gateway, now, SEND_BATCH)).fetchall()
         ids = [r[0] for r in due]
@@ -282,7 +421,7 @@ def sync_once(database, state, gateway, sender=cancel, now=None):
         processed += 1
         if time.monotonic() >= deadline:
             break
-    return processed
+    return processed+send_anomalies(state,gateway,now,anomaly_due,anomaly_active,anomaly_sender)
 
 
 def gateway_token(database, gateway):
@@ -366,18 +505,20 @@ def review_conflict(database, state, gateway, trade_id, reason):
     if not reason.strip() or len(reason)>300:
         raise ValueError('a review reason (1-300 characters) is required')
     check_generation(database,state,gateway)
-    rows=state.execute("SELECT payment_id,trade_id,order_id FROM cancellations WHERE gateway=? AND trade_id=? AND outcome='paid_conflict'",(gateway,trade_id)).fetchall()
+    rows=state.execute("SELECT payment_id,trade_id,order_id FROM cancellations WHERE gateway=? AND trade_id=? AND outcome='paid_conflict' UNION SELECT payment_id,trade_id,order_id FROM payment_anomalies WHERE gateway=? AND trade_id=? AND outcome<>'reviewed_conflict'",(gateway,trade_id,gateway,trade_id)).fetchall()
     if len(rows)!=1:
         raise ValueError('exactly one unresolved paid conflict must match')
     pid,tid,oid=rows[0]
     source=source_connect(database)
     try:
-        valid=list(eligible(payment_rows(source,'p.id=?',(pid,)),gateway))
+        valid=list(eligible(payment_rows(source,'p.id=?',(pid,)),gateway))+[row[:4] for row in eligible_anomalies(anomaly_rows(source,'p.id=?',(pid,)),gateway)]
     finally:
         source.close()
     if len(valid)!=1 or valid[0][:3]!=(pid,tid,oid):
         raise ValueError('merchant cancellation identity changed')
-    if cancel(gateway,tid,oid,valid[0][3])!='paid_conflict':
+    anomaly=state.execute('SELECT 1 FROM payment_anomalies WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?',(gateway,pid,tid,oid)).fetchone()
+    outcome=cancel(gateway,tid,oid,valid[0][3])
+    if outcome!='paid_conflict' and not (anomaly and outcome=='closed'):
         raise ValueError('gateway payment state changed; recheck funds')
     result=signed_post(gateway,'/api/v1/order/cancellation-review',{'timestamp':str(int(time.time())),'trade_id':tid,'order_id':oid},valid[0][3])
     data=result.get('data') or {}
@@ -389,7 +530,8 @@ def review_conflict(database, state, gateway, trade_id, reason):
         if state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?',(gateway,)).fetchone()[0]!=generation:
             raise ValueError('gateway generation changed during review')
         state.execute('INSERT INTO conflict_reviews(gateway,payment_id,trade_id,order_id,generation,operator,reason,created_at) VALUES(?,?,?,?,?,?,?,?)',(gateway,pid,tid,oid,generation,getpass.getuser(),reason.strip(),time.time()))
-        state.execute("UPDATE cancellations SET outcome='reviewed_conflict',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",(time.time(),gateway,pid,tid,oid))
+        state.execute("UPDATE cancellations SET outcome='reviewed_conflict',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=? AND outcome='paid_conflict'",(time.time(),gateway,pid,tid,oid))
+        state.execute("UPDATE payment_anomalies SET outcome='reviewed_conflict',review_generation=?,checked_generation=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",(generation,generation,time.time(),gateway,pid,tid,oid))
         state.execute("INSERT OR REPLACE INTO epoch_receipts VALUES(?,?,?,?,?,?,?)",(gateway,pid,tid,oid,generation,'reviewed_conflict',time.time()))
 
 
@@ -466,6 +608,7 @@ def main():
             state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
             state.execute("UPDATE discovery SET canceled_at='',order_id=0,audit_payment_id=0,next_audit=0 WHERE gateway=?", (gateway,))
             state.execute('DELETE FROM discovery_health WHERE gateway=?', (gateway,))
+            state.execute('DELETE FROM anomaly_discovery WHERE gateway=?',(gateway,))
     if args.review_conflict:
         try:
             review_conflict(database,state,gateway,args.review_conflict,args.reason)

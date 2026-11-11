@@ -24,17 +24,18 @@ class SyncTest(unittest.TestCase):
         self.db = sqlite3.connect(self.path)
         self.addCleanup(self.db.close)
         self.db.executescript('''CREATE TABLE orders(id INTEGER PRIMARY KEY,status,paid_at,canceled_at,deleted_at);
-            CREATE TABLE payments(id INTEGER PRIMARY KEY,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url);
+            CREATE TABLE payments(id INTEGER PRIMARY KEY,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url,exception_code,updated_at);
             CREATE TABLE payment_channels(id INTEGER PRIMARY KEY,provider_type,config_json);
             CREATE INDEX orders_cancel_cursor ON orders(canceled_at);
-            CREATE INDEX payments_order_cursor ON payments(order_id);''')
+            CREATE INDEX payments_order_cursor ON payments(order_id);
+            CREATE INDEX payments_update_cursor ON payments(updated_at);''')
         self.db.execute('INSERT INTO payment_channels VALUES (1,?,?)', ('bepusdt', json.dumps({'gateway_url': self.gateway, 'auth_token': 'private'})))
         self.state = sync.journal(':memory:')
         self.addCleanup(self.state.close)
 
     def add(self, number, order_status='canceled', payment_status='expired', pay_url=None):
         self.db.execute('INSERT INTO orders VALUES (?,?,NULL,?,NULL)', (number, order_status, '2026-01-01'))
-        self.db.execute('INSERT INTO payments VALUES (?,?,1,?,?,NULL,NULL,?,?,?)', (number, number, 'bepusdt', payment_status, 'trade'+str(number), 'order'+str(number), pay_url or self.gateway+'/pay/test'))
+        self.db.execute('INSERT INTO payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url) VALUES (?,?,1,?,?,NULL,NULL,?,?,?)', (number, number, 'bepusdt', payment_status, 'trade'+str(number), 'order'+str(number), pay_url or self.gateway+'/pay/test'))
         self.db.commit()
 
     def test_only_committed_unpaid_matching_gateway_and_durable_dedup(self):
@@ -200,7 +201,7 @@ class SyncTest(unittest.TestCase):
 
     def test_large_order_expansion_is_resumable_and_bounded(self):
         self.add(1)
-        self.db.executemany("INSERT INTO payments VALUES(?,1,1,'bepusdt','expired',NULL,NULL,?,?,?)",
+        self.db.executemany("INSERT INTO payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url) VALUES(?,1,1,'bepusdt','expired',NULL,NULL,?,?,?)",
                             [(i, 't'+str(i), 'o'+str(i), self.gateway+'/pay/a') for i in range(2, 122)])
         self.db.commit()
         # Disable the independent audit just for this test: exercise order pagination.
@@ -219,13 +220,15 @@ class SyncTest(unittest.TestCase):
         start = time.perf_counter()
         n = 100000
         self.db.executemany("INSERT INTO orders VALUES(?,'canceled',NULL,'2026-01-01',NULL)", ((i,) for i in range(1, n+1)))
-        self.db.executemany("INSERT INTO payments VALUES(?,?,1,'bepusdt','expired',NULL,NULL,?,?,?)",
+        self.db.executemany("INSERT INTO payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url) VALUES(?,?,1,'bepusdt','expired',NULL,NULL,?,?,?)",
                             ((i, i, 't'+str(i), 'o'+str(i), self.gateway+'/pay/a') for i in range(1, n+1)))
         self.db.commit()
         self.state.executemany("INSERT INTO cancellations VALUES(?,?,?,?,'closed',1,0,0)",
                                ((self.gateway, i, 't'+str(i), 'o'+str(i)) for i in range(1, n+1)))
         self.state.execute("INSERT INTO discovery VALUES(?,'2026-01-01',?,0,?,0)", (self.gateway, n, n))
         self.state.commit()
+        self.db.execute("UPDATE payments SET updated_at='2026-11-11 10:00:00'");self.db.commit()
+        self.state.execute("INSERT INTO anomaly_discovery(gateway,updated_at,payment_id,max_payment_id,pending) VALUES(?,?,?, ?,0)",(self.gateway,'2026-11-11 10:00:00',n,n));self.state.commit()
         metrics = {'instructions': 0, 'source_rows': 0}
         original = sync.source_connect
         def connect(path):
@@ -247,14 +250,14 @@ class SyncTest(unittest.TestCase):
                 row = self.cursor.fetchone();metrics['source_rows'] += int(row is not None);return row
         with patch.object(sync, 'source_connect', side_effect=connect), patch.object(sync, 'source_query', side_effect=lambda *args: Cursor(original_query(*args))):
             self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: self.fail('duplicate'), now=10), 0)
-        self.assertLessEqual(metrics['source_rows'], 1001)
+        self.assertLessEqual(metrics['source_rows'], 1004)
         self.assertLess(metrics['instructions'], 100000)
         print('100k synchronized cancellations: source rows=%s SQLite VM instructions=%s elapsed=%.3fs (includes fixture setup)' % (metrics['source_rows'], metrics['instructions'], time.perf_counter()-start))
 
     def test_stop_during_large_equal_timestamp_backlog_never_skips_or_resends(self):
         n = 1500
         self.db.executemany("INSERT INTO orders VALUES(?,'canceled',NULL,'2026-01-01',NULL)", ((i,) for i in range(1, n+1)))
-        self.db.executemany("INSERT INTO payments VALUES(?,?,1,'bepusdt','expired',NULL,NULL,?,?,?)",
+        self.db.executemany("INSERT INTO payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url) VALUES(?,?,1,'bepusdt','expired',NULL,NULL,?,?,?)",
                             ((i, i, 't'+str(i), 'o'+str(i), self.gateway+'/pay/a') for i in range(1, n+1)))
         self.db.commit()
         path = Path(self.tmp.name) / 'resume.db'
@@ -330,6 +333,7 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(post.call_args[0][2]['healthy'],'false')
         self.state.execute("UPDATE gateway_epochs SET scanned=1")
         self.state.execute("INSERT INTO discovery_health VALUES(?,0,0,0)",(self.gateway,))
+        self.state.execute("INSERT INTO anomaly_discovery(gateway,pending) VALUES(?,0)",(self.gateway,))
         self.state.commit()
         with patch.object(sync,'signed_post',return_value={'status_code':200}) as post:
             sync.report_health(self.path,self.state,self.gateway,True)
@@ -489,6 +493,120 @@ class SyncTest(unittest.TestCase):
         calls=[]
         sync.sync_once(self.path,self.state,self.gateway,lambda *a:calls.append(a[1]) or 'closed',now=30)
         self.assertEqual(calls,['trade1'])
+
+    def mark_anomaly(self, number, code='closed_order_payment_succeeded', stamp='2026-11-11 10:00:00'):
+        self.db.execute("UPDATE payments SET status='success',paid_at='2026-11-11 09:59:00',exception_code=?,updated_at=? WHERE id=?", (code,stamp,number))
+        self.db.commit()
+
+    def test_late_success_is_separate_from_unpaid_and_requires_closed_order_evidence(self):
+        for i in range(1,9): self.add(i)
+        for i in range(1,9): self.mark_anomaly(i)
+        self.db.execute("UPDATE orders SET status='completed' WHERE id=2")
+        self.db.execute("UPDATE orders SET paid_at='2026-11-11' WHERE id=3")
+        self.db.execute("UPDATE payments SET paid_at=NULL WHERE id=4")
+        self.db.execute("UPDATE payments SET exception_code='' WHERE id=5")
+        self.db.execute("UPDATE payments SET pay_url='https://another.example/pay/a' WHERE id=6")
+        self.db.execute("UPDATE payments SET deleted_at='2026-11-11' WHERE id=7")
+        self.db.execute("UPDATE payments SET provider_type='other' WHERE id=8")
+        self.db.commit()
+        calls=[]
+        processed=sync.sync_once(self.path,self.state,self.gateway,lambda *a:self.fail('success entered ordinary cancellation'),now=10,
+                                 anomaly_sender=lambda *a:calls.append(a[1]) or 'paid_conflict')
+        self.assertEqual(processed,1)
+        self.assertEqual(calls,['trade1'])
+        self.assertEqual(self.state.execute('SELECT count(*) FROM cancellations').fetchone()[0],0)
+        self.assertEqual(self.state.execute('SELECT payment_id,exception_code,outcome FROM payment_anomalies').fetchone(),(1,'closed_order_payment_succeeded','paid_conflict'))
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],1)
+
+    def test_old_payment_late_callback_is_found_without_new_order_or_id_or_audit(self):
+        self.add(1)
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:'closed',now=10)
+        self.state.execute('UPDATE discovery SET next_audit=100000');self.state.commit()
+        self.mark_anomaly(1)
+        calls=[]
+        sync.sync_once(self.path,self.state,self.gateway,lambda *a:self.fail('ordinary close replayed'),now=11,
+                       anomaly_sender=lambda *a:calls.append(a[1]) or 'paid_conflict')
+        self.assertEqual(calls,['trade1'])
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],1)
+        # An identical late callback can update UpdatedAt without multiplying tasks.
+        self.mark_anomaly(1,stamp='2026-11-11 10:01:00')
+        sync.sync_once(self.path,self.state,self.gateway,now=12,anomaly_sender=lambda *a:self.fail('duplicate anomaly sent'))
+        self.assertEqual(self.state.execute('SELECT count(*) FROM payment_anomalies').fetchone()[0],1)
+
+    def test_anomaly_without_gateway_money_stays_pending_across_restart_and_retry(self):
+        self.add(1);self.mark_anomaly(1)
+        path=Path(self.tmp.name)/'anomaly-state.db';state=sync.journal(path)
+        sync.sync_once(self.path,state,self.gateway,now=10,anomaly_sender=lambda *a:'awaiting_funds')
+        self.assertEqual(sync.queue_status(state,self.gateway)['pending'],1)
+        self.assertFalse(sync.queue_status(state,self.gateway)['replay_complete'])
+        state.close();state=sync.journal(path);self.addCleanup(state.close)
+        self.assertEqual(state.execute('SELECT outcome FROM payment_anomalies').fetchone()[0],'awaiting_funds')
+        sync.sync_once(self.path,state,self.gateway,now=15,anomaly_sender=lambda *a:'paid_conflict')
+        self.assertEqual(sync.queue_status(state,self.gateway)['conflicts'],1)
+        with patch.object(sync,'signed_post',return_value={'status_code':200}) as post:
+            sync.report_health(self.path,state,self.gateway,True)
+        self.assertEqual(post.call_args[0][2]['healthy'],'false')
+        self.db.execute("UPDATE orders SET status='completed'");self.db.commit()
+        # Terminal conflicts persist even if the source later changes.
+        sync.sync_once(self.path,state,self.gateway,now=1000,anomaly_sender=lambda *a:self.fail('terminal sent'))
+        self.assertEqual(sync.queue_status(state,self.gateway)['conflicts'],1)
+
+    def test_signed_anomaly_probe_never_treats_gateway_closed_as_refund_completion(self):
+        base={'trade_id':'t','order_id':'o','generation':'a'*32,'refund_recorded':False,'cancellation_review_status':'none'}
+        with patch.object(sync,'cancel',return_value='closed'),patch.object(sync,'signed_post',return_value={'data':base}):
+            self.assertEqual(sync.inspect_anomaly(self.gateway,'t','o','private'),'awaiting_funds')
+            base['cancellation_review_status']='pending'
+            self.assertEqual(sync.inspect_anomaly(self.gateway,'t','o','private'),'paid_conflict')
+            base['cancellation_review_status']='refund_recorded';base['refund_recorded']=True
+            self.assertEqual(sync.inspect_anomaly(self.gateway,'t','o','private'),'paid_conflict')
+            base['trade_id']='wrong'
+            with self.assertRaises(ValueError):sync.inspect_anomaly(self.gateway,'t','o','private')
+
+    def test_anomaly_review_requires_current_audit_and_replays_with_new_generation(self):
+        self.add(1);self.mark_anomaly(1)
+        self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)',(self.gateway,'a'*32));self.state.commit()
+        sync.sync_once(self.path,self.state,self.gateway,now=10,anomaly_sender=lambda *a:'paid_conflict')
+        result={'data':{'trade_id':'trade1','order_id':'order1','generation':'a'*32,'refund_recorded':False}}
+        with patch.object(sync,'check_generation'),patch.object(sync,'cancel',return_value='paid_conflict'),patch.object(sync,'signed_post',return_value=result):
+            with self.assertRaises(ValueError):sync.review_conflict(self.path,self.state,self.gateway,'trade1','no actual refund audit')
+            result['data']['refund_recorded']=True
+            sync.review_conflict(self.path,self.state,self.gateway,'trade1','verified actual refund and canceled delivery')
+        self.assertEqual(self.state.execute('SELECT outcome,review_generation FROM payment_anomalies').fetchone(),('reviewed_conflict','a'*32))
+        self.assertEqual(self.state.execute('SELECT count(*) FROM conflict_reviews').fetchone()[0],1)
+        sync.sync_once(self.path,self.state,self.gateway,now=15,anomaly_sender=lambda *a:self.fail('reviewed anomaly resent'))
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],0)
+        with patch.object(sync,'signed_post',return_value={'data':{'generation':'b'*32}}):sync.check_generation(self.path,self.state,self.gateway)
+        sync.sync_once(self.path,self.state,self.gateway,now=20,anomaly_sender=lambda *a:'paid_conflict')
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],1)
+        self.assertFalse(sync.queue_status(self.state,self.gateway)['replay_complete'])
+
+    def test_anomaly_cursor_is_durable_and_unread_successes_block_health(self):
+        for i in range(1,7):
+            self.add(i);self.mark_anomaly(i)
+        path=Path(self.tmp.name)/'anomaly-cursor.db';state=sync.journal(path)
+        # Isolate the new updated-at cursor from the existing cancellation/audit paths.
+        state.execute("INSERT INTO discovery VALUES(?,'9999',0,0,6,100000)",(self.gateway,));state.commit()
+        seen=[]
+        try:
+            with patch.object(sync,'ANOMALY_BATCH',2):
+                for at in (10,11,12):
+                    sync.sync_once(self.path,state,self.gateway,now=at,anomaly_sender=lambda *a:seen.append(a[1]) or 'paid_conflict')
+                    self.assertEqual(sync.queue_status(state,self.gateway)['discovery_pending'],int(at<12))
+                    state.close();state=sync.journal(path)
+            self.assertEqual(len(seen),6);self.assertEqual(len(set(seen)),6)
+        finally:
+            state.close()
+
+
+    def test_unresolved_anomaly_is_probed_again_after_gateway_restore(self):
+        self.add(1);self.mark_anomaly(1)
+        self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)',(self.gateway,'a'*32));self.state.commit()
+        sync.sync_once(self.path,self.state,self.gateway,now=10,anomaly_sender=lambda *a:'paid_conflict')
+        with patch.object(sync,'signed_post',return_value={'data':{'generation':'b'*32}}):sync.check_generation(self.path,self.state,self.gateway)
+        sync.sync_once(self.path,self.state,self.gateway,now=15,anomaly_sender=lambda *a:'awaiting_funds')
+        self.assertEqual(self.state.execute('SELECT outcome,checked_generation FROM payment_anomalies').fetchone(),('awaiting_funds','b'*32))
+        self.assertEqual(sync.queue_status(self.state,self.gateway)['pending'],1)
+        self.assertFalse(sync.queue_status(self.state,self.gateway)['replay_complete'])
 
 
 if __name__ == '__main__':

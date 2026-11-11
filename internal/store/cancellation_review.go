@@ -202,13 +202,17 @@ func refreshCancellationCallback(db *gorm.DB, orderID uint) error {
 	return db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL AND state<>'in_flight'", orderID).Update("state", state).Error
 }
 
-func (s *Store) CancellationRefundReviewStatus(ctx context.Context, tradeNo, outTradeNo string) (bool, string, error) {
+func (s *Store) CancellationReviewByReference(ctx context.Context, tradeNo, outTradeNo string) (CancellationReviewSummary, error) {
 	summary, err := cancellationReviewSummary(s.db.WithContext(ctx), "o.trade_no=? AND o.out_trade_no=?", tradeNo, outTradeNo)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// A signed query for a mismatched identity is never evidence of a completed refund.
 		r, recoveryErr := s.Recovery(ctx)
-		return false, r.Generation, recoveryErr
+		return CancellationReviewSummary{Generation: r.Generation}, recoveryErr
 	}
+	return summary, err
+}
+
+func (s *Store) CancellationRefundReviewStatus(ctx context.Context, tradeNo, outTradeNo string) (bool, string, error) {
+	summary, err := s.CancellationReviewByReference(ctx, tradeNo, outTradeNo)
 	return summary.Current(), summary.Generation, err
 }
 func (s *Store) CancellationRefundReviewed(ctx context.Context, tradeNo, outTradeNo string) (bool, error) {

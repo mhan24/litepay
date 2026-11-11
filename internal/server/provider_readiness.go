@@ -7,8 +7,7 @@ import (
 )
 
 func (h *Handlers) providerAccepting(c *gin.Context, cfg *config.Config, provider string) bool {
-	ready, err := h.poller.ProviderReady(c.Request.Context(), cfg, provider)
-	return err == nil && ready
+	return h.providerState(c, cfg, provider).Ready
 }
 
 func (h *Handlers) anyProviderAccepting(c *gin.Context, cfg *config.Config, o *model.Order) bool {
@@ -41,21 +40,27 @@ type providerHealth struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+func (h *Handlers) providerState(c *gin.Context, cfg *config.Config, provider string) providerHealth {
+	state := providerHealth{Provider: provider, Configured: cfg.ProviderEnabled(provider)}
+	ready, err := h.poller.ProviderReady(c.Request.Context(), cfg, provider)
+	switch {
+	case !state.Configured:
+		state.Reason = "平台未启用"
+	case err != nil || !ready:
+		state.Reason = "账户核验或收款扫描尚未就绪"
+	case provider == config.ProviderTON && !h.poller.GRAM.Snapshot().Fresh:
+		state.Reason = "GRAM/USD 行情检测尚未就绪"
+	default:
+		state.Ready = true
+	}
+	return state
+}
+
 func (h *Handlers) providerHealths(c *gin.Context) []providerHealth {
 	cfg := h.C()
 	out := make([]providerHealth, 0, 3)
 	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
-		state := providerHealth{Provider: provider, Configured: cfg.ProviderEnabled(provider)}
-		if !state.Configured {
-			state.Reason = "平台未启用"
-		} else if !h.providerAccepting(c, cfg, provider) {
-			state.Reason = "账户核验或收款扫描尚未就绪"
-		} else if provider == config.ProviderTON && !h.poller.GRAM.Snapshot().Fresh {
-			state.Reason = "GRAM/USD 行情检测尚未就绪"
-		} else {
-			state.Ready = true
-		}
-		out = append(out, state)
+		out = append(out, h.providerState(c, cfg, provider))
 	}
 	return out
 }

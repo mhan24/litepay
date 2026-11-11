@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"litepay/internal/gram"
 	"litepay/internal/sign"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,4 +194,126 @@ func signedCreateRequest(t *testing.T, engine http.Handler, cfg *config.Config, 
 	w := httptest.NewRecorder()
 	engine.ServeHTTP(w, req)
 	return w
+}
+
+func TestTONPriceFailureBlocksNewInstructionsButKeepsHistoricalCollection(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.TON.Address = gram.DefaultAddress
+	cfg.Binance.APIKey = "fixture-key"
+	cfg.Binance.APISecret = "fixture-secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	cfg.Checkout.Currencies = []string{"GRAM", "USDT"}
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p := worker.NewPoller(mgr, st)
+	source := &outageSource{uid: cfg.TON.Address}
+	p.UseTestSource("ton", source)
+	if err = p.Scan(ctx, "ton"); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := func(no string) *httptest.ResponseRecorder {
+		return signedCreateRequest(t, engine, mgr.Get(), map[string]any{"order_id": no, "amount": 10, "notify_url": "https://shop.example/notify", "redirect_url": "https://shop.example/return", "currencies": "GRAM"})
+	}
+	assertBlocked := func(no string) {
+		t.Helper()
+		if w := getRequest(engine, "/readyz/providers/ton"); w.Code != 503 || !strings.Contains(w.Body.String(), "行情") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if w := getRequest(engine, "/readyz"); w.Code != 503 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if w := create(no); !strings.Contains(w.Body.String(), `"status_code":400`) {
+			t.Fatal(w.Body.String())
+		}
+		var count int64
+		if err := st.DB().Model(&model.Order{}).Where("out_trade_no=?", no).Count(&count).Error; err != nil || count != 0 {
+			t.Fatal("unusable order was persisted", count, err)
+		}
+	}
+	assertBlocked("no-price")
+	var failing atomic.Bool
+	prices := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failing.Load() {
+			w.WriteHeader(503)
+			return
+		}
+		w.Write([]byte(`{"error":[],"result":{"TONUSD":{"a":["1.11"],"b":["1.11"]}}}`))
+	}))
+	defer prices.Close()
+	if err = p.GRAM.UseTestPriceSource(prices.URL + "?fixture=1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.GRAM.CheckPrice(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w := getRequest(engine, "/readyz/providers/ton"); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	no := createOrderViaBEpusdt(t, engine, mgr.Get().BEpusdt.APIToken, "https://shop.example/notify")
+	if w := postForm(engine, "/api/order/payment", url.Values{"trade_no": {no}, "provider": {"ton"}, "currency": {"GRAM"}}); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	o, err := st.GetByTradeNo(ctx, no)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A failed refresh invalidates an otherwise recent cached quote immediately.
+	failing.Store(true)
+	if err = p.GRAM.CheckPrice(ctx); err == nil {
+		t.Fatal("failed price source was accepted")
+	}
+	assertBlocked("price-down")
+	if w := getRequest(engine, "/pay/"+no); w.Code != 503 || strings.Contains(w.Body.String(), "gram-payment-qr") {
+		t.Fatal("stale price exposed instruction", w.Code, w.Body.String())
+	}
+	if w := postForm(engine, "/api/order/payment", url.Values{"trade_no": {no}, "provider": {"ton"}, "currency": {"GRAM"}}); w.Code != 503 || !strings.Contains(w.Body.String(), "行情") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := getRequest(engine, "/api/order/status?order_id="+no); !strings.Contains(w.Body.String(), `"accepting_payment":false`) {
+		t.Fatal(w.Body.String())
+	}
+	source.rows = []model.Transaction{{Provider: "ton", EventID: "past-gram-money", Receiver: cfg.TON.Address, Currency: "GRAM", Units: o.PayUnits, OccurredAt: time.Now(), State: model.Confirmed, MasterchainSeqno: 123}}
+	if err = p.Scan(ctx, "ton"); err != nil {
+		t.Fatal(err)
+	}
+	paid, err := st.GetByTradeNo(ctx, no)
+	if err != nil || paid.Status != model.Paid {
+		t.Fatal("price outage hid actual funds", paid, err)
+	}
+	if w := getRequest(engine, "/pay/"+no); w.Code != 200 || !strings.Contains(w.Body.String(), "支付成功") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	p.UseTestSource("binance", &outageSource{uid: "receiver"})
+	if err = p.Scan(ctx, "binance"); err != nil {
+		t.Fatal(err)
+	}
+	if w := getRequest(engine, "/readyz"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := create("gram-down-binance-up"); !strings.Contains(w.Body.String(), `"status_code":400`) {
+		t.Fatal("stablecoin platform bypassed GRAM quote requirement", w.Body.String())
+	}
+	if w := signedCreateRequest(t, engine, mgr.Get(), map[string]any{"order_id": "stablecoin-during-price-failure", "amount": 10, "notify_url": "https://shop.example/notify", "redirect_url": "https://shop.example/return"}); !strings.Contains(w.Body.String(), `"status_code":200`) {
+		t.Fatal(w.Body.String())
+	}
+	failing.Store(false)
+	if err = p.GRAM.CheckPrice(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w := create("price-recovered"); !strings.Contains(w.Body.String(), `"status_code":200`) {
+		t.Fatal(w.Body.String())
+	}
 }
