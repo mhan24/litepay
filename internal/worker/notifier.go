@@ -38,7 +38,7 @@ func (n *Notifier) UseTestTransport() {
 func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	cfg := n.cfg.Get()
 	if cfg.Server.CancelSyncRequired {
-		ready, err := n.st.RecoveryReady(ctx)
+		ready, err := n.st.PaymentOperationsReady(ctx)
 		if err != nil || !ready {
 			return false, err
 		}
@@ -77,6 +77,15 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 		}
 	}
 	if err == nil {
+		// The bridge can fail while this task's payload and signing key are loaded.
+		if n.cfg.Get().Server.CancelSyncRequired {
+			ready, guardErr := n.st.PaymentOperationsReady(ctx)
+			if guardErr != nil || !ready {
+				save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+				defer done()
+				return false, n.st.ReleaseCallback(save, *task)
+			}
+		}
 		req.Header.Set("Content-Type", "application/json")
 		var response []byte
 		status, response, err = n.http.Do(req)

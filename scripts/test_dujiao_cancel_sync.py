@@ -299,6 +299,41 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(body['missing'],'1')
         self.assertEqual(body['failures'],'1')
 
+    def test_paid_conflict_remains_unhealthy_across_cycles_and_restart(self):
+        self.add(1)
+        path = Path(self.tmp.name) / 'conflict-state.db'
+        state = sync.journal(path)
+        state.execute("INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)", (self.gateway,'a'*32))
+        state.commit()
+        sync.sync_once(self.path,state,self.gateway,lambda *a:'paid_conflict',now=10)
+        state.close()
+        state = sync.journal(path)
+        self.addCleanup(state.close)
+        for at in (20,1000):
+            sync.sync_once(self.path,state,self.gateway,lambda *a:self.fail('terminal conflict resent'),now=at)
+            status = sync.queue_status(state,self.gateway)
+            self.assertEqual(status['failures'],0)
+            self.assertEqual(status['conflicts'],1)
+            self.assertFalse(status['replay_complete'])
+            with patch.object(sync,'signed_post',return_value={'status_code':200}) as post:
+                sync.report_health(self.path,state,self.gateway,True)
+            body = post.call_args[0][2]
+            self.assertEqual(body['healthy'],'false')
+            self.assertEqual(body['conflicts'],'1')
+
+    def test_fresh_source_without_completed_reconciliation_reports_unhealthy(self):
+        self.db.commit()
+        self.state.execute("INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)", (self.gateway,'a'*32))
+        self.state.commit()
+        with patch.object(sync,'signed_post',return_value={'status_code':200}) as post:
+            sync.report_health(self.path,self.state,self.gateway,True)
+        self.assertEqual(post.call_args[0][2]['healthy'],'false')
+        self.state.execute("UPDATE gateway_epochs SET scanned=1")
+        self.state.commit()
+        with patch.object(sync,'signed_post',return_value={'status_code':200}) as post:
+            sync.report_health(self.path,self.state,self.gateway,True)
+        self.assertEqual(post.call_args[0][2]['healthy'],'true')
+
     def test_gateway_generation_replays_closed_receipts_and_survives_restart(self):
         self.add(1)
         sync.sync_once(self.path,self.state,self.gateway,lambda *a:'closed',now=10)

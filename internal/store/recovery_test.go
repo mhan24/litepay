@@ -95,3 +95,111 @@ func TestSignedCancellationMakesExpiredOrderIneligibleForManualRecovery(t *testi
 		t.Fatal("explicit merchant cancellation was reopened")
 	}
 }
+
+func TestPaymentOperationsRequireFreshCompleteCurrentGenerationHealth(t *testing.T) {
+	for _, failure := range []string{"source", "pending", "retry", "missing", "conflict", "heartbeat", "last_success", "generation", "incomplete"} {
+		t.Run(failure, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			r, _ := s.Recovery(ctx)
+			h := model.IntegrationHealth{Name: "dujiao_cancel_sync", Generation: r.Generation, Healthy: true, ReportedAt: time.Now().Unix()}
+			if err := s.AcknowledgeRecovery(ctx, r.Generation, true, h); err != nil {
+				t.Fatal(err)
+			}
+			if ready, e := s.PaymentOperationsReady(ctx); e != nil || !ready {
+				t.Fatal(ready, e)
+			}
+			h.ReportedAt++
+			complete := true
+			switch failure {
+			case "source":
+				h.Healthy = false
+			case "pending":
+				h.Pending = 1
+			case "retry":
+				h.Failures = 1
+			case "missing":
+				h.Missing = 1
+			case "conflict":
+				h.Conflicts = 1
+			case "incomplete":
+				complete = false
+			}
+			if err := s.AcknowledgeRecovery(ctx, r.Generation, complete, h); err != nil {
+				t.Fatal(err)
+			}
+			var update map[string]any
+			switch failure {
+			case "heartbeat":
+				update = map[string]any{"received_at": time.Now().Add(-46 * time.Second)}
+			case "last_success":
+				update = map[string]any{"last_success_at": time.Now().Add(-61 * time.Second)}
+			case "generation":
+				update = map[string]any{"generation": "different"}
+			}
+			if update != nil {
+				if e := s.DB().Model(&model.IntegrationHealth{}).Where("name=?", h.Name).Updates(update).Error; e != nil {
+					t.Fatal(e)
+				}
+			}
+			if ready, e := s.PaymentOperationsReady(ctx); e != nil || ready {
+				t.Fatal("unsafe payment operations", ready, e)
+			}
+			if ready, e := s.RecoveryReady(ctx); e != nil || !ready {
+				t.Fatal("runtime health stopped evidence collection", ready, e)
+			}
+		})
+	}
+}
+
+func TestReplayedReportCannotAcknowledgeRecovery(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	r, _ := s.Recovery(ctx)
+	h := model.IntegrationHealth{Name: "dujiao_cancel_sync", Generation: r.Generation, Healthy: true, ReportedAt: time.Now().Unix()}
+	if err := s.AcknowledgeRecovery(ctx, r.Generation, false, h); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcknowledgeRecovery(ctx, r.Generation, true, h); err != nil {
+		t.Fatal(err)
+	}
+	if ready, e := s.RecoveryReady(ctx); e != nil || ready {
+		t.Fatal("replayed flag acknowledged recovery", ready, e)
+	}
+}
+
+func TestUnsentCallbackReleasePreservesBudgetAndFencesOldLease(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	o := readyOrder(t, s, "held-callback")
+	if _, err := s.Process(ctx, evidence(o, "held-event"), ""); err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := s.ReserveCallback(ctx, 5, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ReleaseCallback(ctx, *first); err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := s.ReserveCallback(ctx, 5, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Attempts != 1 {
+		t.Fatal("pause consumed retry budget", second)
+	}
+	if err = s.ReleaseCallback(ctx, *first); err != nil {
+		t.Fatal(err)
+	}
+	var stored model.Callback
+	if err = s.DB().First(&stored, "order_id=?", o.ID).Error; err != nil || stored.State != "in_flight" || !stored.LeaseUntil.Equal(second.LeaseUntil) {
+		t.Fatal("old worker released new lease", stored, err)
+	}
+	if err = s.FinishCallback(ctx, *first, 200, true, "", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB().First(&stored, "order_id=?", o.ID).Error; err != nil || stored.DeliveredAt != nil {
+		t.Fatal("old worker completed new lease", stored, err)
+	}
+}

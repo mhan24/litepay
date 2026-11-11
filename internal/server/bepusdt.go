@@ -94,8 +94,8 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 }
 
 func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
-	if h.recoveryBlocked(c) {
-		h.bepusdtFail(c, "恢复核对尚未完成，暂停接单")
+	if h.paymentOperationsBlocked(c) {
+		h.bepusdtFail(c, "商城取消同步异常或核对未完成，暂停接单")
 		return
 	}
 	cfg := h.C()

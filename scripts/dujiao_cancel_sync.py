@@ -300,7 +300,7 @@ def check_generation(database, state, gateway):
 def report_health(database, state, gateway, healthy):
     status = queue_status(state, gateway)
     body = {'source': 'postgresql' if str(database).startswith(('postgresql://', 'postgres://')) else 'sqlite',
-            'timestamp': str(int(time.time())), 'healthy': 'true' if healthy and status['failures']==0 else 'false',
+            'timestamp': str(int(time.time())), 'healthy': 'true' if healthy and status['failures']==0 and status['conflicts']==0 and status['pending']==0 and status['replay_complete'] else 'false',
             'pending': str(status['pending']), 'failures': str(status['failures']), 'conflicts': str(status['conflicts']),
             'missing': str(status['missing']), 'generation': status['generation'], 'replay_complete': 'true' if status['replay_complete'] else 'false'}
     return signed_post(gateway, '/api/v1/order/cancel-sync-status', body, gateway_token(database, gateway))

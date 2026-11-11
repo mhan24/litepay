@@ -121,6 +121,8 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	defer lock.Unlock()
 	cfg := p.cfg.Get()
 	if cfg.Server.CancelSyncRequired {
+		// Runtime heartbeat failures pause instructions and callbacks, but scanning must
+		// continue collecting and attributing deposits once restore replay has completed.
 		ready, err := p.st.RecoveryReady(ctx)
 		if err != nil || !ready {
 			return err

@@ -603,6 +603,13 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 	}
 	return &task, &o, err
 }
+
+// ReleaseCallback returns an unsent reservation without consuming the merchant retry
+// budget. The lease fence prevents an old worker from releasing a newer attempt.
+func (s *Store) ReleaseCallback(ctx context.Context, task model.Callback) error {
+	return s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(map[string]any{"attempts": task.Attempts - 1, "next_at": time.Now(), "lease_until": time.Time{}, "state": "queued"}).Error
+}
+
 func (s *Store) FinishCallback(ctx context.Context, task model.Callback, status int, ok bool, message string, delay time.Duration) error {
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		state := "queued"

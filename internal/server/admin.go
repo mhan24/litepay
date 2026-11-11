@@ -718,7 +718,7 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 		return
 	}
 	cancelHealth, cancelErr := h.st.IntegrationHealth(c.Request.Context())
-	cancelWarning := h.C().Server.CancelSyncRequired && (cancelErr != nil || h.recoveryBlocked(c) || !cancelHealth.Healthy || cancelHealth.Failures > 0 || cancelHealth.Missing > 0 || time.Since(cancelHealth.ReceivedAt) > 45*time.Second)
+	cancelWarning := cancelHealth.Conflicts > 0 || h.C().Server.CancelSyncRequired && (cancelErr != nil || h.paymentOperationsBlocked(c))
 
 	var exhausted, review, merchantReview int64
 	var orders []model.Order

@@ -55,7 +55,7 @@ func (h *Handlers) AdminOperations(c *gin.Context) {
 		return
 	}
 	health, _ := h.st.IntegrationHealth(c.Request.Context())
-	c.JSON(200, gin.H{"recovery": func() any { r, _ := h.st.Recovery(c.Request.Context()); return r }(), "queues": stats, "cancel_sync": health, "binance": h.poller.BinanceUsage(), "cancel_sync_required": h.C().Server.CancelSyncRequired})
+	c.JSON(200, gin.H{"recovery": func() any { r, _ := h.st.Recovery(c.Request.Context()); return r }(), "payment_operations_ready": !h.paymentOperationsBlocked(c), "queues": stats, "cancel_sync": health, "binance": h.poller.BinanceUsage(), "cancel_sync_required": h.C().Server.CancelSyncRequired})
 }
 
 func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
@@ -82,10 +82,10 @@ func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
 	}
 	c.JSON(200, bepusdtResponse{StatusCode: 200, Message: "success", Data: gin.H{"generation": r.Generation, "replay_required": !r.Acknowledged}})
 }
-func (h *Handlers) recoveryBlocked(c *gin.Context) bool {
+func (h *Handlers) paymentOperationsBlocked(c *gin.Context) bool {
 	if !h.C().Server.CancelSyncRequired {
 		return false
 	}
-	ready, err := h.st.RecoveryReady(c.Request.Context())
+	ready, err := h.st.PaymentOperationsReady(c.Request.Context())
 	return err != nil || !ready
 }

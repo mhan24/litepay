@@ -54,6 +54,7 @@ func (s *Store) QueueStats(ctx context.Context) (QueueStats, error) {
 	return out, err
 }
 func (s *Store) SaveIntegrationHealth(ctx context.Context, h model.IntegrationHealth) error {
+	h.Healthy = h.Healthy && h.Pending == 0 && h.Failures == 0 && h.Missing == 0 && h.Conflicts == 0
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var old model.IntegrationHealth
 		err := db.First(&old, "name=?", h.Name).Error

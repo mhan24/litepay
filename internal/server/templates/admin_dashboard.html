@@ -24,7 +24,7 @@
       <p>历史补扫 {{.Queues.HistoricalPending}} 项 · 剩余窗口 {{.Queues.HistoricalRemainingSeconds}} 秒 · 最早窗口距今 {{.Queues.OldestHistoricalSeconds}} 秒</p>
       <p>最终复核尚未覆盖 {{.Queues.FinalReviewWaiting}} 份付款尝试 · 最早窗口距今 {{.Queues.OldestFinalWindowSeconds}} 秒，包含尚未排入扫描任务的窗口。</p>
       <p>Binance Pay 当前客户端累计请求 {{.BinanceUsage.Requests}} 次 · 当前计量窗口估算 UID 权重 {{.BinanceUsage.MinuteUIDWeight}}，不含其他应用调用。</p>
-      {{if .CancelRequired}}<p {{if .CancelWarning}}role="alert"{{end}}>商城取消同步：{{if .CancelWarning}}异常或心跳过期{{else}}运行中{{end}} · 未解决异常 {{.CancelHealth.Failures}} 笔 · 网关缺少订单 {{.CancelHealth.Missing}} 笔 · 已支付冲突 {{.CancelHealth.Conflicts}} 笔 · {{if .CancelHealth.LastSuccessAt.IsZero}}尚未完成成功核对{{else}}最近成功 {{.CancelHealth.LastSuccessAt.Format "01-02 15:04:05"}}{{end}}</p>{{else}}<p>取消同步心跳未设为必需；部署脚本并开启监控后，才能持续检查商城关单联动。</p>{{end}}
+      {{if or .CancelRequired .CancelWarning}}<p {{if .CancelWarning}}role="alert"{{end}}>商城取消同步：{{if .CancelWarning}}异常或心跳过期{{else}}运行中{{end}} · 未解决异常 {{.CancelHealth.Failures}} 笔 · 网关缺少订单 {{.CancelHealth.Missing}} 笔 · 已支付冲突 {{.CancelHealth.Conflicts}} 笔 · {{if .CancelHealth.LastSuccessAt.IsZero}}尚未完成成功核对{{else}}最近成功 {{.CancelHealth.LastSuccessAt.Format "01-02 15:04:05"}}{{end}}</p>{{else}}<p>取消同步心跳未设为必需；部署脚本并开启监控后，才能持续检查商城关单联动。</p>{{end}}
     </div></section>
 
     <section class="card">

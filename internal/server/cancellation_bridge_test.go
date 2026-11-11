@@ -86,7 +86,7 @@ s.report_health(path,state,gateway,True)
 		t.Fatal(result, e)
 	}
 	health, e := st.IntegrationHealth(ctx)
-	if e != nil || !health.Healthy || health.Source != "sqlite" || health.Conflicts != 1 {
+	if e != nil || health.Healthy || health.Source != "sqlite" || health.Conflicts != 1 {
 		t.Fatal(health, e)
 	}
 	canceled, _ := st.GetByTradeNo(ctx, "bridge-cancel")
