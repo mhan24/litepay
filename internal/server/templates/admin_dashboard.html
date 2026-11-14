@@ -46,8 +46,8 @@
 
     <h2>最近订单</h2>
     <section class="card">
-      <div class="table-wrap">
-        <table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="最近订单">
+        <table style="--label-1:'商户订单';--label-2:'付款方式';--label-3:'精确应付';--label-4:'状态';--label-5:'创建时间'">
           <thead>
             <tr>
               <th>商户订单</th>
@@ -77,8 +77,8 @@
     {{if .ConfirmationReviews}}<h2>到账确认待人工复核</h2><section class="card"><div class="card-b">{{range .ConfirmationReviews}}<p>{{.Provider}} · 事件 {{.EventID}} · 自动确认期限 {{.Deadline.Format "01-02 15:04"}}{{if .OrderID}} · 本地订单 {{.OrderID}}{{end}}</p>{{end}}</div></section>{{end}}
     <h2>待核对到账</h2>
     <section class="card">
-      <div class="table-wrap">
-        <table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="待核对到账">
+        <table style="--label-1:'平台 / 原始资金事件';--label-2:'查询编号';--label-3:'币种 / 到账金额';--label-4:'原因'">
           <thead>
             <tr>
               <th>平台 / 原始资金事件</th>

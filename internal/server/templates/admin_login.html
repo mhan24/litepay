@@ -8,7 +8,7 @@
 {{template "theme_head" .}}
 {{template "theme_css" .}}
 <style>
-body{padding:40px 24px}.login{max-width:920px;margin:40px auto}.brand{display:flex;align-items:center;gap:12px;margin-bottom:28px}.mark{width:30px;height:30px}.brand-copy{flex:1}.brand h1{margin:0;font-size:16px;font-weight:600}.brand p{margin:3px 0 0;font-size:12px;color:var(--muted)}.login-frame{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}.login-context{padding:40px;background:var(--surface-2)}.login-context h2{font-size:24px;font-weight:550;line-height:1.4;margin:0 0 20px;letter-spacing:-.5px}.login-context p{font-size:14px;line-height:1.8;color:var(--muted);margin:0}.login-context ul{padding:0;list-style:none;margin:32px 0 0;font-size:14px}.login-context li{padding:12px 0;border-bottom:1px solid var(--line)}.card{padding:40px}label{display:block;font-size:14px;font-weight:500;margin:0 0 8px}label[for=password]{margin-top:24px}input{width:100%;min-height:44px;border:1px solid var(--line-strong);border-radius:6px;padding:10px 12px;background:var(--surface);color:var(--text)}input:focus{outline:2px solid var(--focus);outline-offset:2px}.card button{width:100%;min-height:44px;margin-top:28px;border:0;border-radius:6px;background:var(--text);color:var(--surface);font-size:14px;font-weight:500;cursor:pointer}.card button:hover{opacity:.9}.err{padding:12px 14px;margin-bottom:20px;font-size:14px;border-radius:6px;color:var(--danger);background:var(--danger-soft)}.foot{font-size:12px;color:var(--muted);line-height:1.7;margin-top:20px}@media(max-width:640px){body{padding:24px 16px}.login{margin:0 auto}.login-frame{grid-template-columns:1fr}.login-context{padding:28px 24px}.login-context ul{display:none}.login-context h2{margin-bottom:12px}.card{padding:28px 24px}.brand{margin-bottom:24px}}
+body{padding:40px 24px}.login{max-width:920px;margin:40px auto}.brand{display:flex;align-items:center;gap:12px;margin-bottom:28px}.mark{width:30px;height:30px}.brand-copy{flex:1}.brand h1{margin:0;font-size:16px;font-weight:600}.brand p{margin:3px 0 0;font-size:12px;color:var(--muted)}.login-frame{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}.login-context{padding:40px;background:var(--surface-2)}.login-context h2{font-size:24px;font-weight:550;line-height:1.4;margin:0 0 20px;letter-spacing:-.5px}.login-context p{font-size:14px;line-height:1.8;color:var(--muted);margin:0}.login-context ul{padding:0;list-style:none;margin:32px 0 0;font-size:14px}.login-context li{padding:12px 0;border-bottom:1px solid var(--line)}.card{padding:40px}label{display:block;font-size:14px;font-weight:500;margin:0 0 8px}label[for=password]{margin-top:24px}input{width:100%;min-height:44px;border:1px solid var(--line-strong);border-radius:6px;padding:10px 12px;background:var(--surface);color:var(--text)}input:focus{outline:2px solid var(--focus);outline-offset:2px}.pwd{position:relative}.pwd input{padding-right:56px}.card .pwd-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:auto;min-height:32px;margin:0;padding:0 10px;border:0;border-radius:4px;background:none;color:var(--muted);font-size:12px;font-weight:500;cursor:pointer}.card .pwd-toggle:hover{background:var(--surface-3);color:var(--text)}.card button{width:100%;min-height:44px;margin-top:28px;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);font-size:14px;font-weight:500;cursor:pointer}.card button:hover{opacity:.92}.card button[type=submit]{transition:transform var(--motion-fast)}.card button[type=submit]:hover{transform:translateY(-1px)}.card button[type=submit]:active{transform:translateY(1px)}.err{padding:12px 14px;margin-bottom:20px;font-size:14px;border-radius:6px;color:var(--danger);background:var(--danger-soft)}.foot{font-size:12px;color:var(--muted);line-height:1.7;margin-top:20px}@media(max-width:640px){body{padding:24px 16px}.login{margin:0 auto}.login-frame{grid-template-columns:1fr}.login-context{padding:28px 24px}.login-context ul{display:none}.login-context h2{margin-bottom:12px}.card{padding:28px 24px}.brand{margin-bottom:24px}}
 </style>
 </head>
 <body>
@@ -23,14 +23,30 @@ body{padding:40px 24px}.login{max-width:920px;margin:40px auto}.brand{display:fl
     {{if .Error}}<div class="err" role="alert">{{.Error}}</div>{{end}}
     <input type="hidden" name="next" value="{{.Next}}">
     <label for="username">管理员账号</label>
-    <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+    <input id="username" name="username" type="text" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" required autofocus>
     <label for="password">登录密码</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <div class="pwd">
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="button" id="toggle-password" class="pwd-toggle" aria-pressed="false" aria-label="显示密码">显示</button>
+    </div>
     <button type="submit">登录管理台</button>
     <div class="foot">仅供管理员登录。连续输错密码会暂时限制登录。</div>
   </form>
   </div>
 </main>
 {{template "theme_script" .}}
+<script>
+(function(){
+  var p=document.getElementById('password'),b=document.getElementById('toggle-password');
+  if(!p||!b)return;
+  b.addEventListener('click',function(){
+    var show=p.type==='password';
+    p.type=show?'text':'password';
+    b.textContent=show?'隐藏':'显示';
+    b.setAttribute('aria-pressed',String(show));
+    b.setAttribute('aria-label',show?'隐藏密码':'显示密码');
+  });
+})();
+</script>
 </body>
 </html>

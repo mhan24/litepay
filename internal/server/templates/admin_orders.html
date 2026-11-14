@@ -16,14 +16,16 @@
       <h1>{{.Base.Title}}</h1>
     </header>
 
-    <form class="filters">
-      <input name="q" value="{{.Query}}" placeholder="完整商户订单号或网关订单号">
-      <button class="btn btn-ghost">查询</button>
-    </form>
+    <search>
+      <form class="filters" method="get">
+        <input name="q" type="search" value="{{.Query}}" placeholder="完整商户订单号或网关订单号" aria-label="搜索订单号" autocorrect="off" autocapitalize="none" spellcheck="false">
+        <button class="btn btn-ghost">查询</button>
+      </form>
+    </search>
 
     <section class="card">
-      <div class="table-wrap">
-        <table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="订单列表">
+        <table style="--label-1:'商户订单';--label-2:'付款方式';--label-3:'精确应付';--label-4:'状态';--label-5:'创建时间';--label-6:'操作'">
           <thead>
             <tr>
               <th>商户订单</th>
