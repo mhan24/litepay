@@ -17,7 +17,7 @@
     <header class="pagehead">
       <h1>{{.Base.Title}}</h1>
     </header>
-    <p class="section-desc">到账、核销、商户确认分别记录。商户确认回调不代表已经交付商品。</p>
+    <p class="section-desc">资金到账、订单核销与商户确认采用分步独立记录。商户确认接收回调并不代表已完成最终商品交付。</p>
 
     <section class="card"><div class="card-b">
       <h2>队列与取消同步</h2>
@@ -38,7 +38,7 @@
         {{range .Scans}}
         <p>{{.Provider}} · 最后成功 {{.LastSuccess.Format "01-02 15:04:05"}} · 已查至 {{.ScannedUntil.Format "01-02 15:04:05"}}{{if .LastError}} · <strong>查询失败：{{.LastError}}</strong>{{end}}{{if .PendingError}} · <strong>未确认到账补查失败：{{.PendingError}}</strong>{{end}}</p>
         {{else}}
-        尚未完成首次扫描
+        暂无已完成的扫描记录
         {{end}}
         {{range .TONCheckpoints}}<p>TON 历史正在补齐 · 已提交 {{.Pages}} 页 · 当前 LT {{.LT}} · 范围 {{.From.Format "01-02 15:04"}} 至 {{.To.Format "01-02 15:04"}}</p>{{end}}
       </div>

@@ -18,7 +18,7 @@ body{padding:40px 24px}.login{max-width:920px;margin:40px auto}.brand{display:fl
     <div class="brand-copy"><h1>{{.SiteName}}</h1><p>Binance / OKX / GRAM 收银台</p></div>
     {{template "theme_toggle" .}}
   </div>
-  <div class="login-frame"><section class="login-context"><h2>收款与对账，<br>从这里查看。</h2><p>管理 Binance 和 OKX 收款，核对交易流水，追踪商户回调。</p><ul><li>检查到账扫描与服务状态</li><li>核对订单和未匹配的交易</li><li>处理回调失败与重试</li></ul></section>
+  <div class="login-frame"><section class="login-context"><h2>收款与对账，<br>从这里查看。</h2><p>管理 Binance、OKX 与 TON 收款，核对交易流水，追踪商户回调。</p><ul><li>检查到账扫描与服务状态</li><li>核对订单和未匹配的交易</li><li>处理回调失败与重试</li></ul></section>
   <form class="card" method="post" action="{{adminPath}}/login">
     {{if .Error}}<div class="err" role="alert">{{.Error}}</div>{{end}}
     <input type="hidden" name="next" value="{{.Next}}">
@@ -30,7 +30,7 @@ body{padding:40px 24px}.login{max-width:920px;margin:40px auto}.brand{display:fl
       <button type="button" id="toggle-password" class="pwd-toggle" aria-pressed="false" aria-label="显示密码">显示</button>
     </div>
     <button type="submit">登录管理台</button>
-    <div class="foot">仅供管理员登录。连续输错密码会暂时限制登录。</div>
+    <div class="foot">仅供管理员登录。连续输入错误密码将触发临时限制。</div>
   </form>
   </div>
 </main>

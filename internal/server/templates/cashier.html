@@ -63,7 +63,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if .NeedsProvider}}
     <div class="choice-title">
       <h2>选择收款平台</h2>
-      <span>选择转账平台</span>
+      <span>支持免手续费站内转账及链上支付</span>
     </div>
     <div class="provider-list">
       {{range .Providers}}
@@ -82,7 +82,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if .NeedsCurrency}}
     <div class="choice-title">
       <h2>选择币种</h2>
-      <span>选择转账币种</span>
+      <span>按实时汇率与订单金额核对</span>
     </div>
     <div class="currency-list">
       {{range .CurrencyOptions}}
@@ -104,7 +104,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
 
     {{if not .NeedsProvider}}{{if not .NeedsCurrency}}
     <div class="amount-box">
-      <div class="amount-label"><span>应付金额</span><span>含订单识别尾数</span></div>
+      <div class="amount-label"><span>应付金额</span><span>含订单识别尾数，请如实转账</span></div>
       <div class="amount-row">
         {{if eq .Currency "GRAM"}}<img class="amount-token" src="/assets/brand/gram.svg" alt="">{{else if eq .Currency "USDT"}}<img class="amount-token" src="/assets/brand/usdt.svg" alt="">{{else if eq .Currency "USDC"}}<img class="amount-token" src="/assets/brand/usdc.svg" alt="">{{end}}
         <span class="amount" id="amount">{{.Amount}}</span>
@@ -138,7 +138,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
         <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
       </svg>
-      <span>请转账<b>{{.Amount}} {{.Currency}}</b>。请保留全部小数位。到账金额必须精确一致，不足额不会自动确认。</span>
+      <span>请转账<b>{{.Amount}} {{.Currency}}</b>并保留全部小数位。到账金额必须精确一致，不足额将无法自动确认。</span>
     </div>
 
     {{if .HasPayee}}
@@ -169,7 +169,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
 
     <div class="status" role="status" aria-live="polite">
       <span class="dot"></span>
-      <span id="status-text">等待到账，确认后会更新付款状态</span>
+      <span id="status-text">等待付款到账，确认后将自动更新状态</span>
     </div>
     {{if .CanReselect}}
     <button class="reselect" type="button" data-back>← 更换收款平台或币种</button>
@@ -183,7 +183,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     </div>
   </section>
 
-  <p class="page-tip">{{if .Note}}{{.Note}}{{else}}到账后自动核对。已经付款，请勿重复转账。{{end}}</p>
+  <p class="page-tip">{{if .Note}}{{.Note}}{{else}}款项到账后系统将自动核对；若已完成付款，请勿重复转账。{{end}}</p>
 </div>
 {{template "theme_script" .}}
 

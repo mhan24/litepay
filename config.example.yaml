@@ -1,32 +1,33 @@
-# LitePay 启动配置
+# LitePay 启动配置文件示例
 #
-# 这里只放启动必需项。支付平台、收款 UID、订单和回调
-# 都保存在 SQLite 中，首次启动后请在 /admin/settings 配置。
+# 本文件仅包含服务进程启动所必需的基础配置项。
+# 各支付平台 API 凭据、收款 UID / 钱包地址、开放币种及金额规则均持久化在 SQLite 中，
+# 服务首次启动后，请直接登录管理后台 /admin/settings 页面进行可视化配置。
 
 server:
-  # 并发商户回调数，默认 8，最大 32；单订单仍使用数据库租约隔离。
+  # 并发商户回调工作协程数，默认 8，最大 32；单笔订单始终使用数据库租约隔离
   callback_workers: 8
-  # 部署取消同步脚本并启用心跳上报后开启；心跳过期时 readyz 返回 503。
+  # 部署独角关单同步脚本并启用心跳上报后开启；若心跳过期，/readyz 将返回 503
   cancel_sync_required: false
-  # 本机开发显式关闭；生产必须为 true，并配置 HTTPS 与商户主机白名单。
+  # 本地开发测试显式设为 false；生产环境必须设为 true，并强制配置 HTTPS 与商户回调白名单
   production: false
-  # 商城兼容历史密钥的联动验收通过后才可设为 true；否则生产轮换被阻止。
+  # 当商城端完成对历史密钥兼容性的联动验收后方可开启；未开启前生产环境禁止轮换 Token
   merchant_key_versions: false
-  # 访问根地址时跳转到商店；留空返回 404。
+  # 访问服务根路径时的重定向商城地址；留空则默认返回 404
   store_url: ""
   addr: "0.0.0.0:8080"
   base_url: "http://localhost:8080"
-  # 生产环境只填写实际反向代理的固定 IP/CIDR；默认忽略转发 IP 头。
-  # Caddy 容器重建后如 IP 改变，必须同步更新此值。
+  # 生产环境仅填写受信任的反向代理固定 IP 或 CIDR 网段；默认忽略不可信的客户端转发 IP 头
+  # 反向代理（如 Caddy/Nginx）容器重建后若 IP 发生变化，须同步更新此项
   trusted_proxies: []
-  # production 为 true 时必须填写；回调仅允许精确主机名和 HTTPS。
+  # production 为 true 时必须填写；商户回调仅允许匹配此精确主机名列表且强制使用 HTTPS
   notify_hosts: []
 
 database:
   path: "./data/litepay-dev.db"
 
 admin:
-  # 后台入口前缀，可改为不易猜到的单层路径；也可在后台修改。
+  # 后台管理入口路径前缀，建议修改为不易被猜测的单层路径；亦可在管理后台中调整
   path: "/admin"
   username: "admin"
   password: ""
