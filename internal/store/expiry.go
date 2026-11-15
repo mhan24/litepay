@@ -56,6 +56,10 @@ func (s *Store) Expire(ctx context.Context, grace int) error {
 		if err := db.Exec(`DELETE FROM history_coverages WHERE id IN(SELECT id FROM history_coverages WHERE observed_at<? ORDER BY observed_at LIMIT 1000)`, now.Add(-96*time.Hour)).Error; err != nil {
 			return err
 		}
+		// 取消意图只在“网关未见过该订单时先取消”的竞态下起拦截作用，30 天后不再需要。
+		if err := db.Exec(`DELETE FROM cancellation_intents WHERE rowid IN(SELECT rowid FROM cancellation_intents WHERE created_at<? ORDER BY created_at LIMIT 1000)`, now.Add(-30*24*time.Hour)).Error; err != nil {
+			return err
+		}
 		return db.Exec(`DELETE FROM slots WHERE rowid IN(SELECT rowid FROM slots WHERE order_id IS NULL AND expires_at<? ORDER BY expires_at LIMIT 1000)`, now).Error
 	})
 }

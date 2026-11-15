@@ -52,17 +52,17 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	}
 	var tx model.Transaction
 	if err = n.st.DB().WithContext(ctx).First(&tx, "order_id = ?", o.ID).Error; err != nil {
-		return true, err
+		return false, n.releaseCallback(ctx, *task, err)
 	}
 	payload := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "amount": json.Number(o.Original()), "actual_amount": json.Number(amount.String(o.PayUnits)), "token": o.Receiver, "block_transaction_id": tx.EventID, "status": 2}
 	key, err := n.st.CallbackKey(ctx, *task)
 	if err != nil {
-		return true, err
+		return false, n.releaseCallback(ctx, *task, err)
 	}
 	payload["signature"] = sign.BEpusdtSignGeneric(payload, key)
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return true, err
+		return false, n.releaseCallback(ctx, *task, err)
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Notify.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -113,6 +113,17 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	}
 	return true, err
 }
+
+// releaseCallback 归还一次未发出的预约，避免白白消耗商户重试额度；原始 cause 原样返回供上层记录日志。
+func (n *Notifier) releaseCallback(ctx context.Context, task model.Callback, cause error) error {
+	save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer done()
+	if err := n.st.ReleaseCallback(save, task); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
 func (n *Notifier) Run(ctx context.Context) {
 	workers := n.cfg.Get().Server.CallbackWorkers
 	if workers <= 0 {

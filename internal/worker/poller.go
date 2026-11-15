@@ -210,22 +210,36 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 
 // scanIncremental 正常增量扫描：从游标继续读到当前时刻，返回本次真正覆盖到的时间区间。
 // 只有完整成功的查询才推进游标；不完整响应返回错误，游标保持原位。
+// Binance Pay 历史无游标、按时间窗口二分拆分且有请求预算：窗口过密时一次 History 会耗尽
+// 预算返回 incomplete。这里减半窗口重试，成功后游标只推进到本次真正读完的位置；被跳过的
+// 后半段留在游标之后，下一轮从该位置继续扫，不丢记录。
 func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provider string, cli source, end time.Time) (time.Time, time.Time, error) {
 	start, end, err := p.scanBounds(ctx, cfg, provider, end)
 	if err != nil {
 		return start, end, err
 	}
-	rows, err := cli.History(ctx, start, end)
-	if err != nil {
-		return start, end, err
-	}
-	markAmbiguous(rows)
-	for _, t := range rows {
-		if _, err = p.st.Process(ctx, t, ""); err != nil {
+	for {
+		rows, err := cli.History(ctx, start, end)
+		if err == nil {
+			markAmbiguous(rows)
+			for _, t := range rows {
+				if _, err = p.st.Process(ctx, t, ""); err != nil {
+					return start, end, err
+				}
+			}
+			return start, end, nil
+		}
+		if !scanOverflow(err) || end.Sub(start) <= time.Second {
 			return start, end, err
 		}
+		end = start.Add(end.Sub(start) / 2)
 	}
-	return start, end, nil
+}
+
+// scanOverflow 判断是否是“本次窗口数据太密、受请求预算限制”可重试的失败，而不是网络或账户错误。
+func scanOverflow(err error) bool {
+	var apiErr *binance.APIError
+	return errors.As(err, &apiErr) && (apiErr.Kind == binance.ErrorIncomplete || apiErr.Kind == binance.ErrorBudget)
 }
 
 // pendingRecheckLimit 限制单轮补查的未确认到账数量，避免历史堆积拖慢每一次扫描。
@@ -255,15 +269,11 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 	p.pendingOffset[provider] = offset + len(times)
 	p.mu.Unlock()
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
-	var covered time.Time
 	for _, at := range times {
 		if !at.Before(from) && !at.After(to) {
 			continue // 本轮增量扫描已经读过这条记录
 		}
 		start, stop := at.Add(-lookback), at.Add(lookback)
-		if !covered.IsZero() && !stop.After(covered) {
-			continue // 与上一笔的补查窗口重叠，已在上一次查询中读到
-		}
 		rows, err := cli.History(ctx, start, stop)
 		if err != nil {
 			return err
@@ -274,7 +284,6 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 				return err
 			}
 		}
-		covered = stop
 	}
 	return nil
 }

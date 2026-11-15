@@ -23,6 +23,9 @@ dist/
 .workbuddy-ai/
 *.db-journal
 
+# 本机真实接口验收工具（凭据只进本地 SQLite，不随仓库分发）
+/cmd/apiverify/
+
 __pycache__/
 
 .taste-skill/

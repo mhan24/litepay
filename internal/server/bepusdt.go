@@ -192,7 +192,11 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		h.bepusdtFail(c, "收款扫描尚未就绪或行情不可用，暂停接单")
 		return
 	}
-	tradeNo := generateTradeNo()
+	tradeNo, err := generateTradeNo()
+	if err != nil {
+		h.bepusdtFail(c, "order create failed: "+err.Error())
+		return
+	}
 	order, err := h.st.Create(c.Request.Context(), model.Order{SigningKeyID: cfg.BEpusdt.TokenVersion, TradeNo: tradeNo, OutTradeNo: req.OrderID, Name: strings.TrimSpace(req.Name), OriginUnits: units, NotifyURL: req.NotifyURL, ReturnURL: req.RedirectURL, ExpiresAt: time.Now().Add(ttl), CurrencyLimit: req.Currencies, Reselect: reselect})
 	if err != nil {
 		h.bepusdtFail(c, "order create failed: "+err.Error())

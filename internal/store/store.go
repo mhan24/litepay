@@ -76,6 +76,14 @@ func Open(path string) (*Store, error) {
 	if err = db.Exec("PRAGMA foreign_keys=ON").Error; err != nil {
 		return fail(err)
 	}
+	// WAL 允许外部只读工具（备份/只读看板）在写入时不阻塞；busy_timeout 让意外并发的
+	// 第二连接等待而不是立刻报 database is locked。单连接 + 文件锁的单进程保证不受影响。
+	if err = db.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
+		return fail(err)
+	}
+	if err = db.Exec("PRAGMA busy_timeout=5000").Error; err != nil {
+		return fail(err)
+	}
 	var version int
 	if err = db.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
 		return fail(err)

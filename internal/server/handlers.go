@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -474,12 +475,12 @@ func (h *Handlers) Index(c *gin.Context) {
 	}
 	c.Status(404)
 }
-func generateTradeNo() string {
+func generateTradeNo() (string, error) {
 	var b [20]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic(err)
+		return "", fmt.Errorf("生成订单号失败: %w", err)
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }
 
 func (h *Handlers) GRAMStatus(c *gin.Context) {
