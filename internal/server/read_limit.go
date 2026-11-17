@@ -12,7 +12,7 @@ func (h *Handlers) LimitPublicRead(c *gin.Context) {
 		no = c.Query("order_id")
 	}
 	if len(no) > 128 {
-		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "订单号无效"})
+		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "订单号格式无效，请返回商户页面核对"})
 		return
 	}
 	ip := c.ClientIP()

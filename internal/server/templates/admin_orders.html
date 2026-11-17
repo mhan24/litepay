@@ -18,19 +18,19 @@
 
     <search>
       <form class="filters" method="get">
-        <input name="q" type="search" value="{{.Query}}" placeholder="完整商户订单号或网关订单号" aria-label="搜索订单号" autocorrect="off" autocapitalize="none" spellcheck="false">
-        <button class="btn btn-ghost">查询</button>
+        <input name="q" type="search" value="{{.Query}}" placeholder="输入完整商户订单号或网关订单号" aria-label="搜索订单号" autocorrect="off" autocapitalize="none" spellcheck="false">
+        <button class="btn btn-ghost">查询订单</button>
       </form>
     </search>
 
     <section class="card">
       <div class="table-wrap" tabindex="0" role="region" aria-label="订单列表">
-        <table style="--label-1:'商户订单';--label-2:'付款方式';--label-3:'精确应付';--label-4:'状态';--label-5:'创建时间';--label-6:'操作'">
+        <table style="--label-1:'商户订单号';--label-2:'付款方式';--label-3:'应付金额';--label-4:'状态';--label-5:'创建时间';--label-6:'操作'">
           <thead>
             <tr>
-              <th>商户订单</th>
+              <th>商户订单号</th>
               <th>付款方式</th>
-              <th>精确应付</th>
+              <th>应付金额</th>
               <th>状态</th>
               <th>创建时间</th><th>操作</th>
             </tr>
@@ -40,7 +40,7 @@
             <tr>
               <td><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.OutTradeNo}}</a></td>
               <td>{{.Provider}} {{.Currency}}</td>
-              <td>{{if .PayUnits}}{{.PayAmount}}{{else}}尚未选定{{end}}</td>
+              <td>{{if .PayUnits}}{{.PayAmount}}{{else}}未选定{{end}}</td>
               <td>{{.Status}}</td>
               <td>{{.CreatedAt.Format "01-02 15:04:05"}}</td>
               <td>{{if or (eq .Status "PENDING") (eq .Status "READY")}}<form method="post" action="{{adminPath}}/orders/{{.TradeNo}}/close"><input type="hidden" name="csrf" value="{{$.Base.CSRF}}"><button class="btn btn-ghost btn-sm" type="submit">关闭订单</button></form>{{else}}—{{end}}</td>

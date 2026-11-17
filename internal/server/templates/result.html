@@ -35,24 +35,24 @@
   <main class="card">
     {{if .CancellationReview}}
     <div class="icon exp"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
-    {{if .RefundRecorded}}<h1>退款凭证已登记</h1><p>请在原付款账户核对实际到账。如有疑问，请联系商户客服；请勿重复付款。</p>{{else if .RefundRecheck}}<h1>退款记录待重新核对</h1><p>已有退款凭证正在重新核对，请在原付款账户确认实际到账。如有疑问，请联系商户客服；请勿重复付款。</p>{{else}}<h1>商城已取消，到账核对中</h1><p>款项已记录，正在核对取消与交付状态。请联系商户客服核对与退款，请勿重复付款。</p>{{end}}
+    {{if .RefundRecorded}}<h1>退款凭证已登记</h1><p>请前往原付款账户核对实际到账。如有疑问请联系商户客服，请勿重复付款。</p>{{else if .RefundRecheck}}<h1>退款记录待重新核对</h1><p>历史退款凭证正在重新核对，请前往原付款账户确认实际到账。如有疑问请联系商户客服，请勿重复付款。</p>{{else}}<h1>商城已取消，到账核对中</h1><p>已记录到账流水，正在核对订单取消与交付状态。请联系商户客服处理退款，请勿重复付款。</p>{{end}}
     {{else if eq .Status "PAID"}}
     <div class="icon ok"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></div>
     <h1>支付成功</h1>
-    <p>款项已确认到账，请返回商户页面查看订单进度。</p>
-    {{if .MerchantReview}}<p style="margin-top:12px">付款窗口结束后确认到账，正在等待商户核对订单是否可以交付。请勿重复付款。</p>{{else if ne .NotifyStatus "SUCCESS"}}<p style="margin-top:12px">付款已确认，商户通知尚未确认成功。请稍后查看商户订单；如一直未更新，请联系商户，勿重复付款。</p>{{end}}
+    <p>款项已确认到账，请返回商户页面查看交付进度。</p>
+    {{if .MerchantReview}}<p style="margin-top:12px">款项在付款时间结束后确认到账，需商户核对订单是否可以交付。请联系商户确认，请勿重复付款。</p>{{else if ne .NotifyStatus "SUCCESS"}}<p style="margin-top:12px">付款已确认，商户尚未确认收到通知。请稍后返回商户页面查看；若长时间未更新，请联系商户客服，请勿重复付款。</p>{{end}}
     {{else if eq .Status "CANCELED"}}
     <div class="icon canceled"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
     <h1>订单已取消</h1>
-    <p>商户已取消该订单，请勿继续向此订单付款。<br>如已付款，请联系商户客服处理。</p>
+    <p>该订单已取消，请勿继续付款。<br>如已付款，请联系商户客服处理。</p>
     {{else if .SettlementPending}}
     <div class="icon exp"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
     <h1>付款时间已结束，资金核对中</h1>
-    <p>请勿继续转账。有效期内已发起的付款仍将继续核对，商品交付进度请以商户订单为准。</p>
+    <p>请勿继续转账。有效期内已发起的付款仍会继续核对，交付进度请以商户订单为准。</p>
     {{else}}
     <div class="icon exp"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
     <h1>订单已关闭</h1>
-    <p>该订单的自动结算已结束，请返回商户查看订单。<br>如已付款，请联系商户客服处理。</p>
+    <p>该订单自动结算已结束，请返回商户页面查看订单状态。<br>如已付款，请联系商户客服核对处理。</p>
     {{end}}
 
     {{if .CancellationReview}}{{range .ReviewAmounts}}<div class="amount">{{.}}</div>{{end}}{{else}}<div class="amount">{{.Amount}}<span>{{.Currency}}</span></div>{{end}}

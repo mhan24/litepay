@@ -25,53 +25,53 @@
         <span class="badge">{{.Order.Status}}</span>
       </div>
       <div class="card-b kv">
-        <span class="k">网关订单</span>
+        <span class="k">网关订单号</span>
         <span>{{.Order.TradeNo}}</span>
-        <span class="k">商城金额</span>
+        <span class="k">订单金额</span>
         <span>{{.Order.Original}} USD</span>
-        <span class="k">应付</span>
+        <span class="k">应付金额</span>
         <span>{{.Order.PayAmount}} {{.Order.Currency}}</span>
         <span class="k">收款账户</span>
         <span>{{.Order.Provider}} / {{.Order.Receiver}}</span>
         <span class="k">付款窗口</span>
         <span>{{.Order.SelectedAt}} 至 {{.Order.ExpiresAt}}</span>
-        <span class="k">实际核销</span>
+        <span class="k">核销时间</span>
         <span>{{.Order.PaidAt}}</span>
       </div>
     </section>
 
     {{if or .CancellationReviews .UncoveredCancellationReceipts}}<section class="card" style="margin-top:16px"><div class="card-b">
       <h2>商城取消后的到账核对</h2>
-      {{if .RefundReviewGenerationCurrent}}<p class="hint">全部已关联到账的退款凭证已在当前恢复代际核对。</p>{{else}}<p class="banner" role="alert">退款核对尚未完成。请逐笔处理待办；历史退款凭证需要在当前恢复代际重新核对，请勿重复退款。</p>{{end}}
-      {{if .UncoveredCancellationReceipts}}<p class="banner" role="alert">另有 {{.UncoveredCancellationReceipts}} 笔关联证据尚不能唯一确认归属，请在下方交易证据中人工核查。它们不会被视为已退款。</p>{{end}}
-      <p class="hint">请先核对商城取消状态、交付记录与原始到账。在平台流水核实付款方账户并完成实际转账退款后，在此登记凭证。资金核销历史继续保留，不重新通知交付。</p>
-      {{range .CancellationReviews}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.EventID}} · 实际到账 {{.Amount}} {{.Currency}} · 收款账户 {{.Receiver}} · 证据 {{if eq .EvidenceState "confirmed"}}已确认{{else}}{{.EvidenceState}}{{end}} · {{if eq .State "refund_recorded"}}{{if not .Current}}历史退款凭证，待重新核对 ·{{else}}已登记退款 ·{{end}} {{.RefundReference}} · {{.Operator}}{{else}}等待人工核对与退款{{end}}</p>
+      {{if .RefundReviewGenerationCurrent}}<p class="hint">所有关联到账的退款凭证均已在当前恢复代际完成核对。</p>{{else}}<p class="banner" role="alert">退款核对尚未完成。请逐笔处理待办记录；历史退款凭证需在当前恢复代际重新核对，请勿重复转账退款。</p>{{end}}
+      {{if .UncoveredCancellationReceipts}}<p class="banner" role="alert">另有 {{.UncoveredCancellationReceipts}} 笔关联流水无法唯一确认归属，请在下方「关联到账证据」中人工核查（不会计为已退款）。</p>{{end}}
+      <p class="hint">请先核对商城取消状态、交付记录与原始到账流水。在平台核实付款方账户并完成线下转账退款后，在此登记退款凭证。原核销记录保留备查，系统不再发送交付通知。</p>
+      {{range .CancellationReviews}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.EventID}} · 实际到账 {{.Amount}} {{.Currency}} · 收款账户 {{.Receiver}} · 证据 {{if eq .EvidenceState "confirmed"}}已确认{{else}}{{.EvidenceState}}{{end}} · {{if eq .State "refund_recorded"}}{{if not .Current}}历史退款凭证，待重新核对 ·{{else}}已登记退款 ·{{end}} {{.RefundReference}} · {{.Operator}}{{else}}待人工核对与退款{{end}}</p>
       {{if not .Current}}
       <form method="post" action="{{adminPath}}/orders/{{$.Order.TradeNo}}/refund-record">
         <input type="hidden" name="csrf" value="{{$.Base.CSRF}}"><input type="hidden" name="provider" value="{{.Provider}}"><input type="hidden" name="event_id" value="{{.EventID}}">
         <div class="form-grid">
-          <div class="field full"><label for="refund-reference-{{.ID}}">实际退款凭证编号</label><input id="refund-reference-{{.ID}}" class="input" name="reference" required maxlength="200" value="{{.RefundReference}}"></div>
-          <div class="field full"><label for="refund-reason-{{.ID}}">取消、交付与退款核对结果</label><input id="refund-reason-{{.ID}}" class="input" name="reason" required maxlength="300"></div>
+          <div class="field full"><label for="refund-reference-{{.ID}}">外部退款凭证编号</label><input id="refund-reference-{{.ID}}" class="input" name="reference" required maxlength="200" value="{{.RefundReference}}"></div>
+          <div class="field full"><label for="refund-reason-{{.ID}}">取消、交付与退款核对说明</label><input id="refund-reason-{{.ID}}" class="input" name="reason" required maxlength="300"></div>
         </div>
-        <p class="hint">恢复后需重新核对已有凭证，请勿据此重复转出退款。</p>
-        <button class="btn btn-ghost" type="submit">登记已完成的退款</button>
+        <p class="hint">数据库恢复后仅需重新核对已有凭证，请勿据此重复转账退款。</p>
+        <button class="btn btn-ghost" type="submit">保存退款凭证</button>
       </form>{{end}}{{end}}
       {{range .CancellationReviewAudits}}<p style="overflow-wrap:anywhere">退款核对审计 · {{.CreatedAt}} · {{.Operator}} · {{.RefundReference}} · {{.Reason}}</p>{{end}}
     </div></section>{{end}}
 
-    {{range .Confirmations}}<p class="banner" role="status">到账确认任务 · {{.State}} · 最迟自动确认 {{.Deadline}}。超过期限的记录需人工核对，不会自动标记付款。</p>{{end}}
+    {{range .Confirmations}}<p class="banner" role="status">到账确认任务 · {{.State}} · 自动确认截止 {{.Deadline}}。超期未确认的记录需人工核查，不会自动核销订单。</p>{{end}}
     <h2>付款尝试记录</h2>
-    <section class="card"><div class="card-b">{{range .PaymentAttempts}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.Receiver}} · {{.Currency}} · 精确应付 {{.Amount}} · {{.SelectedAt}} 至 {{.ExpiresAt}}</p>{{else}}尚未选择付款方式{{end}}</div></section>
-    <section class="card" style="margin-top:16px"><div class="card-b"><h2>补扫历史到账</h2><p class="hint">按已保存的付款窗口重新查询平台。请待补扫完成后核对证据再行补单；主动取消的订单仅用于核对到账与退款，不进行自动补单。</p><form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/rescan"><input type="hidden" name="csrf" value="{{.Base.CSRF}}"><label>核对原因</label><input class="input" name="reason" maxlength="300" required><button class="btn btn-ghost" type="submit" style="margin-top:12px">申请历史补扫</button></form>{{range .HistoricalScans}}<p>{{if .Automatic}}自动结算复扫{{else}}管理员补扫{{end}} · {{.Provider}} · {{.State}} · 已扫描至 {{.Cursor}} · {{.Operator}} · {{.Reason}}{{if .LastError}} · {{.LastError}}{{end}}</p>{{end}}</div></section>
+    <section class="card"><div class="card-b">{{range .PaymentAttempts}}<p style="overflow-wrap:anywhere">{{.Provider}} / {{.Receiver}} · {{.Currency}} · 应付金额 {{.Amount}} · {{.SelectedAt}} 至 {{.ExpiresAt}}</p>{{else}}尚未选择付款方式{{end}}</div></section>
+    <section class="card" style="margin-top:16px"><div class="card-b"><h2>补扫历史到账</h2><p class="hint">按已保存的付款窗口重新查询平台流水。请等待补扫完成后核对证据再执行补单；已取消订单仅记录到账证据供退款核对，不支持补单。</p><form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/rescan"><input type="hidden" name="csrf" value="{{.Base.CSRF}}"><label>补扫原因</label><input class="input" name="reason" maxlength="300" required><button class="btn btn-ghost" type="submit" style="margin-top:12px">提交历史补扫</button></form>{{range .HistoricalScans}}<p>{{if .Automatic}}自动结算复扫{{else}}管理员补扫{{end}} · {{.Provider}} · {{.State}} · 已扫描至 {{.Cursor}} · {{.Operator}} · {{.Reason}}{{if .LastError}} · {{.LastError}}{{end}}</p>{{end}}</div></section>
     {{if or (eq .Order.Status "EXPIRED") (eq .Order.Status "READY")}}
     <section class="card" style="margin-top:16px"><div class="card-b">
-      <h2>按到账证据补单</h2><p class="hint">补单前请先确认商城尚未发货且同意接收此订单。仅接受付款窗口内、金额与收款账户完全匹配的已确认资金证据；系统绝不依据手工输入的金额核销。</p>
+      <h2>按到账证据补单</h2><p class="hint">补单前请确认商城尚未发货且同意继续履约。仅支持选用付款窗口内、金额与收款账户完全匹配的已确认流水证据，不支持手工输入金额核销。</p>
       <form method="post" action="{{adminPath}}/orders/{{.Order.TradeNo}}/reconcile">
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
-        <div class="form-grid"><div class="field"><label>到账平台</label><select class="input" name="provider"><option value="binance">Binance</option><option value="okx">OKX</option><option value="ton">TON</option></select></div>
+        <div class="form-grid"><div class="field"><label>收款平台</label><select class="input" name="provider"><option value="binance">Binance</option><option value="okx">OKX</option><option value="ton">TON</option></select></div>
         <div class="field"><label>原始资金事件编号</label><input class="input" name="event_id" required></div>
         <div class="field full"><label>核对结果与补单原因</label><input class="input" name="reason" required maxlength="300"></div></div>
-        <button class="btn btn-ghost" type="submit" style="margin-top:12px">核对证据并补单</button>
+        <button class="btn btn-ghost" type="submit" style="margin-top:12px">确认证据并补单</button>
       </form></div></section>{{end}}
     {{range .PaymentRecoveries}}<p>补单审计 · {{.CreatedAt}} · {{.Operator}} · {{.Provider}} / {{.EventID}} · {{.Reason}}</p>{{end}}
 
@@ -79,7 +79,7 @@
     <section class="card">
       <div class="card-b">
         {{range .Transactions}}
-        <p style="overflow-wrap:anywhere">{{.Provider}} / {{.EventID}} · {{if .OrderID}}已认领{{else if eq .Reason "additional_payment"}}额外到账，未认领{{else}}未认领，待核查{{end}} · {{.Amount}} {{.Currency}} · 证据 {{.State}} · 外部查询编号 {{.Reference}} · 到账 {{.OccurredAt}}</p>
+        <p style="overflow-wrap:anywhere">{{.Provider}} / {{.EventID}} · {{if .OrderID}}已认领{{else if eq .Reason "additional_payment"}}额外到账，未认领{{else}}未认领，待核查{{end}} · {{.Amount}} {{.Currency}} · 证据 {{.State}} · 查询参考号 {{.Reference}} · 到账时间 {{.OccurredAt}}</p>
         {{else}}
         尚无关联到账证据
         {{end}}
@@ -90,7 +90,7 @@
     <section class="card">
       <div class="card-b">
         {{range .Callbacks}}
-        <p>状态 {{if .DeliveredAt}}已确认{{else if or $.CancellationReviews $.UncoveredCancellationReceipts}}{{if $.RefundReviewGenerationCurrent}}取消到账已登记退款，通知已关闭{{else}}取消到账核对未完成，通知已暂停{{end}}{{else if eq .State "merchant_review"}}等待核对商城交付状态{{else if eq .State "exhausted"}}自动重试已耗尽{{else}}等待商城确认{{end}} · 累计尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
+        <p>状态 {{if .DeliveredAt}}已确认{{else if or $.CancellationReviews $.UncoveredCancellationReceipts}}{{if $.RefundReviewGenerationCurrent}}取消到账已登记退款，通知已关闭{{else}}取消到账核对未完成，通知已暂停{{end}}{{else if eq .State "merchant_review"}}待核对商城交付状态{{else if eq .State "exhausted"}}自动重试已耗尽{{else}}等待商城确认{{end}} · 累计尝试 {{.Attempts}} 次 · {{if .DeliveredAt}}商户确认于 {{.DeliveredAt}}{{else}}未获确认 · {{.LastError}}{{end}}</p>
         {{else}}
         付款确认后创建通知任务
         {{end}}
@@ -98,16 +98,16 @@
         <form method="post" action="{{adminPath}}/orders/{{$.Order.TradeNo}}/retry-notify" style="margin:16px 0">
           <input type="hidden" name="csrf" value="{{$.Base.CSRF}}">
           <label for="retry-reason">核对商城状态后的重试原因</label>
-          <input class="input" id="retry-reason" name="reason" required maxlength="300" placeholder="确认商城尚未交付，并记录核对结果">
-          <p class="hint">超时后确认到账的订单，需先确认商城未取消且同意交付，再按此操作发送通知。自动重试耗尽后也可重新入队；商城须按原订单号幂等处理。</p>
-          <button class="btn btn-ghost" type="submit">重新通知商城</button>
+          <input class="input" id="retry-reason" name="reason" required maxlength="300" placeholder="请注明已核实商城未取消、未重复交付">
+          <p class="hint">超时后到账或自动重试耗尽的订单，请先确认商城未取消订单且同意交付，再手动重新发送通知。商城端须按原订单号幂等处理。</p>
+          <button class="btn btn-ghost" type="submit">重新发送商户通知</button>
         </form>
         {{end}}{{end}}{{end}}
         {{range .Recoveries}}<p>重新入队 · {{.CreatedAt}} · {{.Operator}} · {{.Reason}} · 此前累计 {{.PreviousAttempts}} 次</p>{{end}}
         {{range .Logs}}
         <p>第 {{.Attempt}} 次 · HTTP {{.StatusCode}} · 确认 {{.Success}} · {{.Error}}</p>
         {{end}}
-        <p>交付状态请到商城确认。此处不提供强制标记付款或绕过流水的入口。</p>
+        <p>最终交付状态请前往商城确认。本页不提供无流水强制标记付款的操作。</p>
       </div>
     </section>
 

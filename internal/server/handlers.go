@@ -116,7 +116,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		provider = selectedProvider
 	}
 	if needsProvider && !h.anyProviderAccepting(c, cfg, o) || !needsProvider && (!h.providerAccepting(c, cfg, provider) || !needsCurrency && !h.orderProviderAccepting(c, cfg, o)) {
-		h.renderError(c, 503, "收款平台暂不可用", "平台账户、收款扫描或行情暂不可用，请稍后刷新或返回商城选择其他付款平台，勿继续转账。")
+		h.renderError(c, 503, "收款平台暂不可用", "当前平台账户、收款扫描或行情暂不可用。请稍后刷新重试，或返回商户页面选择其他付款方式，请勿继续转账。")
 		return
 	}
 	if needsProvider {
@@ -171,7 +171,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		transferURL = "ton://transfer/" + uid + "?amount=" + strconv.FormatInt(o.PayUnits*1000, 10)
 		png, err := qrcode.Encode(transferURL, qrcode.Medium, 480)
 		if err != nil {
-			h.renderError(c, http.StatusInternalServerError, "暂时无法生成转账二维码", "请刷新订单页面后重试。")
+			h.renderError(c, http.StatusInternalServerError, "暂时无法生成收款二维码", "二维码生成失败，请刷新订单页面后重试。")
 			return
 		}
 		// Only locally encoded PNG bytes enter this trusted data URL.
@@ -316,7 +316,7 @@ func currencyAllowedByLimit(limit string, currency string) bool {
 func (h *Handlers) CashierPage(c *gin.Context) {
 	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Param("trade_no"))
 	if err != nil {
-		h.renderError(c, 404, "未找到订单", "请返回商户页面核对订单。")
+		h.renderError(c, 404, "未找到订单", "该订单不存在或链接有误，请返回商户页面核对后重试。")
 		return
 	}
 	if o.Status == model.Paid || o.Status == model.Expired || o.Status == model.Canceled || time.Now().After(o.ExpiresAt) {
@@ -324,14 +324,14 @@ func (h *Handlers) CashierPage(c *gin.Context) {
 		return
 	}
 	if h.paymentOperationsBlocked(c) {
-		h.renderError(c, 503, "收款暂时暂停", "商城取消同步异常或核对未完成，请稍后刷新，勿继续转账。")
+		h.renderError(c, 503, "收款服务暂不可用", "商城取消同步异常或恢复核对尚未完成，请稍后刷新页面重试，请勿继续转账。")
 		return
 	}
 	h.renderCashier(c, o)
 }
 func (h *Handlers) SelectPayment(c *gin.Context) {
 	if h.paymentOperationsBlocked(c) {
-		c.JSON(503, gin.H{"code": 1, "msg": "商城取消同步异常或核对未完成，暂不接受付款"})
+		c.JSON(503, gin.H{"code": 1, "msg": "商城取消同步异常或恢复核对未完成，暂不接受付款，请稍后重试"})
 		return
 	}
 	h.cfg.WithPaymentConfig(func() {
@@ -341,11 +341,11 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 		currency := strings.ToUpper(c.PostForm("currency"))
 		o, err := h.st.GetByTradeNo(c.Request.Context(), no)
 		if err != nil || !cfg.ProviderEnabled(provider) || !cfg.ProviderCurrency(provider, currency) || !currencyAllowedByLimit(o.CurrencyLimit, currency) {
-			c.JSON(400, gin.H{"code": 1, "msg": "付款方式不可用"})
+			c.JSON(400, gin.H{"code": 1, "msg": "当前付款方式不可用，请刷新页面后重新选择"})
 			return
 		}
 		if state := h.providerState(c, cfg, provider); !state.Ready {
-			c.JSON(503, gin.H{"code": 1, "msg": state.Reason + "，暂不接受付款"})
+			c.JSON(503, gin.H{"code": 1, "msg": state.Reason + "，暂不接受付款，请稍后重试或更换付款方式"})
 			return
 		}
 		receiver := cfg.Checkout.Binance.UID
@@ -355,7 +355,7 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 		step, e := amount.Parse(cfg.Order.AmountStep)
 		minimum, me := amount.Parse(cfg.Order.MinAmount)
 		if e != nil || me != nil {
-			c.JSON(500, gin.H{"code": 1, "msg": "金额配置无效"})
+			c.JSON(500, gin.H{"code": 1, "msg": "系统金额配置无效，请联系管理员检查订单规则设置"})
 			return
 		}
 		if provider == config.ProviderTON {
@@ -384,14 +384,14 @@ func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 	}
 	review, reviewErr := h.st.CancellationReviewSummary(c.Request.Context(), o.ID)
 	if reviewErr != nil {
-		h.renderError(c, 503, "暂时无法查询到账核对记录", "请稍后刷新或联系商户客服。")
+		h.renderError(c, 503, "暂时无法读取到账核对记录", "请稍后刷新页面重试，或联系商户客服处理。")
 		return
 	}
 	var receipts []model.Transaction
 	var reviewAmounts []string
 	if review.Present() {
 		if err := h.st.DB().WithContext(c.Request.Context()).Table("transactions t").Select("t.*").Joins("JOIN cancellation_reviews r ON r.provider=t.provider AND r.event_id=t.event_id").Where("r.order_id=? AND t.state=?", o.ID, model.Confirmed).Order("r.id").Find(&receipts).Error; err != nil {
-			h.renderError(c, 503, "暂时无法查询到账核对记录", "请稍后刷新或联系商户客服。")
+			h.renderError(c, 503, "暂时无法读取到账核对记录", "请稍后刷新页面重试，或联系商户客服处理。")
 			return
 		}
 		for _, receipt := range receipts {
@@ -407,7 +407,7 @@ func (h *Handlers) renderError(c *gin.Context, status int, title, detail string)
 func (h *Handlers) OrderStatus(c *gin.Context) {
 	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Query("order_id"))
 	if err != nil {
-		c.JSON(404, gin.H{"code": 1, "msg": "未找到订单"})
+		c.JSON(404, gin.H{"code": 1, "msg": "未找到订单，请返回商户页面核对"})
 		return
 	}
 	var cb model.Callback
@@ -417,7 +417,7 @@ func (h *Handlers) OrderStatus(c *gin.Context) {
 	}
 	review, err := h.st.CancellationReviewSummary(c.Request.Context(), o.ID)
 	if err != nil {
-		c.JSON(503, gin.H{"code": 1, "msg": "暂时无法查询到账核对记录"})
+		c.JSON(503, gin.H{"code": 1, "msg": "暂时无法读取到账核对记录，请稍后重试"})
 		return
 	}
 	phase := o.PaymentPhase(time.Now())

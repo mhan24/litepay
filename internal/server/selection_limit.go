@@ -59,12 +59,12 @@ func (h *Handlers) LimitPaymentSelection(c *gin.Context) {
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	if err := c.Request.ParseForm(); err != nil {
-		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "付款方式请求格式无效"})
+		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "付款方式请求格式无效，请刷新页面后重试"})
 		return
 	}
 	no := c.PostForm("trade_no")
 	if len(no) > 128 {
-		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "订单号无效"})
+		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "订单号格式无效，请返回商户页面核对"})
 		return
 	}
 	if ok, retry := h.selectionLimit.allow("order:"+no, 20, time.Now()); !ok {

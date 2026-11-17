@@ -235,7 +235,7 @@ func (h *Handlers) AdminAuth() gin.HandlerFunc {
 			}
 			if subtle.ConstantTimeCompare([]byte(token), []byte(sess.CSRF)) != 1 {
 				c.Abort()
-				c.String(http.StatusForbidden, "CSRF 校验失败，请刷新页面后重试")
+				c.String(http.StatusForbidden, "页面会话校验失败（CSRF），请返回上一页刷新后重试")
 				return
 			}
 		}
@@ -305,7 +305,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
 	if !auth.allow(ip) {
-		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("尝试过于频繁，请 10 分钟后再试"))
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("登录尝试过于频繁，请 10 分钟后再试"))
 		return
 	}
 
@@ -316,7 +316,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	if !auth.checkCredentials(user, pass) {
 		// Attempts are reserved atomically in allow, including concurrent requests.
 		auth.failed(ip)
-		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("账号或密码错误"))
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("管理员账号或密码错误，请核对后重试"))
 		return
 	}
 	auth.succeeded(ip)
@@ -443,34 +443,34 @@ func (h *Handlers) AdminAccountSave(c *gin.Context) {
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
 	if !auth.allow(ip) {
-		fail("尝试过于频繁，请 10 分钟后再试")
+		fail("密码验证过于频繁，请 10 分钟后再试")
 		return
 	}
 	if !auth.checkCredentials(c.GetString("admin_user"), c.PostForm("current_password")) {
 		auth.failed(ip)
-		fail("当前密码错误")
+		fail("当前密码错误，请核对后重新输入")
 		return
 	}
 	auth.succeeded(ip)
 	user := strings.TrimSpace(c.PostForm("admin_username"))
 	pass := c.PostForm("new_password")
 	if user == "" || utf8.RuneCountInString(user) > 64 {
-		fail("用户名需为 1~64 个字符")
+		fail("用户名需为 1~64 个字符，请修改后重试")
 		return
 	}
 	p := settings.Patch{AdminUsername: &user}
 	if pass != "" {
 		if utf8.RuneCountInString(pass) < 6 || len(pass) > 72 {
-			fail("新密码至少 6 个字符，且不超过 72 字节")
+			fail("新密码需至少 6 个字符且不超过 72 字节，请重新输入")
 			return
 		}
 		if pass != c.PostForm("confirm_password") {
-			fail("两次新密码不一致")
+			fail("两次输入的新密码不一致，请重新确认")
 			return
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
 		if err != nil {
-			fail("密码处理失败")
+			fail("密码加密处理失败，请稍后重试")
 			return
 		}
 		value := string(hash)
@@ -491,19 +491,19 @@ func (h *Handlers) AdminSiteSave(c *gin.Context) {
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
 	if !auth.allow(ip) {
-		fail("尝试过于频繁，请 10 分钟后再试")
+		fail("密码验证过于频繁，请 10 分钟后再试")
 		return
 	}
 	if !auth.checkCredentials(c.GetString("admin_user"), c.PostForm("current_password")) {
 		auth.failed(ip)
-		fail("当前密码错误")
+		fail("当前密码错误，请核对后重新输入")
 		return
 	}
 	auth.succeeded(ip)
 	root := strings.TrimSpace(c.PostForm("admin_path"))
 	storeURL := strings.TrimSpace(c.PostForm("store_url"))
 	if root == "" {
-		fail("请填写后台入口，以 / 开头")
+		fail("请填写以 / 开头的后台入口路径")
 		return
 	}
 	oldRoot := h.C().AdminPath()
@@ -527,7 +527,7 @@ func (h *Handlers) AdminRotateToken(c *gin.Context) {
 	}
 	slog.Info("BEpusdt API Token 已轮换", "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther,
-		h.adminURL("/admin/integration?msg=")+url.QueryEscape("API Token 已轮换；历史订单通知保留原密钥版本，商城须兼容旧版本。请更新新订单使用的 Token")+
+		h.adminURL("/admin/integration?msg=")+url.QueryEscape("API Token 已轮换。新订单将使用新 Token，历史订单回调仍使用原密钥版本，请在商城后台同步更新 Token")+
 			"&token_rotated=1")
 }
 
@@ -841,7 +841,7 @@ func (h *Handlers) AdminRetryNotify(c *gin.Context) {
 		return
 	}
 	h.log.Warn("管理员重新通知商城", "trade_id", no, "operator", c.GetString("admin_user"))
-	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("通知已重新入队，将使用原订单号发送"))
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("商户通知已重新入队，将按原订单号发送"))
 }
 
 func (h *Handlers) pendingNotifyCount(c *gin.Context) int64 {
@@ -861,7 +861,7 @@ func (h *Handlers) AdminReconcilePayment(c *gin.Context) {
 		return
 	}
 	h.log.Warn("管理员按已验证到账证据补单", "trade_id", no, "operator", c.GetString("admin_user"))
-	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("补单已核销并创建通知任务"))
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("补单核销已完成，并已创建商户通知任务"))
 }
 
 func (h *Handlers) AdminHistoricalScan(c *gin.Context) {
@@ -871,7 +871,7 @@ func (h *Handlers) AdminHistoricalScan(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("历史到账补扫已排队，关闭订单只记录证据，不会自动补单"))
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("历史到账补扫任务已加入队列。待补扫完成后请核对下方到账证据；已取消订单仅记录证据，不会自动补单"))
 }
 
 type pendingCallbackView struct {
@@ -889,5 +889,5 @@ func (h *Handlers) AdminRecordRefund(c *gin.Context) {
 		return
 	}
 	h.log.Warn("管理员登记取消到账的外部退款凭证", "trade_id", no, "operator", c.GetString("admin_user"))
-	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("退款凭证已登记；请在原付款账户确认实际到账"))
+	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("退款凭证已保存，请确认原付款账户已收到退款"))
 }

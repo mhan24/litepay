@@ -37,14 +37,14 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   </header>
   <section class="card" aria-label="订单付款">
     <aside class="receipt-aside">
-      <h1>{{if .NeedsProvider}}选择付款方式{{else if .NeedsCurrency}}选择付款币种{{else}}确认付款信息{{end}}</h1>
-      <p>选择付款方式后，请核对币种、完整金额和收款账户。</p>
+      <h1>{{if .NeedsProvider}}选择收款平台{{else if .NeedsCurrency}}选择付款币种{{else}}确认付款信息{{end}}</h1>
+      <p>请按页面显示的币种、精确金额和收款账户完成转账。</p>
       <div class="order-meta">
-        <div class="row"><span class="k">商品</span><span class="v">{{if .Name}}{{.Name}}{{else}}订单 {{.OutTradeNo}}{{end}}</span></div>
+        <div class="row"><span class="k">商品名称</span><span class="v">{{if .Name}}{{.Name}}{{else}}订单 {{.OutTradeNo}}{{end}}</span></div>
         <div class="row"><span class="k">商户订单号</span><span class="v mono">{{.OutTradeNo}}</span></div>
       </div>
       <div class="order-total"><span>订单金额</span><div><strong>{{.OriginMoney}}</strong><small>USD</small></div></div>
-      <div class="receipt-help"><strong>付款后会发生什么？</strong>到账后，LitePay 会核对这笔付款并通知商户。商品交付进度请到商户订单页查看。</div>
+      <div class="receipt-help"><strong>到账与交付说明</strong>系统会自动核对到账记录，确认付款后通知商户。商品交付进度请前往商户订单页查看。</div>
     </aside>
     <div class="payment-panel">
     {{if not .NeedsProvider}}
@@ -63,7 +63,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if .NeedsProvider}}
     <div class="choice-title">
       <h2>选择收款平台</h2>
-      <span>支持免手续费站内转账及链上支付</span>
+      <span>支持交易所站内转账与 TON 链上支付</span>
     </div>
     <div class="provider-list">
       {{range .Providers}}
@@ -81,8 +81,8 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
 
     {{if .NeedsCurrency}}
     <div class="choice-title">
-      <h2>选择币种</h2>
-      <span>按实时汇率与订单金额核对</span>
+      <h2>选择付款币种</h2>
+      <span>选定后将锁定本单应付金额与收款账户</span>
     </div>
     <div class="currency-list">
       {{range .CurrencyOptions}}
@@ -91,7 +91,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
         <span class="choice-body">
           <span class="choice-name">{{.Currency}}</span>
           <span class="choice-sub">
-            {{if eq $.Provider "okx"}}OKX 站内转账 · 按订单金额核对{{else if eq $.Provider "binance"}}Binance 站内转账 · 按订单金额核对{{else if eq $.Provider "ton"}}TON 主网 · 按实时 USD 报价锁定金额{{else}}按订单金额核对{{end}}
+            {{if eq $.Provider "okx"}}OKX 站内转账 · 按完整金额核对到账{{else if eq $.Provider "binance"}}Binance 站内转账 · 按完整金额核对到账{{else if eq $.Provider "ton"}}TON 主网 · 按实时 USD 报价锁定应付数量{{else}}按完整金额核对到账{{end}}
             {{if not .Enabled}} · 当前不可用{{end}}
           </span>
         </span>
@@ -104,7 +104,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
 
     {{if not .NeedsProvider}}{{if not .NeedsCurrency}}
     <div class="amount-box">
-      <div class="amount-label"><span>应付金额</span><span>含订单识别尾数，请如实转账</span></div>
+      <div class="amount-label"><span>应付金额</span><span>含订单识别尾数，请按完整小数位转账</span></div>
       <div class="amount-row">
         {{if eq .Currency "GRAM"}}<img class="amount-token" src="/assets/brand/gram.svg" alt="">{{else if eq .Currency "USDT"}}<img class="amount-token" src="/assets/brand/usdt.svg" alt="">{{else if eq .Currency "USDC"}}<img class="amount-token" src="/assets/brand/usdc.svg" alt="">{{end}}
         <span class="amount" id="amount">{{.Amount}}</span>
@@ -128,8 +128,8 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
       <img id="gram-payment-qr" src="{{.PaymentQR}}" width="240" height="240" alt="本单 GRAM 收款地址二维码">
       <div>
         <h2 id="wallet-scan-title">Telegram 钱包扫码付款</h2>
-        <p>打开 Telegram（电报）→ 钱包 → 右上角「扫一扫」，扫描二维码进行转账。</p>
-        <p class="scan-check">二维码包含精确金额 {{.Amount}} GRAM。扫码后请核对钱包中的金额和收款地址；若未自动填写，请复制上方完整金额。</p>
+        <p>打开 Telegram 钱包，点击右上角「扫一扫」扫描二维码转账。</p>
+        <p class="scan-check">二维码已包含精确金额 {{.Amount}} GRAM。扫码后请核对金额和收款地址；若未自动填入金额，请复制上方应付金额粘贴。</p>
       </div>
     </div>
     {{end}}
@@ -138,7 +138,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
         <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
       </svg>
-      <span>请转账<b>{{.Amount}} {{.Currency}}</b>并保留全部小数位。到账金额必须精确一致，不足额将无法自动确认。</span>
+      <span>请转账 <b>{{.Amount}} {{.Currency}}</b> 并保留全部小数位。到账金额必须精确一致，金额不符将无法自动确认。</span>
     </div>
 
     {{if .HasPayee}}
@@ -150,13 +150,13 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
       <button class="copy" type="button" data-copy="{{.UID}}">复制{{if eq .Provider "ton"}}地址{{else}} UID{{end}}</button>
     </div>
     {{if eq .Provider "ton"}}
-    <div class="pay-note">使用 TON 主网向此地址发送 <b>{{.Amount}} GRAM</b>，手续费另付。请勿转入 Jetton 代币。</div>
+    <div class="pay-note">请使用 TON 主网向此地址转入 <b>{{.Amount}} GRAM</b>（手续费另付），请勿转入 Jetton 代币。</div>
     <a class="copy primary" id="gram-open-wallet" href="{{tonURL .TransferURL}}">打开钱包付款</a>
     {{else}}
-    <div class="pay-note">在 <b>{{if eq .Provider "okx"}}OKX{{else}}Binance{{end}}</b> 向此 UID 发起<b>站内转账</b>，币种选择 <b>{{.Currency}}</b>，金额填写 <b>{{.Amount}}</b>。</div>
+    <div class="pay-note">请在 <b>{{if eq .Provider "okx"}}OKX{{else}}Binance{{end}}</b> 向此 UID 发起<b>站内转账</b>，币种选择 <b>{{.Currency}}</b>，转账金额填写 <b>{{.Amount}}</b>。</div>
     {{end}}
     {{else}}
-    <div class="pay-note error">商户尚未配置收款账户，请稍后重试或联系商户。</div>
+    <div class="pay-note error">收款账户暂未配置，请稍后刷新重试或联系商户处理。</div>
     {{end}}
 
     <div class="timer">
@@ -183,7 +183,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     </div>
   </section>
 
-  <p class="page-tip">{{if .Note}}{{.Note}}{{else}}款项到账后系统将自动核对；若已完成付款，请勿重复转账。{{end}}</p>
+  <p class="page-tip">{{if .Note}}{{.Note}}{{else}}到账后系统自动核对；如已付款，请勿重复转账。{{end}}</p>
 </div>
 {{template "theme_script" .}}
 
@@ -310,10 +310,10 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
           window.location.href = window.location.pathname;
           return;
         }
-        throw new Error((res && res.msg) || '无法保存收款平台和币种，请刷新页面后重试');
+        throw new Error((res && res.msg) || '无法保存付款方式，请刷新页面后重试');
       })
       .catch(function (e) {
-        alert((e && e.message) || '无法保存收款平台和币种，请刷新页面后重试');
+        alert((e && e.message) || '无法保存付款方式，请刷新页面后重试');
         document.querySelectorAll('.provider-btn,.currency-btn').forEach(function (b) { b.disabled = false; });
         if (btn) btn.classList.remove('loading');
       });
@@ -350,14 +350,14 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     finished = true;
     hideWalletPayment();
     if(d.merchant_review_required){window.location.reload();return;}
-    statusEl.textContent = d.merchant_confirmed ? '付款已确认，商户已接收通知' : '付款已确认，正在通知商户，请勿重复付款';
+    statusEl.textContent = d.merchant_confirmed ? '付款已确认，商户已接收通知' : '付款已确认，正在通知商户，请勿重复转账';
     document.getElementById('ov-title').textContent = '支付成功';
     document.getElementById('ov-desc').textContent = '正在跳转回商户页面…';
     if (!overlay.open) overlay.showModal();
     var target = (d && d.return_url) ? d.return_url : RETURN_URL;
     setTimeout(function () {
       if (target) { window.location.href = target; }
-      else { document.getElementById('ov-desc').textContent = '支付已完成，可关闭本页面。'; }
+      else { document.getElementById('ov-desc').textContent = '付款已确认，可关闭当前页面。'; }
     }, 2000);
   }
 
@@ -367,11 +367,11 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     hideWalletPayment();
     clockEl.textContent = '00:00';
     barEl.style.width = '0%';
-    statusEl.textContent = '付款窗口已结束，已付款请勿重复下单或转账';
+    statusEl.textContent = '付款时间已结束，如已付款请勿重复下单或转账';
     var icon = document.getElementById('ov-icon');
     icon.classList.add('expired');
     document.getElementById('ov-title').textContent = '付款时间已结束，资金核对中';
-    document.getElementById('ov-desc').textContent = '请勿再转账。有效期内付款继续核对，商品交付需由商户确认。';
+    document.getElementById('ov-desc').textContent = '请勿继续转账。有效期内发起的付款仍会继续核对，交付进度请以商户订单为准。';
     setTimeout(function(){location.reload()},1500);
     var review=document.getElementById('ov-review');review.hidden=false;review.style.display='inline-block';
     if (!overlay.open) overlay.showModal();
@@ -381,11 +381,11 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     if (finished || !showPayment) return;
     finished = true;
     hideWalletPayment();
-    statusEl.textContent = '订单已取消，请返回商户页面';
+    statusEl.textContent = '订单已取消，请返回商户页面查看';
     var icon = document.getElementById('ov-icon');
     icon.classList.add('expired');
     document.getElementById('ov-title').textContent = '订单已取消';
-    document.getElementById('ov-desc').textContent = '请返回商户页面查看最新状态。';
+    document.getElementById('ov-desc').textContent = '请勿继续转账，返回商户页面查看订单状态。';
     if (!overlay.open) overlay.showModal();
   }
 
