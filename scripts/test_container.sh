@@ -22,7 +22,9 @@ grep -q 'production 模式要求 HTTPS' "$task_tmp/default.log"
 sed -e 's/base_url: ""/base_url: "https:\/\/pay.example.com"/' -e 's/notify_hosts: \[\]/notify_hosts: ["shop.example.com"]/' "$root/config.production.yaml" >"$task_tmp/config.yaml"
 chmod 755 "$task_tmp"
 chmod 644 "$task_tmp/config.yaml"
-docker run -d --name "$name" --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /tmp:size=16m,mode=1777 --tmpfs /app/data:uid=10001,gid=10001,mode=0700 -v "$task_tmp/config.yaml:/app/config.yaml:ro" "$image" >/dev/null
+printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n' >"$task_tmp/master.key"
+chmod 644 "$task_tmp/master.key"
+docker run -d --name "$name" --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /tmp:size=16m,mode=1777 --tmpfs /app/data:uid=10001,gid=10001,mode=0700 -e LITEPAY_MASTER_KEY_FILE=/app/master.key -v "$task_tmp/master.key:/app/master.key:ro" -v "$task_tmp/config.yaml:/app/config.yaml:ro" "$image" >/dev/null
 attempt=0
 while [ "$attempt" -lt 30 ]; do
     if docker exec "$name" wget -qO- http://127.0.0.1:8080/healthz >"$task_tmp/health.json"; then

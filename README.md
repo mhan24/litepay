@@ -29,8 +29,9 @@ go run . -config config.yaml
 ### 权限与安全规范
 
 - **API 凭据安全**：交易所 API 凭据**仅需只读查询权限**，严禁开启交易或提现权限。
-- **运行模式**：生产环境默认启用 `server.production: true`，此时强制要求配置 HTTPS 与商户回调域名白名单；本地开发测试时须显式设置为 `false`。
-- **机密隔离**：配置文件与 SQLite 数据库包含敏感凭据，严禁提交至 Git 仓库。
+- **运行模式**：生产环境默认启用 `server.production: true`，此时强制要求配置 HTTPS、商户回调域名白名单、bcrypt 哈希管理员密码（`$2a$`/`$2b$`/`$2y$`，且会话时长上限 72 小时）以及凭据加密主密钥；本地开发测试时须显式设置为 `false`（明文密码最短 12 位）。
+- **敏感凭据加密**：数据库中的交易所 API Key/Secret、Passphrase 与 BEpusdt API Token 采用 AES-256-GCM 加密存储，主密钥通过 `server.master_key_file`、`LITEPAY_MASTER_KEY_FILE` 或 `LITEPAY_MASTER_KEY` 提供；接入页默认仅展示脱敏 Token，查看完整值须经 POST + CSRF 校验并记录审计日志。
+- **机密隔离**：配置文件、主密钥文件与 SQLite 数据库包含敏感凭据，严禁提交至 Git 仓库。
 - **数据库升级**：支持的数据库版本与加法迁移规则以 `internal/store/store.go` 中的 `Open` 为准，可通过 `PRAGMA user_version` 检查当前版本。升级前必须执行一致性备份与隔离验证；旧版二进制可能拒绝升级后的数据库。
 
 ### 运维与相关文档

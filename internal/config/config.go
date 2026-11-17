@@ -83,6 +83,7 @@ type ServerConfig struct {
 	NotifyHosts         []string `yaml:"notify_hosts"`    // Exact callback hostnames in production; no wildcards.
 	StoreURL            string   `yaml:"store_url"`       // 根地址跳转目标；留空返回 404。
 	TrustedProxies      []string `yaml:"trusted_proxies"` // Only explicit reverse proxies may supply client IP headers.
+	MasterKeyFile       string   `yaml:"master_key_file"` // 敏感凭据加密主密钥只读文件路径（也可通过 LITEPAY_MASTER_KEY_FILE 指定）
 	Addr                string   `yaml:"addr"`            // 监听地址，如 0.0.0.0:8080
 	BaseURL             string   `yaml:"base_url"`        // 网关对外访问地址
 }
@@ -331,16 +332,37 @@ func (c *Config) normalize() error {
 	if utf8.RuneCountInString(c.Admin.Username) > 64 {
 		return fmt.Errorf("admin.username 不能超过 64 个字符")
 	}
+	if c.Server.Production && c.Admin.SessionHours > 72 {
+		return fmt.Errorf("production 模式下 admin.session_hours 需在 1~72 小时之间")
+	}
 	if c.Admin.SessionHours > 720 {
 		return fmt.Errorf("admin.session_hours 需在 1~720 小时之间")
 	}
-	if c.Admin.Password != "" && utf8.RuneCountInString(c.Admin.Password) < 6 {
-		return fmt.Errorf("admin.password 至少需要 6 个字符")
+	if c.Admin.Password != "" {
+		if IsBcryptHash(c.Admin.Password) {
+			// bcrypt 哈希密码（$2a$ / $2b$ / $2y$）
+		} else {
+			if c.Server.Production {
+				return fmt.Errorf("production 模式要求 admin.password 必须为 bcrypt 哈希密码，禁止明文密码")
+			}
+			if utf8.RuneCountInString(c.Admin.Password) < 12 {
+				return fmt.Errorf("admin.password 明文密码至少需要 12 个字符")
+			}
+		}
+	}
+	c.Server.MasterKeyFile = strings.TrimSpace(c.Server.MasterKeyFile)
+	if c.Server.Production && len(c.Server.TrustedProxies) == 0 {
+		fmt.Fprintln(os.Stderr, "[WARN] production 模式下 server.trusted_proxies 为空，若部署在反向代理后客户端 IP 将共用代理地址")
 	}
 	if c.Admin.Password == "" {
 		fmt.Fprintln(os.Stderr, "[WARN] 未在 config.yaml 配置 admin.password，后台管理已禁用")
 	}
 	return nil
+}
+
+// IsBcryptHash 判断密码配置是否为 bcrypt 哈希（支持 $2a$、$2b$、$2y$ 前缀）。
+func IsBcryptHash(s string) bool {
+	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
 }
 
 // AdminPath returns the configured mount point; existing installations retain /admin.

@@ -26,10 +26,17 @@
         <span class="k">建单接口</span>
         <code>{{.BaseURL}}/api/v1/order/create-order</code>
         <span class="k">API Token</span>
-        <details>
-          <summary>显示接入密钥</summary>
+        <div class="v" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          {{if .Token}}
           <code>{{.Token}}</code>
-        </details>
+          {{else}}
+          <code>{{.TokenMask}}</code>
+          <form method="post" action="{{adminPath}}/integration" style="margin:0">
+            <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+            <button type="submit" class="btn btn-ghost btn-sm">显示完整 Token</button>
+          </form>
+          {{end}}
+        </div>
       </div>
     </section>
 

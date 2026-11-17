@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
@@ -260,6 +261,27 @@ func (m *Manager) Store() *store.Store { return m.st }
 
 // Load 启动时应用数据库中的覆盖项。
 func (m *Manager) Load(ctx context.Context) error {
+	if !m.st.HasMasterKey() {
+		key, err := store.ResolveMasterKey(m.Get().Server.MasterKeyFile)
+		if err != nil {
+			return err
+		}
+		if len(key) > 0 {
+			if err := m.st.SetMasterKey(key); err != nil {
+				return err
+			}
+		}
+	}
+	if !m.st.HasMasterKey() {
+		if m.Get().Server.Production {
+			return fmt.Errorf("production 模式必须配置主密钥（LITEPAY_MASTER_KEY_FILE 或 LITEPAY_MASTER_KEY）")
+		}
+		slog.Warn("未配置主密钥，SQLite 敏感凭据将以明文存储；生产环境请配置 LITEPAY_MASTER_KEY_FILE")
+	} else {
+		if err := m.st.MigrateCredentials(ctx); err != nil {
+			return err
+		}
+	}
 	payload, err := m.st.LoadSettingPayload(ctx)
 	if err != nil {
 		return err
@@ -411,7 +433,7 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 	}
 	// 持久化完整可变配置，保证重启后一致
 	snap := Snapshot(next)
-	if strings.HasPrefix(next.Admin.Password, "$2a$") || strings.HasPrefix(next.Admin.Password, "$2b$") {
+	if config.IsBcryptHash(next.Admin.Password) {
 		v := next.Admin.Password
 		snap.AdminPasswordHash = &v
 	}

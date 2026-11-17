@@ -33,8 +33,12 @@ func (h *Handlers) currentAdmin() *adminAuth {
 	h.adminMu.Lock()
 	defer h.adminMu.Unlock()
 	cfg := h.C()
-	if h.admin == nil || h.admin.user != cfg.Admin.Username || h.admin.pass != cfg.Admin.Password {
+	if h.admin == nil {
 		h.admin = newAdminAuth(cfg)
+	} else if h.admin.user != cfg.Admin.Username || h.admin.pass != cfg.Admin.Password {
+		next := newAdminAuth(cfg)
+		next.epoch = h.admin.currentEpoch() + 1
+		h.admin = next
 	}
 	return h.admin
 }
@@ -46,17 +50,24 @@ func (h *Handlers) currentAdmin() *adminAuth {
 const adminCookieName = "lp_admin"
 
 const (
-	adminSessionSalt       = "litepay-admin-session-v1"
-	adminSessionIterations = 210000
-	adminSessionKeyBytes   = 32
-	adminOrdersMaxPage     = 100000
+	adminSessionSalt        = "litepay-admin-session-v1"
+	adminSessionIterations  = 210000
+	adminSessionKeyBytes    = 32
+	adminOrdersMaxPage      = 100000
+	adminUserAttemptLimit   = 6
+	adminIPAttemptLimit     = 30
+	adminGlobalAttemptLimit = 300
+	adminMaxAttemptKeys     = 10000
+	adminAttemptWindow      = 10 * time.Minute
 )
 
 // adminSession 会话载荷（Base64(JSON) + "." + HMAC 签名）。
 type adminSession struct {
-	User string `json:"u"`
-	Exp  int64  `json:"e"`
-	CSRF string `json:"c"`
+	ID    string `json:"sid"`
+	Epoch uint64 `json:"ep"`
+	User  string `json:"u"`
+	Exp   int64  `json:"e"`
+	CSRF  string `json:"c"`
 }
 
 type adminAuth struct {
@@ -65,8 +76,13 @@ type adminAuth struct {
 	key  []byte
 	ttl  time.Duration
 
-	mu       sync.Mutex
-	attempts map[string]*loginAttempt
+	mu             sync.Mutex
+	epoch          uint64
+	attempts       map[string]*loginAttempt
+	ipAttempts     map[string]*loginAttempt
+	globalCount    int
+	globalInflight int
+	globalUntil    time.Time
 }
 
 type loginAttempt struct {
@@ -83,28 +99,64 @@ func newAdminAuth(cfg *config.Config) *adminAuth {
 	if err != nil {
 		panic(fmt.Sprintf("派生后台会话密钥失败: %v", err))
 	}
-	ttl := time.Duration(cfg.Admin.SessionHours) * time.Hour
+	hours := cfg.Admin.SessionHours
+	if cfg.Server.Production && hours > 72 {
+		hours = 72
+	}
+	ttl := time.Duration(hours) * time.Hour
 	if ttl <= 0 {
 		ttl = 12 * time.Hour
 	}
 	return &adminAuth{
-		user:     cfg.Admin.Username,
-		pass:     cfg.Admin.Password,
-		key:      key,
-		ttl:      ttl,
-		attempts: make(map[string]*loginAttempt),
+		user:       cfg.Admin.Username,
+		pass:       cfg.Admin.Password,
+		key:        key,
+		ttl:        ttl,
+		epoch:      1,
+		attempts:   make(map[string]*loginAttempt),
+		ipAttempts: make(map[string]*loginAttempt),
 	}
+}
+
+func (a *adminAuth) currentEpoch() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.epoch == 0 {
+		a.epoch = 1
+	}
+	return a.epoch
+}
+
+func (a *adminAuth) bumpEpoch() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.epoch == 0 {
+		a.epoch = 1
+	}
+	a.epoch++
+	return a.epoch
 }
 
 // issue 生成新会话 token 与 CSRF token。
 func (a *adminAuth) issue() (token, csrf string, err error) {
+	sidBuf := make([]byte, 16)
+	if _, err := rand.Read(sidBuf); err != nil {
+		return "", "", fmt.Errorf("生成后台会话 ID 失败: %w", err)
+	}
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", "", fmt.Errorf("生成后台会话随机数失败: %w", err)
 	}
+	sid := hex.EncodeToString(sidBuf)
 	csrf = hex.EncodeToString(buf)
 
-	s := adminSession{User: a.user, Exp: time.Now().Add(a.ttl).Unix(), CSRF: csrf}
+	s := adminSession{
+		ID:    sid,
+		Epoch: a.currentEpoch(),
+		User:  a.user,
+		Exp:   time.Now().Add(a.ttl).Unix(),
+		CSRF:  csrf,
+	}
 	payload, err := json.Marshal(s)
 	if err != nil {
 		return "", "", fmt.Errorf("生成后台会话失败: %w", err)
@@ -136,6 +188,9 @@ func (a *adminAuth) parse(token string) (*adminSession, bool) {
 	if err := json.Unmarshal(payload, &s); err != nil {
 		return nil, false
 	}
+	if s.ID == "" || s.User != a.user || s.Epoch != a.currentEpoch() {
+		return nil, false
+	}
 	if time.Now().Unix() > s.Exp {
 		return nil, false
 	}
@@ -146,16 +201,32 @@ func (a *adminAuth) parse(token string) (*adminSession, bool) {
 func (a *adminAuth) checkCredentials(user, pass string) bool {
 	uOK := subtle.ConstantTimeCompare([]byte(user), []byte(a.user)) == 1
 	pOK := subtle.ConstantTimeCompare([]byte(pass), []byte(a.pass)) == 1
-	if strings.HasPrefix(a.pass, "$2a$") || strings.HasPrefix(a.pass, "$2b$") {
+	if config.IsBcryptHash(a.pass) {
 		pOK = bcrypt.CompareHashAndPassword([]byte(a.pass), []byte(pass)) == nil
 	}
 	return uOK && pOK
 }
 
-// allow 同一 IP 10 分钟内最多 6 次登录尝试，预先计数以限制并发请求。
-func (a *adminAuth) allow(ip string) bool {
+func adminAttemptKeys(ip, user string) (string, string) {
+	ip = strings.TrimSpace(ip)
+	user = strings.TrimSpace(user)
+	if len(user) > 64 {
+		sum := sha256.Sum256([]byte(user))
+		user = hex.EncodeToString(sum[:8])
+	}
+	return ip, ip + "\x00" + user
+}
+
+// allow 按 IP + 用户名两级及全局上限限制 10 分钟内的登录尝试，预先计数以限制并发请求。
+func (a *adminAuth) allow(ip string, users ...string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	user := ""
+	if len(users) > 0 {
+		user = users[0]
+	}
+	ipKey, userKey := adminAttemptKeys(ip, user)
 
 	now := time.Now()
 	for key, attempt := range a.attempts {
@@ -163,51 +234,126 @@ func (a *adminAuth) allow(ip string) bool {
 			delete(a.attempts, key)
 		}
 	}
-	if len(a.attempts) >= 10000 {
-		if _, exists := a.attempts[ip]; !exists {
+	for key, attempt := range a.ipAttempts {
+		if now.After(attempt.until) {
+			delete(a.ipAttempts, key)
+		}
+	}
+	if now.After(a.globalUntil) {
+		a.globalCount = 0
+		a.globalInflight = 0
+		a.globalUntil = now.Add(adminAttemptWindow)
+	}
+	if a.globalCount >= adminGlobalAttemptLimit {
+		return false
+	}
+	if len(a.attempts) >= adminMaxAttemptKeys {
+		if _, exists := a.attempts[userKey]; !exists {
 			return false
 		}
 	}
-	at, ok := a.attempts[ip]
-	if !ok || now.After(at.until) {
-		a.attempts[ip] = &loginAttempt{count: 1, inflight: 1, until: now.Add(10 * time.Minute)}
-		return true
+	if len(a.ipAttempts) >= adminMaxAttemptKeys {
+		if _, exists := a.ipAttempts[ipKey]; !exists {
+			return false
+		}
 	}
-	if at.count >= 6 {
+
+	ipAt, ipOK := a.ipAttempts[ipKey]
+	if ipOK && !now.After(ipAt.until) && ipAt.count >= adminIPAttemptLimit {
 		return false
 	}
-	at.count++
-	at.inflight++
+	uAt, uOK := a.attempts[userKey]
+	if uOK && !now.After(uAt.until) && uAt.count >= adminUserAttemptLimit {
+		return false
+	}
+
+	if !ipOK || now.After(ipAt.until) {
+		a.ipAttempts[ipKey] = &loginAttempt{count: 1, inflight: 1, until: now.Add(adminAttemptWindow)}
+	} else {
+		ipAt.count++
+		ipAt.inflight++
+	}
+	if !uOK || now.After(uAt.until) {
+		a.attempts[userKey] = &loginAttempt{count: 1, inflight: 1, until: now.Add(adminAttemptWindow)}
+	} else {
+		uAt.count++
+		uAt.inflight++
+	}
+	a.globalCount++
+	a.globalInflight++
 	return true
 }
 
-// succeeded 清除已成功登录 IP 的失败计数，同时保留其他并发请求的预留。
+// succeeded 清除已成功登录 (IP, 用户名) 的失败计数，同时保留其他并发请求的预留。
 // failed 保留本次失败尝试，直到 10 分钟窗口结束。
-func (a *adminAuth) succeeded(ip string) {
+func (a *adminAuth) succeeded(ip string, users ...string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	at, ok := a.attempts[ip]
+	user := ""
+	if len(users) > 0 {
+		user = users[0]
+	}
+	ipKey, userKey := adminAttemptKeys(ip, user)
+
+	if a.globalInflight > 0 {
+		a.globalInflight--
+	}
+	if a.globalCount > a.globalInflight {
+		a.globalCount--
+	}
+	if ipAt, ok := a.ipAttempts[ipKey]; ok {
+		if ipAt.inflight > 0 {
+			ipAt.inflight--
+		}
+		if ipAt.count > ipAt.inflight {
+			ipAt.count--
+		}
+		if ipAt.count == 0 {
+			delete(a.ipAttempts, ipKey)
+		}
+	}
+	at, ok := a.attempts[userKey]
 	if !ok {
 		return
 	}
 	if at.inflight > 0 {
 		at.inflight--
 	}
-	// A successful login clears earlier failures, but requests that are
-	// already in flight remain counted so they cannot be used to bypass the
-	// limit during the same window.
+	// A successful login clears earlier failures for this (IP, user), while
+	// requests still in flight remain counted.
 	at.count = at.inflight
 	if at.count == 0 {
-		delete(a.attempts, ip)
+		delete(a.attempts, userKey)
 	}
 }
 
-func (a *adminAuth) failed(ip string) {
+func (a *adminAuth) failed(ip string, users ...string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if at, ok := a.attempts[ip]; ok && at.inflight > 0 {
+	user := ""
+	if len(users) > 0 {
+		user = users[0]
+	}
+	ipKey, userKey := adminAttemptKeys(ip, user)
+
+	if a.globalInflight > 0 {
+		a.globalInflight--
+	}
+	if ipAt, ok := a.ipAttempts[ipKey]; ok && ipAt.inflight > 0 {
+		ipAt.inflight--
+	}
+	if at, ok := a.attempts[userKey]; ok && at.inflight > 0 {
 		at.inflight--
 	}
+}
+
+func (h *Handlers) hasValidAdminSession(c *gin.Context) bool {
+	cookie, err := c.Cookie(adminCookieName)
+	if err != nil || cookie == "" {
+		return false
+	}
+	_, ok := h.currentAdmin().parse(cookie)
+	return ok
 }
 
 // AdminAuth 后台鉴权中间件。
@@ -258,25 +404,28 @@ func (h *Handlers) redirectLogin(c *gin.Context) {
 
 // AdminBase 所有后台页面共用的头部数据。
 type AdminBase struct {
-	Active    string
-	User      string
-	CSRF      string
-	Flash     string
-	FlashOK   bool
-	FlashWarn bool
-	Title     string
+	Active       string
+	User         string
+	CSRF         string
+	Flash        string
+	FlashOK      bool
+	FlashWarn    bool
+	ProxyWarning bool
+	Title        string
 }
 
 func (h *Handlers) adminBase(c *gin.Context, active, title string) AdminBase {
 	flash := c.Query("msg")
+	cfg := h.C()
 	return AdminBase{
-		Active:    active,
-		Title:     title,
-		User:      c.GetString("admin_user"),
-		CSRF:      c.GetString("admin_csrf"),
-		Flash:     flash,
-		FlashOK:   c.Query("t") != "err",
-		FlashWarn: c.Query("t") == "warn",
+		Active:       active,
+		Title:        title,
+		User:         c.GetString("admin_user"),
+		CSRF:         c.GetString("admin_csrf"),
+		Flash:        flash,
+		FlashOK:      c.Query("t") != "err",
+		FlashWarn:    c.Query("t") == "warn",
+		ProxyWarning: cfg.Server.Production && len(cfg.Server.TrustedProxies) == 0,
 	}
 }
 
@@ -304,22 +453,27 @@ func (h *Handlers) AdminLoginPage(c *gin.Context) {
 func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
-	if !auth.allow(ip) {
-		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("登录尝试过于频繁，请 10 分钟后再试"))
-		return
-	}
-
 	user := strings.TrimSpace(c.PostForm("username"))
 	pass := c.PostForm("password")
 	next := c.PostForm("next")
 
+	hasSession := h.hasValidAdminSession(c)
+	if !hasSession && !auth.allow(ip, user) {
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("登录尝试过于频繁，请 10 分钟后再试"))
+		return
+	}
+
 	if !auth.checkCredentials(user, pass) {
-		// Attempts are reserved atomically in allow, including concurrent requests.
-		auth.failed(ip)
+		if !hasSession {
+			// Attempts are reserved atomically in allow, including concurrent requests.
+			auth.failed(ip, user)
+		}
 		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("管理员账号或密码错误，请核对后重试"))
 		return
 	}
-	auth.succeeded(ip)
+	if !hasSession {
+		auth.succeeded(ip, user)
+	}
 
 	token, _, err := auth.issue()
 	if err != nil {
@@ -338,6 +492,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 
 // AdminLogout POST /admin/logout
 func (h *Handlers) AdminLogout(c *gin.Context) {
+	h.currentAdmin().bumpEpoch()
 	c.SetSameSite(http.SameSiteStrictMode)
 	c.SetCookie(adminCookieName, "", -1, h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
 	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login"))
@@ -442,16 +597,22 @@ func (h *Handlers) AdminAccountSave(c *gin.Context) {
 	}
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
-	if !auth.allow(ip) {
+	currentUser := c.GetString("admin_user")
+	hasSession := h.hasValidAdminSession(c)
+	if !hasSession && !auth.allow(ip, currentUser) {
 		fail("密码验证过于频繁，请 10 分钟后再试")
 		return
 	}
-	if !auth.checkCredentials(c.GetString("admin_user"), c.PostForm("current_password")) {
-		auth.failed(ip)
+	if !auth.checkCredentials(currentUser, c.PostForm("current_password")) {
+		if !hasSession {
+			auth.failed(ip, currentUser)
+		}
 		fail("当前密码错误，请核对后重新输入")
 		return
 	}
-	auth.succeeded(ip)
+	if !hasSession {
+		auth.succeeded(ip, currentUser)
+	}
 	user := strings.TrimSpace(c.PostForm("admin_username"))
 	pass := c.PostForm("new_password")
 	if user == "" || utf8.RuneCountInString(user) > 64 {
@@ -460,8 +621,8 @@ func (h *Handlers) AdminAccountSave(c *gin.Context) {
 	}
 	p := settings.Patch{AdminUsername: &user}
 	if pass != "" {
-		if utf8.RuneCountInString(pass) < 6 || len(pass) > 72 {
-			fail("新密码需至少 6 个字符且不超过 72 字节，请重新输入")
+		if utf8.RuneCountInString(pass) < 12 || len(pass) > 72 {
+			fail("新密码需至少 12 个字符且不超过 72 字节，请重新输入")
 			return
 		}
 		if pass != c.PostForm("confirm_password") {
@@ -490,16 +651,22 @@ func (h *Handlers) AdminSiteSave(c *gin.Context) {
 	}
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
-	if !auth.allow(ip) {
+	currentUser := c.GetString("admin_user")
+	hasSession := h.hasValidAdminSession(c)
+	if !hasSession && !auth.allow(ip, currentUser) {
 		fail("密码验证过于频繁，请 10 分钟后再试")
 		return
 	}
-	if !auth.checkCredentials(c.GetString("admin_user"), c.PostForm("current_password")) {
-		auth.failed(ip)
+	if !auth.checkCredentials(currentUser, c.PostForm("current_password")) {
+		if !hasSession {
+			auth.failed(ip, currentUser)
+		}
 		fail("当前密码错误，请核对后重新输入")
 		return
 	}
-	auth.succeeded(ip)
+	if !hasSession {
+		auth.succeeded(ip, currentUser)
+	}
 	root := strings.TrimSpace(c.PostForm("admin_path"))
 	storeURL := strings.TrimSpace(c.PostForm("store_url"))
 	if root == "" {
@@ -830,7 +997,31 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 	c.HTML(200, "admin_order.html", gin.H{"RefundReviewGenerationCurrent": summary.Current(), "UncoveredCancellationReceipts": summary.Uncovered, "CancellationReviews": views, "CancellationReviewAudits": reviewAudits, "Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts, "PaymentAttempts": attempts, "PaymentRecoveries": paymentRecoveries, "HistoricalScans": history})
 }
 func (h *Handlers) AdminIntegration(c *gin.Context) {
-	c.HTML(200, "admin_integration.html", gin.H{"Base": h.adminBase(c, "integration", "接入信息"), "BaseURL": h.C().Server.BaseURL, "Token": h.C().BEpusdt.APIToken, "PendingNotifyCount": h.pendingNotifyCount(c), "CanRotateToken": !h.C().Server.Production || h.C().Server.MerchantKeyVersions})
+	c.HTML(200, "admin_integration.html", gin.H{
+		"Base":               h.adminBase(c, "integration", "接入信息"),
+		"BaseURL":            h.C().Server.BaseURL,
+		"TokenMask":          maskSecret(h.C().BEpusdt.APIToken),
+		"Token":              "",
+		"PendingNotifyCount": h.pendingNotifyCount(c),
+		"CanRotateToken":     !h.C().Server.Production || h.C().Server.MerchantKeyVersions,
+	})
+}
+
+func (h *Handlers) AdminIntegrationReveal(c *gin.Context) {
+	operator := c.GetString("admin_user")
+	if h.log != nil {
+		h.log.Warn("管理员查看完整 BEpusdt API Token", "operator", operator, "ip", c.ClientIP())
+	} else {
+		slog.Warn("管理员查看完整 BEpusdt API Token", "operator", operator, "ip", c.ClientIP())
+	}
+	c.HTML(200, "admin_integration.html", gin.H{
+		"Base":               h.adminBase(c, "integration", "接入信息"),
+		"BaseURL":            h.C().Server.BaseURL,
+		"TokenMask":          maskSecret(h.C().BEpusdt.APIToken),
+		"Token":              h.C().BEpusdt.APIToken,
+		"PendingNotifyCount": h.pendingNotifyCount(c),
+		"CanRotateToken":     !h.C().Server.Production || h.C().Server.MerchantKeyVersions,
+	})
 }
 
 func (h *Handlers) AdminRetryNotify(c *gin.Context) {

@@ -43,7 +43,7 @@
         <div class="form-grid">
           <div class="field"><label>用户名</label><input class="input" name="admin_username" value="{{.Cfg.Admin.Username}}" maxlength="64" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" required></div>
           <div class="field"><label>当前密码</label><input class="input" type="password" name="current_password" autocomplete="current-password" required></div>
-          <div class="field"><label>新密码</label><input class="input" type="password" name="new_password" autocomplete="new-password" placeholder="至少 6 个字符，留空保持当前密码"></div>
+          <div class="field"><label>新密码</label><input class="input" type="password" name="new_password" autocomplete="new-password" placeholder="至少 12 个字符，留空保持当前密码"></div>
           <div class="field"><label>确认新密码</label><input class="input" type="password" name="confirm_password" autocomplete="new-password"></div>
         </div>
         <button class="btn" type="submit">保存管理员账号</button>

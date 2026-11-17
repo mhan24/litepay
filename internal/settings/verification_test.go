@@ -158,7 +158,9 @@ func TestProviderCurrenciesLegacyPersistenceAndScopedVerification(t *testing.T) 
 	if err != nil || !reflect.DeepEqual(calls, []string{"okx"}) || len(checks) != 1 || !checks[0].Verified {
 		t.Fatal(calls, checks, err)
 	}
-	loaded := New(config.Default(), m.st)
+	baseCfg := config.Default()
+	baseCfg.Server.Production = false
+	loaded := New(baseCfg, m.st)
 	if err = loaded.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +172,7 @@ func TestProviderCurrenciesLegacyPersistenceAndScopedVerification(t *testing.T) 
 	if err = loaded.Update(ctx, Patch{BinanceCurrencies: &empty, OKXCurrencies: &empty, TONCurrencies: &empty}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	reloaded := New(config.Default(), m.st)
+	reloaded := New(baseCfg, m.st)
 	if err = reloaded.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +209,7 @@ func TestChangingTONAddressArchivesOnlyOldCheckpoint(t *testing.T) {
 }
 
 func TestProductionTokenRotationRequiresMerchantCompatibility(t *testing.T) {
+	t.Setenv("LITEPAY_MASTER_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	ctx := context.Background()
 	cfg := config.Default()
 	cfg.Server.Production = true

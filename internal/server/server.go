@@ -103,6 +103,9 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		poller:         poller,
 		selectionLimit: newSelectionLimiter(), readLimit: newSelectionLimiter(),
 	}
+	if cfg.Server.Production && len(cfg.Server.TrustedProxies) == 0 {
+		slog.Warn("production 模式下 server.trusted_proxies 为空，反向代理场景下将共用客户端 IP")
+	}
 	if cfg.AdminEnabled() {
 		h.admin = newAdminAuth(cfg)
 	}
@@ -152,6 +155,9 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.POST("/orders/:trade_no/rescan", h.AdminHistoricalScan)
 		adm.POST("/orders/:trade_no/refund-record", h.AdminRecordRefund)
 		adm.GET("/integration", h.AdminIntegration)
+		adm.POST("/integration", h.AdminIntegrationReveal)
+		adm.POST("/integration/token", h.AdminIntegrationReveal)
+		adm.POST("/integration/reveal", h.AdminIntegrationReveal)
 		adm.GET("/settings", h.AdminSettings)
 		adm.GET("/gram/status", h.GRAMStatus)
 		adm.POST("/settings", h.AdminSettingsSave)

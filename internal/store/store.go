@@ -22,8 +22,9 @@ import (
 )
 
 type Store struct {
-	db   *gorm.DB
-	lock *os.File
+	db        *gorm.DB
+	lock      *os.File
+	masterKey []byte
 }
 
 func Open(path string) (*Store, error) {

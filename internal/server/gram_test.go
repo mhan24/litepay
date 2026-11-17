@@ -151,7 +151,9 @@ func TestGRAMCashierAndSettings(t *testing.T) {
 	if err = mgr.Update(ctx, settings.Patch{TONPollInterval: &interval}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	reloaded := settings.New(config.Default(), st)
+	reloadCfg := config.Default()
+	reloadCfg.Server.Production = false
+	reloaded := settings.New(reloadCfg, st)
 	if err = reloaded.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
