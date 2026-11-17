@@ -1,12 +1,15 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"text/template"
+	"time"
 )
 
 func TestContainerRequiresExplicitProductionConfiguration(t *testing.T) {
@@ -84,5 +87,30 @@ func TestProductionImageHealthcheckUsesLocalProbe(t *testing.T) {
 	}
 	if probes != 1 {
 		t.Fatal("expected one runtime healthcheck", probes)
+	}
+}
+
+func TestHealthcheckContractSerializesDurationsAsJSON(t *testing.T) {
+	raw, err := os.ReadFile("../../scripts/test_container.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Docker may expose typed durations or decoded JSON numbers to its templates.
+	// JSON formatting gives identical nanosecond numbers for both representations.
+	for _, value := range []any{30 * time.Second, float64(30000000000)} {
+		funcs := template.FuncMap{"json": func(v any) (string, error) { b, err := json.Marshal(v); return string(b), err }}
+		tmpl, err := template.New("duration").Funcs(funcs).Parse(`{{json .}}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rendered bytes.Buffer
+		if err := tmpl.Execute(&rendered, value); err != nil || rendered.String() != "30000000000" {
+			t.Fatal(rendered.String(), err)
+		}
+	}
+	for _, field := range []string{"Interval", "Timeout", "Retries"} {
+		if !strings.Contains(string(raw), "{{json .Config.Healthcheck."+field+"}}") {
+			t.Fatal("healthcheck contract relies on default numeric formatting", field)
+		}
 	}
 }
