@@ -202,3 +202,63 @@ func TestCredentialMigrationScrubsDiskAndRotationIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBackupBeforeMasterKeyRotationRequiresItsOriginalKey(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	live, err := Open(filepath.Join(dir, "live.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	oldKey, newKey := bytes.Repeat([]byte{0x31}, 32), bytes.Repeat([]byte{0x52}, 32)
+	if err := live.SetMasterKey(oldKey); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "backup-original-exchange-secret"
+	const token = "backup-original-signing-token"
+	if err := live.SaveSettingPayload(ctx, `{"binance_api_secret":"`+secret+`"}`, "test"); err != nil {
+		t.Fatal(err)
+	}
+	version, err := live.InstallSigningKey(ctx, token, "test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.MigrateCredentials(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// SQLite creates a consistent snapshot; the external master key is not part of it.
+	backupPath := filepath.Join(dir, "before-rotation.db")
+	if err := live.DB().Exec("VACUUM INTO ?", backupPath).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := live.RotateMasterKey(ctx, oldKey, newKey); err != nil {
+		t.Fatal(err)
+	}
+	if payload, err := live.LoadSettingPayload(ctx); err != nil || !strings.Contains(payload, secret) {
+		t.Fatal("rotated live database cannot decrypt", err)
+	}
+	backup, err := Open(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	if err := backup.SetMasterKey(newKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backup.LoadSettingPayload(ctx); err == nil {
+		t.Fatal("new key unexpectedly decrypts old backup")
+	}
+	if _, err := backup.CallbackKey(ctx, model.Callback{SigningKeyID: version}); err == nil {
+		t.Fatal("new key unexpectedly decrypts backup signing keys")
+	}
+	if err := backup.SetMasterKey(oldKey); err != nil {
+		t.Fatal(err)
+	}
+	if payload, err := backup.LoadSettingPayload(ctx); err != nil || !strings.Contains(payload, secret) {
+		t.Fatal("backup did not recover with original key", err)
+	}
+	if got, err := backup.CallbackKey(ctx, model.Callback{SigningKeyID: version}); err != nil || got != token {
+		t.Fatal("backup callback key did not recover", err)
+	}
+}
