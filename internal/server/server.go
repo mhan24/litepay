@@ -115,6 +115,8 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		}
 	}
 
+	r.Use(h.warnUntrustedProxy)
+
 	// ---- BEpusdt API（独角数卡收银台模式）----
 	r.POST("/api/v1/order/create-order", h.BEpusdtCreateOrder)
 	r.POST("/api/v1/order/cancel-transaction", h.BEpusdtCancelOrder)

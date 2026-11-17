@@ -74,6 +74,9 @@ func Open(path string) (*Store, error) {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	fail := func(err error) (*Store, error) { sqlDB.Close(); return nil, err }
+	if err = db.Exec("PRAGMA secure_delete=ON").Error; err != nil {
+		return fail(err)
+	}
 	if err = db.Exec("PRAGMA foreign_keys=ON").Error; err != nil {
 		return fail(err)
 	}

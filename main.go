@@ -30,6 +30,7 @@ func main() {
 func run() error {
 	cfgPath := flag.String("config", "config.yaml", "启动配置路径")
 	recoverReason := flag.String("recover-reason", "", "手工恢复数据库后填写原因，生成新的取消核对代际")
+	rotateFrom := flag.String("rotate-master-key-from", "", "离线轮换主密钥：旧密钥文件；新密钥通过正常配置提供，成功后退出")
 	flag.Parse()
 	// SQLite and configuration files created by this process are private by default.
 	syscall.Umask(0077)
@@ -52,6 +53,21 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+	if strings.TrimSpace(*rotateFrom) != "" {
+		oldKey, err := store.LoadMasterKeyFromFile(*rotateFrom, cfg.Server.Production)
+		if err != nil {
+			return err
+		}
+		newKey, err := store.ResolveMasterKey(cfg.Server.MasterKeyFile, cfg.Server.Production)
+		if err != nil {
+			return err
+		}
+		if err := st.RotateMasterKey(context.Background(), oldKey, newKey); err != nil {
+			return err
+		}
+		slog.Info("主密钥轮换成功，请使用新密钥启动服务")
+		return nil
+	}
 	if strings.TrimSpace(*recoverReason) != "" {
 		if err = st.BeginRecovery(context.Background(), strings.TrimSpace(*recoverReason)); err != nil {
 			return err

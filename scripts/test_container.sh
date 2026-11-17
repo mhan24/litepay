@@ -5,7 +5,7 @@ image=${1:-litepay:ci}
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 task_tmp=$(mktemp -d)
 name="litepay-container-check-$$"
-trap 'docker rm -f "$name" "$name-default" >/dev/null 2>&1 || true; rm -rf "$task_tmp"' EXIT HUP INT TERM
+trap 'docker rm -f "$name" "$name-default" >/dev/null 2>&1 || true; docker volume rm "$name-keys" >/dev/null 2>&1 || true; rm -rf "$task_tmp"' EXIT HUP INT TERM
 docker run -d --name "$name-default" --network none "$image" >/dev/null
 attempt=0
 while [ "$attempt" -lt 15 ] && [ "$(docker inspect -f '{{.State.Running}}' "$name-default")" = true ]; do
@@ -23,8 +23,11 @@ sed -e 's/base_url: ""/base_url: "https:\/\/pay.example.com"/' -e 's/notify_host
 chmod 755 "$task_tmp"
 chmod 644 "$task_tmp/config.yaml"
 printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n' >"$task_tmp/master.key"
-chmod 644 "$task_tmp/master.key"
-docker run -d --name "$name" --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /tmp:size=16m,mode=1777 --tmpfs /app/data:uid=10001,gid=10001,mode=0700 -e LITEPAY_MASTER_KEY_FILE=/app/master.key -v "$task_tmp/master.key:/app/master.key:ro" -v "$task_tmp/config.yaml:/app/config.yaml:ro" "$image" >/dev/null
+chmod 600 "$task_tmp/master.key"
+# Provision a private key owned by the runtime UID; host bind-mount ownership varies across Docker hosts.
+docker volume create "$name-keys" >/dev/null
+docker run --rm -i --network none --user 0:0 --entrypoint /bin/sh -v "$name-keys:/keys" "$image" -c 'umask 077; cat > /keys/master.key; chown 10001:10001 /keys/master.key; chmod 400 /keys/master.key' <"$task_tmp/master.key"
+docker run -d --name "$name" --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /tmp:size=16m,mode=1777 --tmpfs /app/data:uid=10001,gid=10001,mode=0700 -e LITEPAY_MASTER_KEY_FILE=/run/secrets/master.key -v "$name-keys:/run/secrets:ro" -v "$task_tmp/config.yaml:/app/config.yaml:ro" "$image" >/dev/null
 attempt=0
 while [ "$attempt" -lt 30 ]; do
     if docker exec "$name" wget -qO- http://127.0.0.1:8080/healthz >"$task_tmp/health.json"; then

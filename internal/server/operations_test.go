@@ -367,6 +367,29 @@ func TestOrderSignedAPIRateLimitReplayAndLogThrottle(t *testing.T) {
 		t.Fatalf("expected at most 1 signature failure log per minute for same IP, got %d:\n%s", logLines, logBuf.String())
 	}
 
+	// Valid signatures from the exhausted IP still create and cancel an order.
+	for _, endpoint := range []string{"create-order", "cancel-transaction"} {
+		body := map[string]any{"order_id": "shared-ip-valid"}
+		if endpoint == "create-order" {
+			body["amount"] = json.Number("10")
+			body["notify_url"] = "https://shop.example.com/notify"
+			body["redirect_url"] = "https://shop.example.com/paid"
+		}
+		body["signature"] = sign.BEpusdtSignGeneric(body, mgr.Get().BEpusdt.APIToken)
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/order/"+endpoint, bytes.NewReader(raw))
+		req.RemoteAddr = "127.0.0.1:1000"
+		req.Header.Set("X-Forwarded-For", "203.0.113.77")
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status_code":200`) {
+			t.Fatalf("valid %s throttled: %d %s", endpoint, w.Code, w.Body.String())
+		}
+	}
+
 	// Another IP is unaffected by 203.0.113.77's signature failure lockout.
 	freshGen := map[string]any{"timestamp": fmt.Sprint(time.Now().Unix() + 1)}
 	freshGen["signature"] = sign.BEpusdtSignGeneric(freshGen, mgr.Get().BEpusdt.APIToken)

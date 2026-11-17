@@ -11,9 +11,6 @@ import (
 )
 
 func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
-	if !h.checkOrderSigRateLimit(c) {
-		return
-	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
 	if err != nil {
 		h.bepusdtFail(c, "invalid health report")
@@ -72,9 +69,6 @@ func (h *Handlers) AdminOperations(c *gin.Context) {
 }
 
 func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
-	if !h.checkOrderSigRateLimit(c) {
-		return
-	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
 	if err != nil {
 		h.bepusdtFail(c, "invalid generation request")
@@ -112,9 +106,6 @@ func (h *Handlers) paymentOperationsBlocked(c *gin.Context) bool {
 }
 
 func (h *Handlers) CancellationReviewStatus(c *gin.Context) {
-	if !h.checkOrderSigRateLimit(c) {
-		return
-	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
 	if err != nil {
 		h.bepusdtFail(c, "invalid review request")

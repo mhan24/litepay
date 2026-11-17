@@ -34,6 +34,7 @@ type Handlers struct {
 	cfg            *settings.Manager
 	st             *store.Store
 	log            *slog.Logger
+	proxyWarnOnce  sync.Once
 	adminMu        sync.Mutex
 	admin          *adminAuth
 	poller         *worker.Poller

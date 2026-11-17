@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -22,7 +25,9 @@ import (
 )
 
 const (
-	encryptedPrefix           = "enc:v1:"
+	encryptedPrefix           = "enc:v2:"
+	legacyEncryptedPrefix     = "enc:v1:"
+	credentialV2Marker        = "credentials_encrypted_v2"
 	CredentialMigrationMarker = "credentials_encrypted_v1"
 )
 
@@ -37,10 +42,10 @@ var sensitiveSettingKeys = []string{
 
 // IsEncryptedSecret 判断字段值是否为 AES-256-GCM 密文格式。
 func IsEncryptedSecret(v string) bool {
-	return strings.HasPrefix(v, encryptedPrefix)
+	return strings.HasPrefix(v, encryptedPrefix) || strings.HasPrefix(v, legacyEncryptedPrefix)
 }
 
-// ParseMasterKey 解析 32 字节主密钥（支持 64 位 hex、base64 或 32 字节原始字符串）。
+// ParseMasterKey 解析 32 字节主密钥（仅支持 64 位 hex 或 Base64 编码）。
 func ParseMasterKey(raw string) ([]byte, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -51,33 +56,45 @@ func ParseMasterKey(raw string) ([]byte, error) {
 			return decoded, nil
 		}
 	}
-	if len(trimmed) == 32 {
-		return []byte(trimmed), nil
-	}
 	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
 		if decoded, err := enc.DecodeString(trimmed); err == nil && len(decoded) == 32 {
 			return decoded, nil
 		}
 	}
-	return nil, errors.New("主密钥长度无效，需为 32 字节（或 64 位 hex / Base64 编码）")
+	return nil, errors.New("主密钥格式无效，需为 32 字节随机密钥的 64 位 hex 或 Base64 编码")
 }
 
 // LoadMasterKeyFromFile 从只读文件加载主密钥。
-func LoadMasterKeyFromFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(strings.TrimSpace(path))
+func LoadMasterKeyFromFile(path string, production bool) ([]byte, error) {
+	f, err := os.Open(strings.TrimSpace(path))
 	if err != nil {
 		return nil, fmt.Errorf("读取主密钥文件失败: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		if production {
+			return nil, fmt.Errorf("主密钥文件 %s 权限过宽，请设置为 0400 或 0600", path)
+		}
+		slog.Warn("主密钥文件权限过宽，请设置为 0400 或 0600", "path", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil {
+		return nil, err
 	}
 	return ParseMasterKey(string(data))
 }
 
-// ResolveMasterKey 从配置文件路径、LITEPAY_MASTER_KEY_FILE 或 LITEPAY_MASTER_KEY 解析主密钥。
-func ResolveMasterKey(configFile string) ([]byte, error) {
+// ResolveMasterKey resolves a key file or an encoded environment value.
+func ResolveMasterKey(configFile string, production bool) ([]byte, error) {
 	if p := strings.TrimSpace(configFile); p != "" {
-		return LoadMasterKeyFromFile(p)
+		return LoadMasterKeyFromFile(p, production)
 	}
 	if p := strings.TrimSpace(os.Getenv("LITEPAY_MASTER_KEY_FILE")); p != "" {
-		return LoadMasterKeyFromFile(p)
+		return LoadMasterKeyFromFile(p, production)
 	}
 	if raw := strings.TrimSpace(os.Getenv("LITEPAY_MASTER_KEY")); raw != "" {
 		return ParseMasterKey(raw)
@@ -86,7 +103,7 @@ func ResolveMasterKey(configFile string) ([]byte, error) {
 }
 
 // EncryptSecret 使用 AES-256-GCM 加密敏感字符串。
-func EncryptSecret(key []byte, plaintext string) (string, error) {
+func EncryptSecret(key []byte, plaintext, field string) (string, error) {
 	if len(key) != 32 {
 		return "", errors.New("AES-256-GCM 主密钥必须为 32 字节")
 	}
@@ -102,19 +119,23 @@ func EncryptSecret(key []byte, plaintext string) (string, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
 	}
-	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), []byte(field))
 	return encryptedPrefix + base64.RawStdEncoding.EncodeToString(sealed), nil
 }
 
 // DecryptSecret 解密 AES-256-GCM 密文。
-func DecryptSecret(key []byte, value string) (string, error) {
+func DecryptSecret(key []byte, value, field string) (string, error) {
 	if !IsEncryptedSecret(value) {
 		return "", errors.New("密文格式无效")
 	}
 	if len(key) != 32 {
 		return "", errors.New("未配置有效主密钥，无法解密敏感凭据")
 	}
-	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, encryptedPrefix))
+	prefix, aad := encryptedPrefix, []byte(field)
+	if strings.HasPrefix(value, legacyEncryptedPrefix) {
+		prefix, aad = legacyEncryptedPrefix, nil
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, prefix))
 	if err != nil {
 		return "", fmt.Errorf("解析密文失败: %w", err)
 	}
@@ -131,7 +152,7 @@ func DecryptSecret(key []byte, value string) (string, error) {
 	}
 	nonce := raw[:gcm.NonceSize()]
 	ciphertext := raw[gcm.NonceSize():]
-	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	plain, err := gcm.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return "", fmt.Errorf("解密敏感凭据失败（主密钥不匹配或数据损坏）: %w", err)
 	}
@@ -170,16 +191,14 @@ func encryptSettingPayload(key []byte, payload string) (string, bool, error) {
 		if !ok || strings.TrimSpace(raw) == "" {
 			continue
 		}
-		if IsEncryptedSecret(raw) {
-			if _, err := DecryptSecret(key, raw); err != nil {
-				return "", false, err
-			}
-			continue
-		}
-		enc, err := EncryptSecret(key, raw)
+		enc, err := upgradeSecret(key, key, raw, field, false)
 		if err != nil {
 			return "", false, err
 		}
+		if enc == raw {
+			continue
+		}
+
 		m[field] = enc
 		changed = true
 	}
@@ -207,7 +226,7 @@ func decryptSettingPayload(key []byte, payload string) (string, error) {
 		if !ok || !IsEncryptedSecret(raw) {
 			continue
 		}
-		plain, err := DecryptSecret(key, raw)
+		plain, err := DecryptSecret(key, raw, field)
 		if err != nil {
 			return "", err
 		}
@@ -224,84 +243,187 @@ func decryptSettingPayload(key []byte, payload string) (string, error) {
 	return string(out), nil
 }
 
-// MigrateCredentials 执行一次性幂等迁移：将旧明文凭据用 AES-256-GCM 加密写回并标记已迁移。
+// upgradeSecret validates v2 values and upgrades legacy/plaintext values with field-bound AAD.
+func upgradeSecret(oldKey, newKey []byte, value, field string, rotate bool) (string, error) {
+	if value == "" {
+		return value, nil
+	}
+	plain := value
+	if IsEncryptedSecret(value) {
+		var err error
+		plain, err = DecryptSecret(oldKey, value, field)
+		if err != nil {
+			return "", err
+		}
+		if !rotate && strings.HasPrefix(value, encryptedPrefix) {
+			return value, nil
+		}
+	}
+	return EncryptSecret(newKey, plain, field)
+}
+
+func plainCredential(name string) bool {
+	return name == CredentialMigrationMarker || name == credentialV2Marker || name == "admin_session_epoch"
+}
+
+func rewriteSecrets(db *gorm.DB, oldKey, newKey []byte, rotate bool) (bool, error) {
+	changed := false
+	var setting model.Setting
+	err := db.Where("id = 1").First(&setting).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, err
+	}
+	if err == nil && strings.TrimSpace(setting.Payload) != "" {
+		payload := setting.Payload
+		if rotate {
+			payload, err = decryptSettingPayload(oldKey, payload)
+			if err != nil {
+				return false, err
+			}
+		}
+		encrypted, updated, err := encryptSettingPayload(newKey, payload)
+		if err != nil {
+			return false, err
+		}
+		if updated {
+			if err := db.Model(&setting).Update("payload", encrypted).Error; err != nil {
+				return false, err
+			}
+			changed = true
+		}
+	}
+	var credentials []model.Credential
+	if err := db.Find(&credentials).Error; err != nil {
+		return false, err
+	}
+	for _, row := range credentials {
+		if plainCredential(row.Name) {
+			continue
+		}
+		encrypted, err := upgradeSecret(oldKey, newKey, row.Value, row.Name, rotate)
+		if err != nil {
+			return false, err
+		}
+		if encrypted != row.Value {
+			if err := db.Model(&row).Update("value", encrypted).Error; err != nil {
+				return false, err
+			}
+			changed = true
+		}
+	}
+	var keys []model.SigningKey
+	if err := db.Find(&keys).Error; err != nil {
+		return false, err
+	}
+	for _, row := range keys {
+		encrypted, err := upgradeSecret(oldKey, newKey, row.Token, "signing_keys.token", rotate)
+		if err != nil {
+			return false, err
+		}
+		if encrypted != row.Token {
+			if err := db.Model(&row).Update("token", encrypted).Error; err != nil {
+				return false, err
+			}
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+// scrubCredentials must run outside a transaction. Checkpoint again after VACUUM,
+// which itself writes pages to WAL. A busy checkpoint must not mark cleanup complete.
+func (s *Store) scrubCredentials(ctx context.Context) error {
+	checkpoint := func() error {
+		var result struct {
+			Busy         int
+			Log          int
+			Checkpointed int
+		}
+		if err := s.db.WithContext(ctx).Raw("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&result).Error; err != nil {
+			return err
+		}
+		if result.Busy != 0 {
+			return errors.New("凭据清理被数据库读者阻塞，请停止备份后重试")
+		}
+		return nil
+	}
+	if err := checkpoint(); err != nil {
+		return err
+	}
+	if err := s.db.WithContext(ctx).Exec("VACUUM").Error; err != nil {
+		return err
+	}
+	if err := checkpoint(); err != nil {
+		return err
+	}
+	if err := s.SaveCredential(ctx, model.Credential{Name: CredentialMigrationMarker, Value: "1", UpdatedBy: "migration"}); err != nil {
+		return err
+	}
+	if err := s.SaveCredential(ctx, model.Credential{Name: credentialV2Marker, Value: "1", UpdatedBy: "migration"}); err != nil {
+		return err
+	}
+	slog.Warn("凭据加密迁移与数据库清理完成；请轮换交易所 API Key，并清理旧备份")
+	return nil
+}
+
 func (s *Store) MigrateCredentials(ctx context.Context) error {
 	if !s.HasMasterKey() {
 		return errors.New("未配置主密钥，无法迁移加密凭据")
 	}
-	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		var setting model.Setting
-		err := db.Where("id = 1").First(&setting).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := s.db.WithContext(ctx).Exec("PRAGMA secure_delete=ON").Error; err != nil {
+		return err
+	}
+	var cleaned int64
+	if err := s.db.WithContext(ctx).Model(&model.Credential{}).Where("name = ? AND value = ?", credentialV2Marker, "1").Count(&cleaned).Error; err != nil {
+		return err
+	}
+	changed := false
+	if err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		var err error
+		changed, err = rewriteSecrets(db, s.masterKey, s.masterKey, false)
+		if err != nil {
 			return err
 		}
-		if err == nil && strings.TrimSpace(setting.Payload) != "" {
-			encPayload, changed, e := encryptSettingPayload(s.masterKey, setting.Payload)
-			if e != nil {
-				return e
-			}
-			if changed {
-				if e := db.Model(&model.Setting{}).Where("id = 1").Update("payload", encPayload).Error; e != nil {
-					return e
-				}
-			}
+		if changed {
+			return db.Where("name = ?", credentialV2Marker).Delete(&model.Credential{}).Error
 		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if changed || cleaned == 0 {
+		return s.scrubCredentials(ctx)
+	}
+	return nil
+}
 
-		var cred model.Credential
-		err = db.Where("name = ?", "bepusdt_api_token").First(&cred).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+// RotateMasterKey is an offline operation: all settings, credentials and historical
+// signing keys commit together; a failed decryption leaves every row unchanged.
+func (s *Store) RotateMasterKey(ctx context.Context, oldKey, newKey []byte) error {
+	if len(oldKey) != 32 || len(newKey) != 32 {
+		return errors.New("轮换需要有效的 32 字节新旧主密钥")
+	}
+	if hmac.Equal(oldKey, newKey) {
+		return errors.New("新旧主密钥不能相同")
+	}
+	if err := s.db.WithContext(ctx).Exec("PRAGMA secure_delete=ON").Error; err != nil {
+		return err
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if _, err := rewriteSecrets(db, oldKey, newKey, true); err != nil {
 			return err
 		}
-		if err == nil && strings.TrimSpace(cred.Value) != "" {
-			if IsEncryptedSecret(cred.Value) {
-				if _, e := DecryptSecret(s.masterKey, cred.Value); e != nil {
-					return e
-				}
-			} else {
-				enc, e := EncryptSecret(s.masterKey, cred.Value)
-				if e != nil {
-					return e
-				}
-				if e := db.Model(&model.Credential{}).Where("name = ?", "bepusdt_api_token").Update("value", enc).Error; e != nil {
-					return e
-				}
-			}
-		}
-
-		var keys []model.SigningKey
-		if e := db.Find(&keys).Error; e != nil {
-			return e
-		}
-		for _, k := range keys {
-			if strings.TrimSpace(k.Token) == "" {
-				continue
-			}
-			if IsEncryptedSecret(k.Token) {
-				if _, e := DecryptSecret(s.masterKey, k.Token); e != nil {
-					return e
-				}
-				continue
-			}
-			enc, e := EncryptSecret(s.masterKey, k.Token)
-			if e != nil {
-				return e
-			}
-			if e := db.Model(&model.SigningKey{}).Where("id = ?", k.ID).Update("token", enc).Error; e != nil {
-				return e
-			}
-		}
-
-		marker := model.Credential{
-			Name:      CredentialMigrationMarker,
-			Value:     "1",
-			UpdatedBy: "migration",
-			UpdatedAt: time.Now(),
-		}
-		return db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "name"}},
-			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_by", "updated_at"}),
-		}).Create(&marker).Error
-	})
+		return db.Where("name = ?", credentialV2Marker).Delete(&model.Credential{}).Error
+	}); err != nil {
+		return err
+	}
+	if err := s.SetMasterKey(newKey); err != nil {
+		return err
+	}
+	if err := s.scrubCredentials(ctx); err != nil {
+		return fmt.Errorf("密钥轮换已提交，请使用新密钥重启以重试数据库清理: %w", err)
+	}
+	return nil
 }
 
 // LoadSettingPayload 读取后台配置覆盖项（不存在时返回空串）。
@@ -358,7 +480,7 @@ func (s *Store) LoadCredential(ctx context.Context, name string) (*model.Credent
 		return nil, err
 	}
 	if IsEncryptedSecret(row.Value) {
-		plain, err := DecryptSecret(s.masterKey, row.Value)
+		plain, err := DecryptSecret(s.masterKey, row.Value, row.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -369,8 +491,8 @@ func (s *Store) LoadCredential(ctx context.Context, name string) (*model.Credent
 
 // SaveCredential 保存或轮换系统凭据。
 func (s *Store) SaveCredential(ctx context.Context, row model.Credential) error {
-	if s.HasMasterKey() && row.Name != CredentialMigrationMarker && row.Value != "" && !IsEncryptedSecret(row.Value) {
-		enc, err := EncryptSecret(s.masterKey, row.Value)
+	if s.HasMasterKey() && !plainCredential(row.Name) && row.Value != "" && !IsEncryptedSecret(row.Value) {
+		enc, err := EncryptSecret(s.masterKey, row.Value, row.Name)
 		if err != nil {
 			return err
 		}

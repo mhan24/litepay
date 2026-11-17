@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -87,6 +88,7 @@ type adminAuth struct {
 	epoch          uint64
 	st             *store.Store
 	reauth         *adminAuth
+	hardLimits     bool
 	attempts       map[string]*loginAttempt
 	ipAttempts     map[string]*loginAttempt
 	globalCount    int
@@ -163,7 +165,7 @@ func (h *Handlers) reauthenticate(c *gin.Context) bool {
 	a := h.currentAdmin()
 	a.mu.Lock()
 	if a.reauth == nil {
-		a.reauth = &adminAuth{attempts: make(map[string]*loginAttempt), ipAttempts: make(map[string]*loginAttempt)}
+		a.reauth = &adminAuth{hardLimits: true, attempts: make(map[string]*loginAttempt), ipAttempts: make(map[string]*loginAttempt)}
 	}
 	limiter := a.reauth
 	a.mu.Unlock()
@@ -278,7 +280,7 @@ func adminAttemptKeys(ip, user string) (string, string) {
 	return ip, ip + "\x00" + user
 }
 
-// allow 按 IP + 用户名两级及全局上限限制 10 分钟内的登录尝试，预先计数以限制并发请求。
+// allow reserves attempts atomically; login IP/global budgets delay, while reauthentication uses hard limits.
 func (a *adminAuth) allow(ip string, users ...string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -305,7 +307,7 @@ func (a *adminAuth) allow(ip string, users ...string) bool {
 		a.globalInflight = 0
 		a.globalUntil = now.Add(adminAttemptWindow)
 	}
-	if a.globalCount >= adminGlobalAttemptLimit {
+	if a.hardLimits && a.globalCount >= adminGlobalAttemptLimit {
 		return false
 	}
 	if len(a.attempts) >= adminMaxAttemptKeys {
@@ -320,7 +322,7 @@ func (a *adminAuth) allow(ip string, users ...string) bool {
 	}
 
 	ipAt, ipOK := a.ipAttempts[ipKey]
-	if ipOK && !now.After(ipAt.until) && ipAt.count >= adminIPAttemptLimit {
+	if a.hardLimits && ipOK && !now.After(ipAt.until) && ipAt.count >= adminIPAttemptLimit {
 		return false
 	}
 	uAt, uOK := a.attempts[userKey]
@@ -525,6 +527,9 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 		return
 	}
 
+	if !hasSession {
+		waitForRequest(c, auth.loginDelay(ip))
+	}
 	if !auth.checkCredentials(user, pass) {
 		if !hasSession {
 			// Attempts are reserved atomically in allow, including concurrent requests.
@@ -1123,4 +1128,40 @@ func (h *Handlers) AdminRecordRefund(c *gin.Context) {
 	}
 	h.log.Warn("管理员登记取消到账的外部退款凭证", "trade_id", no, "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("退款凭证已保存，请确认原付款账户已收到退款"))
+}
+
+func (a *adminAuth) loginDelay(ip string) time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	excess := max(0, a.globalCount-adminGlobalAttemptLimit+1)
+	if at := a.ipAttempts[strings.TrimSpace(ip)]; at != nil {
+		excess = max(excess, at.count-adminIPAttemptLimit+1)
+	}
+	return time.Duration(min(excess, 50)) * 10 * time.Millisecond
+}
+
+func trustedProxyPeer(remote string, proxies []string) bool {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	for _, raw := range proxies {
+		if peer := net.ParseIP(raw); peer != nil && peer.Equal(ip) {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(raw); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handlers) warnUntrustedProxy(c *gin.Context) {
+	if (c.GetHeader("X-Forwarded-For") != "" || c.GetHeader("X-Real-IP") != "") && !trustedProxyPeer(c.Request.RemoteAddr, h.C().Server.TrustedProxies) {
+		h.proxyWarnOnce.Do(func() {
+			slog.Warn("检测到未受信任对端的转发头，已忽略；反向代理部署请配置 server.trusted_proxies，否则客户端共用 IP 登录延迟桶")
+		})
+	}
+	c.Next()
 }

@@ -18,7 +18,7 @@ func findSigningKeyByPlaintext(db *gorm.DB, masterKey []byte, plainToken string)
 		candidate := row.Token
 		if IsEncryptedSecret(candidate) {
 			var err error
-			candidate, err = DecryptSecret(masterKey, candidate)
+			candidate, err = DecryptSecret(masterKey, candidate, "signing_keys.token")
 			if err != nil {
 				return model.SigningKey{}, false, err
 			}
@@ -51,7 +51,7 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 			if !found {
 				storedOld := currentValue
 				if s.HasMasterKey() {
-					storedOld, e = EncryptSecret(s.masterKey, currentValue)
+					storedOld, e = EncryptSecret(s.masterKey, currentValue, "signing_keys.token")
 					if e != nil {
 						return e
 					}
@@ -82,7 +82,7 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 		} else {
 			storedToken := token
 			if s.HasMasterKey() {
-				storedToken, e = EncryptSecret(s.masterKey, token)
+				storedToken, e = EncryptSecret(s.masterKey, token, "signing_keys.token")
 				if e != nil {
 					return e
 				}
@@ -115,7 +115,7 @@ func (s *Store) CallbackKey(ctx context.Context, task model.Callback) (string, e
 		return "", err
 	}
 	if IsEncryptedSecret(key.Token) {
-		return DecryptSecret(s.masterKey, key.Token)
+		return DecryptSecret(s.masterKey, key.Token, "signing_keys.token")
 	}
 	return key.Token, nil
 }

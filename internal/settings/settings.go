@@ -262,7 +262,7 @@ func (m *Manager) Store() *store.Store { return m.st }
 // Load 启动时应用数据库中的覆盖项。
 func (m *Manager) Load(ctx context.Context) error {
 	if !m.st.HasMasterKey() {
-		key, err := store.ResolveMasterKey(m.Get().Server.MasterKeyFile)
+		key, err := store.ResolveMasterKey(m.Get().Server.MasterKeyFile, m.Get().Server.Production)
 		if err != nil {
 			return err
 		}

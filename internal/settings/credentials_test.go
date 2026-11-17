@@ -24,18 +24,18 @@ func TestMasterKeyEncryptDecryptRoundTripAndWrongKeyFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cipherText, err := store.EncryptSecret(keyA, "super-secret-exchange-token")
+	cipherText, err := store.EncryptSecret(keyA, "super-secret-exchange-token", "test-token")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !store.IsEncryptedSecret(cipherText) || strings.Contains(cipherText, "super-secret-exchange-token") {
 		t.Fatalf("expected encrypted secret without plaintext, got: %s", cipherText)
 	}
-	plainText, err := store.DecryptSecret(keyA, cipherText)
+	plainText, err := store.DecryptSecret(keyA, cipherText, "test-token")
 	if err != nil || plainText != "super-secret-exchange-token" {
 		t.Fatalf("roundtrip failed: plain=%q err=%v", plainText, err)
 	}
-	if _, err := store.DecryptSecret(keyB, cipherText); err == nil {
+	if _, err := store.DecryptSecret(keyB, cipherText, "test-token"); err == nil {
 		t.Fatal("expected decryption with wrong master key to fail")
 	}
 }

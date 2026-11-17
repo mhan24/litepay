@@ -104,9 +104,6 @@ func (h *Handlers) BEpusdtCreateOrder(c *gin.Context) {
 // BEpusdtCancelOrder 实现 /api/v1/order/cancel-transaction。
 // 取消后停止认领付款；原金额档位继续保留到冷却期结束。
 func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
-	if !h.checkOrderSigRateLimit(c) {
-		return
-	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 	if err != nil {
 		h.bepusdtFail(c, "request error")
@@ -149,9 +146,6 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 }
 
 func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
-	if !h.checkOrderSigRateLimit(c) {
-		return
-	}
 	if h.paymentOperationsBlocked(c) {
 		h.bepusdtFail(c, "商城取消同步异常或核对未完成，暂停接单")
 		return
@@ -365,25 +359,12 @@ func orderStatusNumber(order *model.Order) int {
 	}
 }
 
-func (h *Handlers) checkOrderSigRateLimit(c *gin.Context) bool {
-	if h.selectionLimit == nil {
-		return true
-	}
-	now := time.Now()
-	if blocked, retry := h.selectionLimit.blocked("order-sig-fail:"+c.ClientIP(), bepusdtSigFailLimit, now); blocked {
-		h.logOrderSigFail(c, "signature_rate_limited", "signature verification rate limit exceeded", now)
-		c.Header("Retry-After", strconv.Itoa(retry))
-		c.JSON(http.StatusTooManyRequests, bepusdtResponse{StatusCode: http.StatusTooManyRequests, Message: "signature verification rate limit exceeded", RequestID: ""})
-		return false
-	}
-	return true
-}
-
 func (h *Handlers) bepusdtSigFail(c *gin.Context, reason, message string) {
 	now := time.Now()
 	h.logOrderSigFail(c, reason, message, now)
 	if h.selectionLimit != nil {
 		if ok, retry := h.selectionLimit.allow("order-sig-fail:"+c.ClientIP(), bepusdtSigFailLimit, now); !ok {
+			waitForRequest(c, 100*time.Millisecond)
 			c.Header("Retry-After", strconv.Itoa(retry))
 			c.JSON(http.StatusTooManyRequests, bepusdtResponse{StatusCode: http.StatusTooManyRequests, Message: message, RequestID: ""})
 			return
@@ -428,4 +409,17 @@ func jsonNumberString(value interface{}) (string, error) {
 		return "", fmt.Errorf("not a number")
 	}
 	return number.String(), nil
+}
+
+// waitForRequest bounds throttling work and releases canceled requests promptly.
+func waitForRequest(c *gin.Context, delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-c.Request.Context().Done():
+	}
 }

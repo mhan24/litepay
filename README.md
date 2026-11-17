@@ -125,6 +125,19 @@ docker build -t litepay:dev .
 - **文件挂载方式**：将配置完成的文件只读挂载至 `/app/config.yaml`，数据持久化目录挂载至 `/app/data`。`config.example.yaml` 仅用于显式的本地开发。
 - **运维演练工具**：仓库提供 `scripts/payment_db.py` 用于一致性备份、完整性检查、数据恢复与离线演练；生产部署与版本回滚请严格参照 [支付运维](docs/operations.md) 执行。
 
+主密钥须为随机 32 字节的 64 位 hex 或 Base64 编码，不接受 32 字符口令。可用 `openssl rand -hex 32 > master.key` 生成，再执行 `chmod 600 master.key`。生产模式拒绝 group/other 有权限的密钥文件，开发模式会警告；容器挂载文件需允许 UID 10001 作为所有者读取。
+
+首次迁移会把明文与旧版密文升级为 `enc:v2:`，以字段名绑定 GCM AAD，并执行 WAL 截断和 VACUUM 清理旧页；启动时仍兼容读取 `enc:v1:`。迁移后请轮换交易所 API Key，并清理旧备份。
+
+轮换主密钥时先停止服务，保存受保护的恢复备份并生成新密钥。将正常配置或 `LITEPAY_MASTER_KEY_FILE` 指向新文件后执行：
+
+```sh
+LITEPAY_MASTER_KEY_FILE=/run/secrets/new.key ./litepay -config config.yaml -rotate-master-key-from /run/secrets/old.key
+```
+
+该命令在单个事务内重新加密敏感设置、系统凭据及历史签名密钥，成功后退出；随后用新密钥正常启动。事务失败时数据库不变；若提示轮换已提交但清理失败，须使用新密钥重启以重试清理。保留旧密钥直到验证成功，并按备份保留策略保护仍依赖旧密钥的备份。
+
+
 ---
 
 ## 平台配置与关闭订单

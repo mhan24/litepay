@@ -6,6 +6,8 @@ server:
   base_url: ""
   notify_hosts: []
   trusted_proxies: []
+  # 32 字节随机密钥的 64 位 hex 或 Base64；文件须归运行用户所有，权限 0400/0600。
+  # 离线轮换：配置新密钥并执行 -rotate-master-key-from /path/to/old.key，成功后退出。
   master_key_file: ""
   readiness_token: ""
   callback_workers: 8

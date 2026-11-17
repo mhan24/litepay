@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -393,5 +394,78 @@ func TestAdminRevocationSurvivesRestart(t *testing.T) {
 				t.Fatal("old cookie accepted with persisted settings")
 			}
 		})
+	}
+}
+
+func TestSharedIPAndGlobalLoginBudgetsDelayInsteadOfReject(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Password = "admin-shared-ip-password"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{cfg: mgr, st: st}
+	auth := h.currentAdmin()
+	for i := 0; i < adminGlobalAttemptLimit+2; i++ {
+		user := fmt.Sprintf("attacker-%d", i)
+		if !auth.allow("192.0.2.1", user) {
+			t.Fatalf("shared budget hard rejected attempt %d", i)
+		}
+		auth.failed("192.0.2.1", user)
+	}
+	if auth.loginDelay("192.0.2.1") <= 0 {
+		t.Fatal("missing overload delay")
+	}
+	r := gin.New()
+	r.POST("/login", h.AdminLoginSubmit)
+	req := httptest.NewRequest("POST", "/login", strings.NewReader(url.Values{"username": {cfg.Admin.Username}, "password": {cfg.Admin.Password}}.Encode()))
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Header().Get("Location") != "/admin" {
+		t.Fatalf("correct login blocked: %s", w.Header().Get("Location"))
+	}
+	for range adminUserAttemptLimit {
+		if !auth.allow("192.0.2.1", "target") {
+			t.Fatal("early username rejection")
+		}
+		auth.failed("192.0.2.1", "target")
+	}
+	if auth.allow("192.0.2.1", "target") {
+		t.Fatal("username budget lost hard limit")
+	}
+}
+
+func TestUntrustedProxyHeadersWarnOnce(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.TrustedProxies = []string{"127.0.0.1", "10.0.0.0/8"}
+	h := &Handlers{cfg: settings.New(cfg, nil)}
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(previous)
+	r := gin.New()
+	r.Use(h.warnUntrustedProxy)
+	r.GET("/", func(c *gin.Context) { c.Status(200) })
+	for _, peer := range []string{"127.0.0.1:12", "10.1.1.1:12", "192.0.2.1:12", "192.0.2.2:12"} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = peer
+		req.Header.Set("X-Real-IP", "203.0.113.1")
+		r.ServeHTTP(httptest.NewRecorder(), req)
+		if strings.HasPrefix(peer, "127.") || strings.HasPrefix(peer, "10.") {
+			if buf.Len() != 0 {
+				t.Fatal("trusted peer warned")
+			}
+		}
+	}
+	if strings.Count(buf.String(), "检测到未受信任对端的转发头") != 1 {
+		t.Fatal(buf.String())
 	}
 }
