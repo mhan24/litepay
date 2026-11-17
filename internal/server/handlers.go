@@ -177,7 +177,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 			return
 		}
 		// Only locally encoded PNG bytes enter this trusted data URL.
-		paymentQR = template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png))
+		paymentQR = template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png)) // #nosec G203 -- The fixed image/png data URL contains only locally encoded PNG bytes in Base64.
 	}
 	data := CashierData{
 		RateUSD: strings.TrimRight(strings.TrimRight(o.RateUSD, "0"), "."), TransferURL: transferURL, PaymentQR: paymentQR,

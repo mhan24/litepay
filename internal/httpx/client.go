@@ -38,7 +38,7 @@ func NewClient(timeout time.Duration, testsOnly bool) *Client {
 
 // Do 执行请求，并完整读取不超过 4 MiB 的响应正文。
 func (c *Client) Do(req *http.Request) (int, []byte, error) {
-	resp, err := c.inner.Do(req)
+	resp, err := c.inner.Do(req) // #nosec G704 -- Production uses publicDialer to reject non-public DNS results and dial validated IPs directly; proxies and redirects are disabled.
 	if err != nil {
 		return 0, nil, err
 	}

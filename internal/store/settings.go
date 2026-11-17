@@ -66,7 +66,7 @@ func ParseMasterKey(raw string) ([]byte, error) {
 
 // LoadMasterKeyFromFile 从只读文件加载主密钥。
 func LoadMasterKeyFromFile(path string, production bool) ([]byte, error) {
-	f, err := os.Open(strings.TrimSpace(path))
+	f, err := os.Open(strings.TrimSpace(path)) // #nosec G703 -- This is an administrator-selected startup/CLI key file, never an HTTP-supplied path; permissions are checked on the opened file.
 	if err != nil {
 		return nil, fmt.Errorf("读取主密钥文件失败: %w", err)
 	}

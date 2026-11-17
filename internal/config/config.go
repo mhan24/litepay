@@ -98,6 +98,16 @@ func (s ServerConfig) ProbeTokenValue() string {
 	return strings.TrimSpace(s.ProbeToken)
 }
 
+// ValidateProbeToken permits disabling probes, but rejects weak configured tokens, including the legacy alias.
+func (s ServerConfig) ValidateProbeToken() error {
+	for _, token := range []struct{ name, value string }{{"readiness_token", s.ReadinessToken}, {"probe_token", s.ProbeToken}} {
+		if value := strings.TrimSpace(token.value); value != "" && len(value) < 16 {
+			return fmt.Errorf("server.%s 至少需要 16 字节随机令牌", token.name)
+		}
+	}
+	return nil
+}
+
 // DatabaseConfig SQLite 配置。
 type DatabaseConfig struct {
 	Path string `yaml:"path"`
@@ -238,7 +248,7 @@ func Default() *Config {
 // Load 从指定路径加载 YAML 启动配置。
 func Load(path string) (*Config, error) {
 	cfg := Default()
-	if data, err := os.ReadFile(path); err == nil {
+	if data, err := os.ReadFile(path); err == nil { // #nosec G304 -- The local operator explicitly selects this configuration path via the startup CLI.
 		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("解析配置文件 %s 失败: %w", path, err)
 		}
@@ -387,6 +397,9 @@ func (c *Config) AdminPath() string {
 
 // ValidateWebRoutes rejects ambiguous paths and unsafe or looping homepage redirects.
 func (c *Config) ValidateWebRoutes() error {
+	if err := c.Server.ValidateProbeToken(); err != nil {
+		return err
+	}
 	root := c.AdminPath()
 	if !regexp.MustCompile(`^/[A-Za-z0-9][A-Za-z0-9_-]{2,95}$`).MatchString(root) {
 		return fmt.Errorf("admin.path 必须为 / 开头、3~96 位字母数字或下划线及连字符的单层路径")

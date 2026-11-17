@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -43,19 +44,20 @@ func Open(path string) (*Store, error) {
 			absolute = filepath.Join(canonical, filepath.Base(absolute))
 		}
 		path = absolute
-		lock, err = os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+		lock, err = os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600) // #nosec G304 -- The database path comes from local startup configuration, not an HTTP request.
 		if err != nil {
 			return nil, err
 		}
 		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			lock.Close()
-			return nil, errors.New("数据库已有运行实例或恢复任务持有锁")
+			return nil, errors.Join(errors.New("数据库已有运行实例或恢复任务持有锁"), lock.Close())
 		}
 	}
 	success := false
 	defer func() {
 		if !success && lock != nil {
-			lock.Close()
+			if err := lock.Close(); err != nil {
+				slog.Warn("关闭数据库锁文件失败", "err", err)
+			}
 		}
 	}()
 
@@ -73,7 +75,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	sqlDB.SetMaxOpenConns(1)
-	fail := func(err error) (*Store, error) { sqlDB.Close(); return nil, err }
+	fail := func(err error) (*Store, error) { return nil, errors.Join(err, sqlDB.Close()) }
 	if err = db.Exec("PRAGMA secure_delete=ON").Error; err != nil {
 		return fail(err)
 	}
@@ -97,6 +99,18 @@ func Open(path string) (*Store, error) {
 		return fail(err)
 	}
 	if err = runSchemaMigrations(db, version, tables, schemaMigrations); err != nil {
+		return fail(err)
+	}
+	// These are also restart repairs: version gates alone leave missing payment
+	// instructions, confirmation work and expiry scheduling unrecoverable.
+	if err = db.Transaction(func(tx *gorm.DB) error {
+		for _, repair := range []func(*gorm.DB) error{migratePaymentAttempts, backfillConfirmationTasks, initializeExpiryAndSelection} {
+			if err := repair(tx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return fail(err)
 	}
 	if path != ":memory:" {

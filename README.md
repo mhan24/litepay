@@ -13,7 +13,7 @@ LitePay 是一个轻量级加密货币支付收银台网关，基于 Go、Gin �
 
 ### 环境要求与本地启动
 
-系统要求 **Go 1.26**。复制示例配置文件并启动服务：
+Go 最低版本以 [go.mod](go.mod) 为准。复制示例配置文件并启动服务：
 
 ```sh
 cp config.example.yaml config.yaml
@@ -96,7 +96,7 @@ go run . -config config.yaml
 ### 健康检查与状态观测
 
 - `/healthz`：验证底层 SQLite 数据库连通性。
-- `/readyz` 与 `/readyz/providers/:provider`：检查数据库与商城取消同步状态，并要求已配置的支付平台最近扫描成功且进度无积压（无待付款订单的空闲期不要求游标绝对新鲜）。未鉴权调用仅返回 `{"ready":bool}`；详细 `providers`、`degraded` 与失败 `reason` 仅对已登录后台管理员或携带 `server.readiness_token` 只读探针令牌的请求返回。
+- `/readyz` 与 `/readyz/providers/:provider`：检查数据库与商城取消同步状态，并要求已配置的支付平台最近扫描成功且进度无积压（无待付款订单的空闲期不要求游标绝对新鲜）。未鉴权调用仅返回 `{"ready":bool}`；详细 `providers`、`degraded` 与失败 `reason` 仅对已登录后台管理员或携带 `server.readiness_token` 只读探针令牌的请求返回。令牌配置后至少 16 字节，仅支持 `X-Readiness-Token`、`X-Probe-Token` 或 `Authorization: Bearer ...` Header；不接受 URL 查询参数。
 - 后台可实时查看未归属事件、扫描错误及未确认回调；对存在歧义或订单最终关闭后的到账，系统完整保留证据并交由人工在商城与交易所间核对。
 
 ---

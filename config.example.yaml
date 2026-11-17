@@ -24,6 +24,7 @@ server:
   master_key_file: ""
   # 离线轮换：以新密钥配置启动，添加 -rotate-master-key-from /path/to/old.key；成功后退出
   # /readyz 与 /readyz/providers/:provider 返回详细平台状态与原因所需的只读探针令牌；留空则仅已登录管理员可见详情
+  # 留空禁用探针令牌；配置时至少 16 字节随机值，仅通过 X-Readiness-Token / X-Probe-Token / Authorization Header 传递。
   readiness_token: ""
   # production 为 true 时必须填写；商户回调仅允许匹配此精确主机名列表且强制使用 HTTPS
   notify_hosts: []

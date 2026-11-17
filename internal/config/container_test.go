@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -33,5 +34,27 @@ func TestContainerRequiresExplicitProductionConfiguration(t *testing.T) {
 	dev, err := Load("../../config.example.yaml")
 	if err != nil || dev.Server.Production {
 		t.Fatal("explicit local development config invalid", err)
+	}
+}
+
+func TestCISecurityToolsUseFixedVersions(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installs := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "go install ") {
+			continue
+		}
+		installs++
+		_, version, ok := strings.Cut(line, "@")
+		if !ok || !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) {
+			t.Fatalf("security tool version floats: %s", line)
+		}
+	}
+	if installs != 2 {
+		t.Fatalf("expected vulnerability and security scanners, got %d", installs)
 	}
 }

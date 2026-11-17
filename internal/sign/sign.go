@@ -3,7 +3,7 @@ package sign
 
 import (
 	"crypto/hmac"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- BEpusdt requires MD5 for wire compatibility; no password or new cryptography uses it.
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -40,7 +40,7 @@ func BEpusdtSignGeneric(params map[string]interface{}, token string) string {
 		b.WriteString(genericValue(params[k]))
 	}
 	b.WriteString(token)
-	sum := md5.Sum([]byte(b.String()))
+	sum := md5.Sum([]byte(b.String())) // #nosec G401 -- Required BEpusdt signing algorithm; changing it breaks merchant verification.
 	return hex.EncodeToString(sum[:])
 }
 

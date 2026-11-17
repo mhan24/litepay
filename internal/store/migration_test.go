@@ -471,3 +471,67 @@ func TestFutureSchemaVersionRejectedAndTransactionalStepRollback(t *testing.T) {
 		t.Fatal("failed migration step was not rolled back")
 	}
 }
+
+func TestCurrentSchemaRestartRepairsMissingConfirmationAndPaymentState(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "repair.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "restart-unconfirmed")
+	event := evidence(o, "missing-confirmation")
+	event.State = model.Unconfirmed
+	if _, err := s.Process(ctx, event, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().Where("provider = ? AND event_id = ?", event.Provider, event.EventID).Delete(&model.ConfirmationTask{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Simulate partially restored instructions and expiry metadata at the current schema version.
+	if err := s.DB().Where("order_id = ?", o.ID).Delete(&model.PaymentAttempt{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().Model(&model.Order{}).Where("id = ?", o.ID).Updates(map[string]any{"selection_changes": 0, "last_selection_at": nil, "next_expiry_check_at": nil}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var deadline time.Time
+	for i := 0; i < 2; i++ {
+		s, err = Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var version int
+		if err := s.DB().Raw("PRAGMA user_version").Scan(&version).Error; err != nil || version != currentSchemaVersion {
+			t.Fatal(version, err)
+		}
+		var task model.ConfirmationTask
+		if err := s.DB().Where("provider = ? AND event_id = ?", event.Provider, event.EventID).First(&task).Error; err != nil {
+			t.Fatal(err)
+		}
+		if task.OrderID == nil || *task.OrderID != o.ID || task.State != "pending" {
+			t.Fatal("task association not repaired", task)
+		}
+		if i == 0 {
+			deadline = task.Deadline
+		} else if !deadline.Equal(task.Deadline) {
+			t.Fatal("restart extended confirmation deadline")
+		}
+		fresh, err := s.GetByTradeNo(ctx, o.TradeNo)
+		if err != nil || fresh.SelectionChanges != 1 || fresh.LastSelectionAt == nil || fresh.NextExpiryCheckAt.Before(o.ExpiresAt.Add(LateVisibilityWindow-time.Second)) {
+			t.Fatal(fresh, err)
+		}
+		for _, table := range []any{&model.ConfirmationTask{}, &model.PaymentAttempt{}} {
+			var count int64
+			if err := s.DB().Model(table).Count(&count).Error; err != nil || count != 1 {
+				t.Fatal("repair duplicated records", count, err)
+			}
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

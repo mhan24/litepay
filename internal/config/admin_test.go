@@ -93,3 +93,21 @@ func TestProductionEmptyTrustedProxiesWarnsOnStartup(t *testing.T) {
 		t.Fatalf("expected trusted_proxies startup warning on stderr, got: %q", buf.String())
 	}
 }
+
+func TestReadinessTokenMinimumLengthAtStartup(t *testing.T) {
+	for _, token := range []string{"", "1234567890123456", "short", "123456789012345"} {
+		for _, alias := range []bool{false, true} {
+			c := Default()
+			c.Server.Production = false
+			if alias {
+				c.Server.ProbeToken = token
+			} else {
+				c.Server.ReadinessToken = token
+			}
+			err := c.normalize()
+			if (err != nil) != (token != "" && len(token) < 16) {
+				t.Fatalf("token=%q alias=%v err=%v", token, alias, err)
+			}
+		}
+	}
+}

@@ -51,7 +51,7 @@ func TestProviderAdmissionRequiresCurrentAccountAndScanAndRecovers(t *testing.T)
 	defer st.Close()
 	cfg := config.Default()
 	cfg.Server.Production = false
-	cfg.Server.ReadinessToken = "test-probe-token"
+	cfg.Server.ReadinessToken = "test-probe-token-long"
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -108,7 +108,7 @@ func TestProviderAdmissionRequiresCurrentAccountAndScanAndRecovers(t *testing.T)
 	if err = p.Scan(ctx, "binance"); err != nil {
 		t.Fatal(err)
 	}
-	if w := getProbeRequest(engine, "/readyz", "test-probe-token"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
+	if w := getProbeRequest(engine, "/readyz", "test-probe-token-long"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
 		t.Fatal("one failed provider removed healthy service", w.Code, w.Body.String())
 	}
 	if w := getRequest(engine, "/readyz/providers/binance"); w.Code != 200 {
@@ -117,7 +117,7 @@ func TestProviderAdmissionRequiresCurrentAccountAndScanAndRecovers(t *testing.T)
 	if w := getRequest(engine, "/readyz/providers/okx"); w.Code != 503 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if w := getProbeRequest(engine, "/readyz/providers/unknown", "test-probe-token"); w.Code != 404 {
+	if w := getProbeRequest(engine, "/readyz/providers/unknown", "test-probe-token-long"); w.Code != 404 {
 		t.Fatal(w.Code)
 	}
 	no := createOrderViaBEpusdt(t, engine, mgr.Get().BEpusdt.APIToken, "https://shop.example")
@@ -206,7 +206,7 @@ func TestTONPriceFailureBlocksNewInstructionsButKeepsHistoricalCollection(t *tes
 	defer st.Close()
 	cfg := config.Default()
 	cfg.Server.Production = false
-	cfg.Server.ReadinessToken = "test-probe-token"
+	cfg.Server.ReadinessToken = "test-probe-token-long"
 	cfg.TON.Address = gram.DefaultAddress
 	cfg.Binance.APIKey = "fixture-key"
 	cfg.Binance.APISecret = "fixture-secret"
@@ -231,7 +231,7 @@ func TestTONPriceFailureBlocksNewInstructionsButKeepsHistoricalCollection(t *tes
 	}
 	assertBlocked := func(no string) {
 		t.Helper()
-		if w := getProbeRequest(engine, "/readyz/providers/ton", "test-probe-token"); w.Code != 503 || !strings.Contains(w.Body.String(), "行情") {
+		if w := getProbeRequest(engine, "/readyz/providers/ton", "test-probe-token-long"); w.Code != 503 || !strings.Contains(w.Body.String(), "行情") {
 			t.Fatal(w.Code, w.Body.String())
 		}
 		if w := getRequest(engine, "/readyz"); w.Code != 503 {
@@ -302,7 +302,7 @@ func TestTONPriceFailureBlocksNewInstructionsButKeepsHistoricalCollection(t *tes
 	if err = p.Scan(ctx, "binance"); err != nil {
 		t.Fatal(err)
 	}
-	if w := getProbeRequest(engine, "/readyz", "test-probe-token"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
+	if w := getProbeRequest(engine, "/readyz", "test-probe-token-long"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if w := create("gram-down-binance-up"); !strings.Contains(w.Body.String(), `"status_code":400`) {
@@ -376,6 +376,13 @@ func TestReadinessAuthThreeCallers(t *testing.T) {
 		w = getProbeRequest(engine, "/readyz/providers/okx", token)
 		if w.Code != http.StatusServiceUnavailable || strings.TrimSpace(w.Body.String()) != `{"ready":false}` {
 			t.Fatalf("unauthenticated /readyz/providers/okx leaked internal state (token=%q): code=%d body=%s", token, w.Code, w.Body.String())
+		}
+	}
+
+	for _, path := range []string{"/readyz?token=readonly-probe-secret", "/readyz/providers/okx?token=readonly-probe-secret"} {
+		w := getProbeRequest(engine, path, "")
+		if strings.Contains(w.Body.String(), `"providers"`) || strings.Contains(w.Body.String(), `"reason"`) || strings.Contains(w.Body.String(), `"configured"`) {
+			t.Fatalf("query token authorized details: %s", w.Body.String())
 		}
 	}
 

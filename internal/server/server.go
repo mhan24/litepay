@@ -35,7 +35,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		"externalURL": externalURL,
 		"tonURL": func(raw string) template.URL {
 			if strings.HasPrefix(raw, "ton://transfer/") {
-				return template.URL(raw)
+				return template.URL(raw) // #nosec G203 -- Only the fixed ton://transfer/ scheme passes; html/template still escapes attribute delimiters.
 			}
 			return ""
 		},

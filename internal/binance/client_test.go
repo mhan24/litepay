@@ -3,6 +3,7 @@ package binance
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -132,5 +133,17 @@ func TestPayUsageCountsActualRequestsAndSharedBudget(t *testing.T) {
 	usage := c.Usage()
 	if usage.Requests != 2 || usage.EstimatedUIDWeight != 6000 || usage.MinuteUIDWeight != 6000 {
 		t.Fatal(usage)
+	}
+}
+
+func TestRequestBudgetCannotOverflowOrBecomeNegative(t *testing.T) {
+	for _, tc := range []struct {
+		input int
+		want  int32
+	}{{-1, 0}, {0, 0}, {3, 3}, {math.MaxInt, math.MaxInt32}} {
+		ctx := WithRequestBudget(context.Background(), tc.input)
+		if got := ctx.Value(budgetKey{}).(*requestBudget).remaining.Load(); got != tc.want {
+			t.Fatalf("budget %d became %d, want %d", tc.input, got, tc.want)
+		}
 	}
 }

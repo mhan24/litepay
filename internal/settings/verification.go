@@ -22,7 +22,7 @@ func verificationTargets(c *config.Config) []AccountVerification {
 	missing := func(fields ...string) []string {
 		var out []string
 		for i := 0; i < len(fields); i += 2 {
-			if strings.TrimSpace(fields[i+1]) == "" {
+			if strings.TrimSpace(fields[i+1]) == "" { // #nosec G602 -- Every call below supplies literal label/value pairs; this local helper has no external callers.
 				out = append(out, fields[i])
 			}
 		}

@@ -56,7 +56,7 @@ func TestRequiredCancellationHeartbeatControlsReadiness(t *testing.T) {
 	cfg := config.Default()
 	cfg.Server.Production = false
 	cfg.Server.CancelSyncRequired = true
-	cfg.Server.ReadinessToken = "test-probe-token"
+	cfg.Server.ReadinessToken = "test-probe-token-long"
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -70,7 +70,7 @@ func TestRequiredCancellationHeartbeatControlsReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.ScanResult(ctx, "binance", time.Now(), nil)
-	if w := getProbeRequest(engine, "/readyz", "test-probe-token"); w.Code != 503 || !strings.Contains(w.Body.String(), "取消同步") {
+	if w := getProbeRequest(engine, "/readyz", "test-probe-token-long"); w.Code != 503 || !strings.Contains(w.Body.String(), "取消同步") {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	recovery, _ := st.Recovery(ctx)
@@ -164,7 +164,7 @@ func TestMissingGatewayPreventsHealthyReadinessEvenWhenSignedHealthy(t *testing.
 	cfg := config.Default()
 	cfg.Server.Production = false
 	cfg.Server.CancelSyncRequired = true
-	cfg.Server.ReadinessToken = "test-probe-token"
+	cfg.Server.ReadinessToken = "test-probe-token-long"
 	mgr := settings.New(cfg, st)
 	if err = mgr.Load(ctx); err != nil {
 		t.Fatal(err)
@@ -183,7 +183,7 @@ func TestMissingGatewayPreventsHealthyReadinessEvenWhenSignedHealthy(t *testing.
 	if current.Acknowledged {
 		t.Fatal("missing exception acknowledged recovery")
 	}
-	if w := getProbeRequest(engine, "/readyz", "test-probe-token"); w.Code != 503 || !strings.Contains(w.Body.String(), "取消同步") {
+	if w := getProbeRequest(engine, "/readyz", "test-probe-token-long"); w.Code != 503 || !strings.Contains(w.Body.String(), "取消同步") {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }

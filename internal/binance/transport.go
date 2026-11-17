@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -55,6 +56,12 @@ type budgetKey struct{}
 
 func WithRequestBudget(ctx context.Context, n int) context.Context {
 	b := &requestBudget{}
+	if n < 0 {
+		n = 0
+	}
+	if n > math.MaxInt32 {
+		n = math.MaxInt32
+	}
 	b.remaining.Store(int32(n))
 	return context.WithValue(ctx, budgetKey{}, b)
 }

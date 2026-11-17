@@ -32,9 +32,6 @@ func (h *Handlers) canReadReadinessDetails(c *gin.Context) bool {
 		}
 	}
 	if got == "" {
-		got = strings.TrimSpace(c.Query("token"))
-	}
-	if got == "" {
 		return false
 	}
 	gotHash := sha256.Sum256([]byte(got))
