@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -66,7 +67,18 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	dsn := path
+	if path != ":memory:" {
+		// URI escaping keeps filename characters such as ?, # and % out of DSN options.
+		uri := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+		options := url.Values{}
+		for _, pragma := range []string{"foreign_keys(1)", "busy_timeout(5000)", "secure_delete(1)", "journal_mode(WAL)"} {
+			options.Add("_pragma", pragma)
+		}
+		uri.RawQuery = options.Encode()
+		dsn = uri.String()
+	}
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		return nil, err
 	}
@@ -76,19 +88,23 @@ func Open(path string) (*Store, error) {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	fail := func(err error) (*Store, error) { return nil, errors.Join(err, sqlDB.Close()) }
-	if err = db.Exec("PRAGMA secure_delete=ON").Error; err != nil {
-		return fail(err)
-	}
-	if err = db.Exec("PRAGMA foreign_keys=ON").Error; err != nil {
-		return fail(err)
-	}
-	// WAL 允许外部只读工具（备份/只读看板）在写入时不阻塞；busy_timeout 让意外并发的
-	// 第二连接等待而不是立刻报 database is locked。单连接 + 文件锁的单进程保证不受影响。
-	if err = db.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
-		return fail(err)
-	}
-	if err = db.Exec("PRAGMA busy_timeout=5000").Error; err != nil {
-		return fail(err)
+	// An in-memory database retains its existing single-connection lifetime.
+	// File databases use DSN pragmas so replacement connections get the same safeguards.
+	if path == ":memory:" {
+		if err = db.Exec("PRAGMA secure_delete=ON").Error; err != nil {
+			return fail(err)
+		}
+		if err = db.Exec("PRAGMA foreign_keys=ON").Error; err != nil {
+			return fail(err)
+		}
+		// WAL 允许外部只读工具（备份/只读看板）在写入时不阻塞；busy_timeout 让意外并发的
+		// 第二连接等待而不是立刻报 database is locked。单连接 + 文件锁的单进程保证不受影响。
+		if err = db.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
+			return fail(err)
+		}
+		if err = db.Exec("PRAGMA busy_timeout=5000").Error; err != nil {
+			return fail(err)
+		}
 	}
 	var version int
 	if err = db.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
