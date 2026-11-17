@@ -33,16 +33,22 @@ func (t *Text) UnmarshalJSON(b []byte) error {
 	return nil
 }
 func (t Text) Millis() (int64, error) {
-	n, e := strconv.ParseInt(string(t), 10, 64)
+	n, e := strconv.ParseInt(strings.TrimSpace(string(t)), 10, 64)
 	if e != nil || n <= 0 {
 		return 0, errors.New("invalid exchange timestamp")
 	}
 	return n, nil
 }
 func (t Text) SignedUnits() (int64, error) {
-	s := string(t)
+	s := strings.TrimSpace(string(t))
 	negative := strings.HasPrefix(s, "-")
-	n, e := amount.Parse(strings.TrimPrefix(s, "-"))
+	if negative {
+		s = strings.TrimPrefix(s, "-")
+		if s == "" || s[0] < '0' || s[0] > '9' {
+			return 0, errors.New("金额格式无效")
+		}
+	}
+	n, e := amount.Parse(s)
 	if negative {
 		n = -n
 	}

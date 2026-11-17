@@ -608,6 +608,100 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(sync.queue_status(self.state,self.gateway)['pending'],1)
         self.assertFalse(sync.queue_status(self.state,self.gateway)['replay_complete'])
 
+    def test_parse_timestamp_handles_subsecond_precision_and_z_suffix(self):
+        self.add(1)
+        self.add(2)
+        self.db.execute("UPDATE orders SET canceled_at='2020-01-01 00:00:00.123456789+00:00' WHERE id IN (1,2)")
+        self.db.commit()
+        with patch.object(sync, 'RECENT_ORDER_BATCH', 1):
+            sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed', now=10)
+        status = sync.queue_status(self.state, self.gateway)
+        self.assertEqual(status['discovery_pending'], 1)
+        self.assertGreater(status['discovery_lag_seconds'], 0)
+        self.assertAlmostEqual(sync.parse_timestamp('2026-11-17T15:17:17.1Z'), 1794928637.1, places=3)
+
+    def test_awaiting_funds_and_source_review_reprobe_with_reset_attempts_on_new_generation(self):
+        self.add(1); self.mark_anomaly(1)
+        self.add(2); self.mark_anomaly(2)
+        self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)', (self.gateway, 'a'*32))
+        self.state.commit()
+        sync.sync_once(self.path, self.state, self.gateway, now=10, anomaly_sender=lambda *a: 'awaiting_funds')
+        sync.sync_once(self.path, self.state, self.gateway, now=15, anomaly_sender=lambda *a: 'awaiting_funds')
+        # Force payment 2 into source_review in generation a, and ensure payment 1 has high next_at backoff.
+        self.db.execute("UPDATE orders SET status='completed' WHERE id=2")
+        self.db.commit()
+        sync.sync_once(self.path, self.state, self.gateway, now=25, anomaly_sender=lambda *a: 'awaiting_funds')
+        self.assertEqual(self.state.execute('SELECT outcome FROM payment_anomalies WHERE payment_id=2').fetchone()[0], 'source_review')
+        # Restore source 2 back to anomaly before generation b, and rotate generation while old next_at is still in the future.
+        self.db.execute("UPDATE orders SET status='canceled' WHERE id=2")
+        self.db.commit()
+        with patch.object(sync, 'signed_post', return_value={'data': {'generation': 'b'*32}}):
+            sync.check_generation(self.path, self.state, self.gateway)
+        calls = []
+        sync.sync_once(self.path, self.state, self.gateway, now=26, anomaly_sender=lambda *a: calls.append(a[1]) or 'paid_conflict')
+        self.assertEqual(set(calls), {'trade1', 'trade2'})
+        self.assertEqual(self.state.execute('SELECT attempts,checked_generation FROM payment_anomalies WHERE payment_id=1').fetchone(), (1, 'b'*32))
+        self.assertEqual(self.state.execute('SELECT outcome,attempts,checked_generation FROM payment_anomalies WHERE payment_id=2').fetchone(), ('paid_conflict', 1, 'b'*32))
+
+    def test_missing_gateway_requeued_on_new_generation_resets_attempts(self):
+        self.add(1)
+        self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)', (self.gateway, 'a'*32))
+        self.state.commit()
+        for now in (10, 15, 25):
+            sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'missing_gateway', now=now)
+        self.assertEqual(self.state.execute('SELECT outcome,attempts FROM cancellations').fetchone(), ('missing_gateway', 3))
+        with patch.object(sync, 'signed_post', return_value={'data': {'generation': 'b'*32}}):
+            sync.check_generation(self.path, self.state, self.gateway)
+        self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'missing_gateway', now=30), 1)
+        self.assertEqual(self.state.execute('SELECT outcome,attempts FROM cancellations').fetchone(), ('retry', 1))
+
+    def test_malformed_channel_config_does_not_break_eligible_or_gateway_token(self):
+        self.db.execute('INSERT INTO payment_channels VALUES (2,?,?)', ('bepusdt', 'not-valid-json'))
+        self.db.execute('INSERT INTO payment_channels VALUES (3,?,?)', ('bepusdt', json.dumps({'gateway_url': self.gateway, 'auth_token': ''})))
+        self.db.commit()
+        self.add(1)
+        self.assertEqual(sync.gateway_token(self.path, self.gateway), 'private')
+        self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed', now=10), 1)
+
+    def test_signed_post_adds_unique_nonce_and_closes_http_error(self):
+        import io, urllib.error
+        nonces = []
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, limit): return b'{"status_code":200}'
+        class Opener:
+            def open(self, request, timeout):
+                body = json.loads(request.data)
+                sig = body.pop('signature')
+                nonces.append(body.get('nonce'))
+                expected = hashlib.md5(('&'.join(k+'='+body[k] for k in sorted(body))+'private').encode()).hexdigest()
+                if sig != expected:
+                    raise AssertionError('bad signature')
+                return Response()
+        with patch.object(sync.urllib.request, 'build_opener', return_value=Opener()), patch.object(sync.time, 'time', return_value=1700000000):
+            sync.signed_post(self.gateway, '/api/v1/order/cancel-sync-generation', {'timestamp': '1700000000'}, 'private')
+            sync.signed_post(self.gateway, '/api/v1/order/cancel-sync-generation', {'timestamp': '1700000000'}, 'private')
+        self.assertEqual(len(nonces), 2)
+        self.assertTrue(all(nonces))
+        self.assertNotEqual(nonces[0], nonces[1])
+
+        fp = io.BytesIO(b'err')
+        err = urllib.error.HTTPError(self.gateway, 500, 'err', {}, fp)
+        bad_opener = Mock()
+        bad_opener.open.side_effect = err
+        with patch.object(sync.urllib.request, 'build_opener', return_value=bad_opener):
+            with self.assertRaises(urllib.error.HTTPError):
+                sync.signed_post(self.gateway, '/api/v1/order/cancel-sync-generation', {'timestamp': '1700000000'}, 'private')
+        self.assertTrue(fp.closed)
+
+    def test_cli_rejects_empty_database_argument_cleanly(self):
+        args = ['sync', '--database', '', '--state', str(Path(self.tmp.name)/'cli-empty.db'), '--gateway', self.gateway]
+        with patch.object(sys, 'argv', args):
+            with self.assertRaises(SystemExit) as status:
+                sync.main()
+        self.assertEqual(status.exception.code, 2)
+
 
 if __name__ == '__main__':
     unittest.main()

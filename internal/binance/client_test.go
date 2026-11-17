@@ -6,10 +6,12 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"litepay/internal/model"
+	"litepay/internal/sign"
 )
 
 // 样本按官方 Get Pay Trade History 文档字段构造，并按真实响应校准：orderId 为纯数字
@@ -27,8 +29,10 @@ const payHistorySample = `{"code":"000000","message":"success","success":true,"d
 
 func TestPayHistoryFieldParsing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-MBX-APIKEY") != "key" || r.URL.Query().Get("signature") == "" {
-			t.Error("unsigned request")
+		rawQuery := r.URL.RawQuery
+		payload, sig, ok := strings.Cut(rawQuery, "&signature=")
+		if r.Header.Get("X-MBX-APIKEY") != "key" || !ok || sig == "" || strings.Contains(sig, "&") || sig != sign.HmacSHA256Hex(payload, "secret") {
+			t.Errorf("invalid or non-trailing Binance signature in query: %q", rawQuery)
 		}
 		if r.URL.Query().Get("startTime") != "90000" || r.URL.Query().Get("endTime") != "110000" {
 			t.Error("wrong window", r.URL.Query())
@@ -145,5 +149,12 @@ func TestRequestBudgetCannotOverflowOrBecomeNegative(t *testing.T) {
 		if got := ctx.Value(budgetKey{}).(*requestBudget).remaining.Load(); got != tc.want {
 			t.Fatalf("budget %d became %d, want %d", tc.input, got, tc.want)
 		}
+	}
+	unconfigured := New("", "", "http://127.0.0.1:1", 0, 0)
+	if unconfigured.recvWindow != 5000 {
+		t.Fatalf("expected default recvWindow 5000, got %d", unconfigured.recvWindow)
+	}
+	if _, err := unconfigured.History(context.Background(), time.UnixMilli(90000), time.UnixMilli(110000)); err == nil {
+		t.Fatal("expected History to reject missing API key/secret")
 	}
 }

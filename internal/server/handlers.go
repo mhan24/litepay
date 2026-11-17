@@ -122,6 +122,11 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		h.renderError(c, 503, "收款平台暂不可用", "当前平台账户、收款扫描或行情暂不可用。请稍后刷新重试，或返回商户页面选择其他付款方式，请勿继续转账。")
 		return
 	}
+	currencyOptions := currencyOptionsFor(cfg, o, provider)
+	if needsCurrency && len(currencyOptions) == 0 {
+		h.renderError(c, 503, "收款平台暂不可用", "当前平台暂不支持此订单允许的付款币种。请返回选择其他收款平台，或联系商户处理。")
+		return
+	}
 	if needsProvider {
 		uid = ""
 		note = ""
@@ -162,7 +167,6 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		(o.Status == model.Pending || o.Status == model.Ready) && provider != "" &&
 		!reselectRequested && cfg.ProviderEnabled(provider)
 
-	currencyOptions := currencyOptionsFor(cfg, o, provider)
 	options := providerOptions(cfg, o)
 	for i := range options {
 		options[i].Enabled = options[i].Enabled && h.providerAccepting(c, cfg, options[i].Key)
@@ -339,12 +343,16 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 	}
 	h.cfg.WithPaymentConfig(func() {
 		cfg := h.C()
-		no := c.PostForm("trade_no")
-		provider := strings.ToLower(c.PostForm("provider"))
-		currency := strings.ToUpper(c.PostForm("currency"))
+		no := strings.TrimSpace(c.PostForm("trade_no"))
+		provider := strings.ToLower(strings.TrimSpace(c.PostForm("provider")))
+		currency := strings.ToUpper(strings.TrimSpace(c.PostForm("currency")))
 		o, err := h.st.GetByTradeNo(c.Request.Context(), no)
 		if err != nil || !cfg.ProviderEnabled(provider) || !cfg.ProviderCurrency(provider, currency) || !currencyAllowedByLimit(o.CurrencyLimit, currency) {
 			c.JSON(400, gin.H{"code": 1, "msg": "当前付款方式不可用，请刷新页面后重新选择"})
+			return
+		}
+		if o.Provider != "" && (!cfg.BEpusdt.Reselect || !o.Reselect) && !(o.Provider == provider && o.Currency == currency) {
+			c.JSON(400, gin.H{"code": 1, "msg": "订单不允许更换付款方式"})
 			return
 		}
 		if state := h.providerState(c, cfg, provider); !state.Ready {
@@ -362,6 +370,10 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 			return
 		}
 		if provider == config.ProviderTON {
+			if h.poller == nil {
+				c.JSON(503, gin.H{"code": 1, "msg": "GRAM 行情检测器尚未启动，请稍后重试"})
+				return
+			}
 			receiver = cfg.TON.Address
 			_, err = h.st.SelectGRAM(c.Request.Context(), no, receiver, h.poller.GRAM.Snapshot(), cfg.Order.SlotGraceSeconds)
 		} else {
@@ -402,7 +414,11 @@ func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 		}
 	}
 
-	renderHTML(c, 200, "result.html", CashierData{ReviewAmounts: reviewAmounts, CancellationReview: review.Present(), RefundRecorded: review.Current(), RefundRecheck: review.Status() == "recheck_required", Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
+	payAmount := o.PayAmount()
+	if o.PayUnits <= 0 {
+		payAmount = ""
+	}
+	renderHTML(c, 200, "result.html", CashierData{ReviewAmounts: reviewAmounts, CancellationReview: review.Present(), RefundRecorded: review.Current(), RefundRecheck: review.Status() == "recheck_required", Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: payAmount, Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
 }
 func (h *Handlers) renderError(c *gin.Context, status int, title, detail string) {
 	renderHTML(c, status, "error.html", gin.H{"Title": title, "Detail": detail})
@@ -428,7 +444,11 @@ func (h *Handlers) OrderStatus(c *gin.Context) {
 	if !accepting && (o.Status == model.Pending || o.Status == model.Ready) {
 		phase = "settling"
 	}
-	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "cancellation_review_status": review.Status(), "refund_review_generation_current": review.Current(), "amount": o.PayAmount(), "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": accepting, "merchant_review_required": cb.State == "merchant_review"}})
+	payAmount := o.PayAmount()
+	if o.PayUnits <= 0 {
+		payAmount = ""
+	}
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "cancellation_review_status": review.Status(), "refund_review_generation_current": review.Current(), "amount": payAmount, "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": accepting, "merchant_review_required": cb.State == "merchant_review"}})
 }
 func (h *Handlers) Health(c *gin.Context) {
 	if err := h.st.Ping(c.Request.Context()); err != nil {
@@ -456,6 +476,10 @@ func (h *Handlers) Ready(c *gin.Context) {
 		}
 		c.JSON(503, body)
 	}
+	if err := h.st.Ping(ctx); err != nil {
+		respondUnready("数据库暂不可用", nil)
+		return
+	}
 	if cfg.Server.CancelSyncRequired {
 		if h.paymentOperationsBlocked(c) {
 			respondUnready("商城取消同步异常或心跳过期", nil)
@@ -477,10 +501,6 @@ func (h *Handlers) Ready(c *gin.Context) {
 	}
 	if available == 0 {
 		respondUnready("无可用收款平台", states)
-		return
-	}
-	if err := h.st.Ping(ctx); err != nil {
-		respondUnready("数据库暂不可用", nil)
 		return
 	}
 	if !detailed {
@@ -505,6 +525,10 @@ func generateTradeNo() (string, error) {
 }
 
 func (h *Handlers) GRAMStatus(c *gin.Context) {
+	if h.poller == nil {
+		c.JSON(503, gin.H{"code": 1, "msg": "GRAM 状态检测器尚未启动"})
+		return
+	}
 	s := h.poller.GRAM.Snapshot()
 	if s.Address != h.C().TON.Address {
 		s.Balance = ""

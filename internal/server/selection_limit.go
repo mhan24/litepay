@@ -36,6 +36,13 @@ func (l *selectionLimiter) allow(key string, limit int, now time.Time) (bool, in
 	v, exists := l.entries[key]
 	if !exists || !now.Before(v.until) {
 		if !exists && len(l.entries) >= 20000 {
+			for k, item := range l.entries {
+				if !now.Before(item.until) {
+					delete(l.entries, k)
+				}
+			}
+		}
+		if !exists && len(l.entries) >= 20000 {
 			return false, 60
 		}
 		v = selectionWindow{until: now.Add(time.Minute)}

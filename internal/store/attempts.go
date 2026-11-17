@@ -61,7 +61,11 @@ func migratePaymentAttempts(db *gorm.DB) error {
 				return err
 			}
 			if n == 0 {
-				a := model.PaymentAttempt{OrderID: o.ID, Provider: t.Provider, Receiver: t.Receiver, Currency: t.Currency, Units: t.Units, Precision: 6, SelectedAt: t.OccurredAt, ExpiresAt: o.ExpiresAt, SettleUntil: q.Deadline, RecoveredFromEvent: q.EventID}
+				settleUntil := q.Deadline
+				if settleUntil.Before(o.ExpiresAt) {
+					settleUntil = o.ExpiresAt.Add(LateVisibilityWindow)
+				}
+				a := model.PaymentAttempt{OrderID: o.ID, Provider: t.Provider, Receiver: t.Receiver, Currency: t.Currency, Units: t.Units, Precision: 6, SelectedAt: t.OccurredAt, ExpiresAt: o.ExpiresAt, SettleUntil: settleUntil, RecoveredFromEvent: q.EventID}
 				if err := tx.Create(&a).Error; err != nil {
 					return err
 				}

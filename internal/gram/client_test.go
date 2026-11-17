@@ -103,6 +103,9 @@ func TestRejectUnsafePaymentsAndMalformedIdentity(t *testing.T) {
 		"contract_call": func(tx *tlb.Transaction) {
 			tx.IO.In.AsInternal().Body = cell.BeginCell().MustStoreUInt(0x7362d09c, 32).EndCell()
 		},
+		"empty_body_with_ref": func(tx *tlb.Transaction) {
+			tx.IO.In.AsInternal().Body = cell.BeginCell().MustStoreRef(cell.BeginCell().MustStoreUInt(1, 8).EndCell()).EndCell()
+		},
 	}
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -170,6 +173,30 @@ func TestHistoryPaginationAndFailure(t *testing.T) {
 		if err == nil {
 			t.Fatal("incomplete history accepted", body)
 		}
+	}
+	if _, err := c.History(context.Background(), time.Unix(2001, 0), time.Unix(1999, 0)); err == nil {
+		t.Fatal("inverted time range accepted")
+	}
+	invalidAddr := New(srv.URL, "", "invalid-address")
+	if _, _, err := invalidAddr.decode(rows[0]); err == nil {
+		t.Fatal("decode succeeded with nil address")
+	}
+
+	exactCalls := 0
+	exactSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exactCalls++
+		page := rows[:100]
+		if exactCalls > 1 {
+			page = rows[99:100]
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": page})
+	}))
+	defer exactSrv.Close()
+	exactClient := New(exactSrv.URL, "", DefaultAddress)
+	exactClient.UseTestTransport()
+	gotExact, err := exactClient.History(context.Background(), time.Unix(1999, 0), time.Unix(2001, 0))
+	if err != nil || len(gotExact) != 100 || exactCalls != 2 {
+		t.Fatalf("exact page boundary failed: len=%d calls=%d err=%v", len(gotExact), exactCalls, err)
 	}
 }
 

@@ -227,3 +227,44 @@ func TestProductionTokenRotationRequiresMerchantCompatibility(t *testing.T) {
 		t.Fatal("rejected rotation changed stored token", err)
 	}
 }
+
+func TestEnablingProviderViaCurrencyVerifiesAccountAndValidatesTONLookback(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	cfg.Checkout.BinanceCurrencies = []string{}
+	m := verificationManager(t, cfg)
+	if m.Get().BinanceEnabled() {
+		t.Fatal("expected binance disabled without currencies")
+	}
+	var calls []string
+	m.verifyAccount = func(_ context.Context, _ *config.Config, provider string) error {
+		calls = append(calls, provider)
+		return errors.New("account check failed")
+	}
+	usdt := []string{"USDT"}
+	if err := m.Update(ctx, Patch{BinanceCurrencies: &usdt}, "test"); err == nil || len(calls) != 1 || calls[0] != "binance" {
+		t.Fatalf("expected account verification when enabling provider via currencies, calls=%v err=%v", calls, err)
+	}
+
+	invalid := clone(m.Get())
+	invalid.TON.LookbackBuffer = 0
+	if err := Validate(invalid); err == nil {
+		t.Fatal("expected invalid TON lookback buffer to be rejected")
+	}
+	invalidHash := "plaintext-admin-password"
+	p := Patch{AdminPasswordHash: &invalidHash}
+	target := clone(m.Get())
+	p.Apply(target)
+	if target.Admin.Password == invalidHash {
+		t.Fatal("expected Patch.Apply to ignore non-bcrypt AdminPasswordHash")
+	}
+
+	nilStoreMgr := New(config.Default(), nil)
+	if err := nilStoreMgr.Load(ctx); err != nil {
+		t.Fatalf("expected Load with nil store to be a no-op without panic, got: %v", err)
+	}
+}

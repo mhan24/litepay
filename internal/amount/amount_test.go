@@ -1,6 +1,9 @@
 package amount
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestExactAmounts(t *testing.T) {
 	for raw, want := range map[string]int64{"0": 0, "10.01": 10010000, "10.009999": 10009999, "0.000001": 1, "1.00000000": Scale} {
@@ -16,6 +19,12 @@ func TestExactAmounts(t *testing.T) {
 	}
 	if String(10*Scale) != "10" || Text(10010000, 2) != "10.01" {
 		t.Fatal("format")
+	}
+	if got := Text(math.MinInt64, 6); got != "-9223372036854.775808" {
+		t.Fatalf("MinInt64 Text = %s", got)
+	}
+	if Quantum(-1) != 1 || Quantum(7) != 1 || Quantum(2) != 10_000 {
+		t.Fatalf("Quantum bounds: %d %d %d", Quantum(-1), Quantum(7), Quantum(2))
 	}
 }
 

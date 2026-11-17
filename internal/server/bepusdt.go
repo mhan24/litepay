@@ -3,9 +3,9 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -106,6 +106,11 @@ func (h *Handlers) BEpusdtCreateOrder(c *gin.Context) {
 func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			h.bepusdtFail(c, "request body too large")
+			return
+		}
 		h.bepusdtFail(c, "request error")
 		return
 	}
@@ -138,7 +143,7 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 		h.bepusdtFail(c, err.Error())
 		return
 	}
-	h.log.Info("BEpusdt 订单已取消", "trade_id", o.TradeNo)
+	h.logger().Info("BEpusdt 订单已取消", "trade_id", o.TradeNo)
 	c.JSON(http.StatusOK, bepusdtResponse{
 		StatusCode: 200, Message: "success",
 		Data: gin.H{"trade_id": o.TradeNo, "order_id": o.OutTradeNo},
@@ -157,6 +162,11 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			h.bepusdtFail(c, "request body too large")
+			return
+		}
 		h.bepusdtFail(c, "request error")
 		return
 	}
@@ -196,6 +206,8 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 	req.OrderID = strings.TrimSpace(req.OrderID)
 	req.NotifyURL = strings.TrimSpace(req.NotifyURL)
 	req.RedirectURL = strings.TrimSpace(req.RedirectURL)
+	req.Name = strings.TrimSpace(req.Name)
+	req.Currencies = strings.TrimSpace(req.Currencies)
 	if req.OrderID == "" || req.NotifyURL == "" || req.RedirectURL == "" {
 		h.bepusdtFail(c, "order_id, notify_url, redirect_url and amount are required")
 		return
@@ -249,12 +261,12 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		h.bepusdtFail(c, "order create failed: "+err.Error())
 		return
 	}
-	order, err := h.st.Create(c.Request.Context(), model.Order{SigningKeyID: cfg.BEpusdt.TokenVersion, TradeNo: tradeNo, OutTradeNo: req.OrderID, Name: strings.TrimSpace(req.Name), OriginUnits: units, NotifyURL: req.NotifyURL, ReturnURL: req.RedirectURL, ExpiresAt: time.Now().Add(ttl), CurrencyLimit: req.Currencies, Reselect: reselect})
+	order, err := h.st.Create(c.Request.Context(), model.Order{SigningKeyID: cfg.BEpusdt.TokenVersion, TradeNo: tradeNo, OutTradeNo: req.OrderID, Name: req.Name, OriginUnits: units, NotifyURL: req.NotifyURL, ReturnURL: req.RedirectURL, ExpiresAt: time.Now().Add(ttl), CurrencyLimit: req.Currencies, Reselect: reselect})
 	if err != nil {
 		h.bepusdtFail(c, "order create failed: "+err.Error())
 		return
 	}
-	h.log.Info("BEpusdt 收银台订单已处理", "trade_id", order.TradeNo, "order_id", req.OrderID)
+	h.logger().Info("BEpusdt 收银台订单已处理", "trade_id", order.TradeNo, "order_id", req.OrderID)
 	h.bepusdtCreated(c, cfg, order, reselect)
 }
 
@@ -281,13 +293,17 @@ func bepusdtReselect(cfg *config.Config, requested *bool) bool {
 }
 
 func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *model.Order, reselect bool) {
+	var quotes []gram.Snapshot
+	if h.poller != nil {
+		quotes = append(quotes, h.poller.GRAM.Snapshot())
+	}
 	data := gin.H{
 		"fiat": "USD", "trade_id": order.TradeNo, "order_id": order.OutTradeNo,
 		"name": order.Name, "status": orderStatusNumber(order), "amount": order.Original(),
 		"expiration_time": max(0, int(time.Until(order.ExpiresAt).Seconds())),
 		"payment_url":     cfg.Server.BaseURL + "/pay/" + order.TradeNo,
 		"reselect":        reselect && order.Reselect && order.Status != model.Paid,
-		"network":         bepusdtPaymentMethods(cfg, order, h.poller.GRAM.Snapshot()),
+		"network":         bepusdtPaymentMethods(cfg, order, quotes...),
 	}
 	c.JSON(http.StatusOK, bepusdtResponse{StatusCode: 200, Message: "success", Data: data, RequestID: ""})
 }
@@ -379,11 +395,11 @@ func (h *Handlers) logOrderSigFail(c *gin.Context, reason, message string, now t
 			return
 		}
 	}
-	slog.Warn("BEpusdt API 签名校验被拒", "ip", c.ClientIP(), "path", c.Request.URL.Path, "reason", reason, "message", message)
+	h.logger().Warn("BEpusdt API 签名校验被拒", "ip", c.ClientIP(), "path", c.Request.URL.Path, "reason", reason, "message", message)
 }
 
 func (h *Handlers) bepusdtFail(c *gin.Context, message string) {
-	h.log.Warn("BEpusdt API 返回业务错误", "ip", c.ClientIP(), "message", message)
+	h.logger().Warn("BEpusdt API 返回业务错误", "ip", c.ClientIP(), "message", message)
 	c.JSON(http.StatusOK, bepusdtResponse{StatusCode: 400, Message: message, RequestID: ""})
 }
 

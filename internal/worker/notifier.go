@@ -40,6 +40,9 @@ func retryDelaySeconds(delays []int, attempts int) int {
 		return 5
 	}
 	idx := min(max(attempts-1, 0), len(delays)-1)
+	if delays[idx] <= 0 {
+		return 5
+	}
 	return delays[idx]
 }
 
@@ -56,7 +59,15 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 			return false, "", err
 		}
 	}
-	task, o, err := n.st.ReserveCallback(ctx, cfg.Notify.MaxAttempts, cfg.Notify.TimeoutSeconds)
+	maxAttempts := cfg.Notify.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	timeoutSeconds := cfg.Notify.TimeoutSeconds
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 10
+	}
+	task, o, err := n.st.ReserveCallback(ctx, maxAttempts, timeoutSeconds)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, "", nil
 	}
@@ -78,7 +89,7 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 	if err != nil {
 		return false, tradeID, n.releaseCallback(ctx, *task, err)
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Notify.TimeoutSeconds)*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, o.NotifyURL, bytes.NewReader(body))
 	status := 0
@@ -94,14 +105,20 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 		// The bridge can fail while this task's payload and signing key are loaded.
 		if n.cfg.Get().Server.CancelSyncRequired {
 			ready, guardErr := n.st.PaymentOperationsReady(ctx)
-			if guardErr != nil || !ready {
+			if guardErr != nil {
+				return false, tradeID, n.releaseCallback(ctx, *task, guardErr)
+			}
+			if !ready {
 				save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 				defer done()
 				return false, tradeID, n.st.ReleaseCallback(save, *task)
 			}
 		}
 		allowed, guardErr := n.st.CallbackCanSend(ctx, *task)
-		if guardErr != nil || !allowed {
+		if guardErr != nil {
+			return false, tradeID, n.releaseCallback(ctx, *task, guardErr)
+		}
+		if !allowed {
 			save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			defer done()
 			return false, tradeID, n.st.ReleaseCallback(save, *task)

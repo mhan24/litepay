@@ -24,7 +24,7 @@ func (s *Store) QueueStats(ctx context.Context) (QueueStats, error) {
 	var out QueueStats
 	db := s.db.WithContext(ctx)
 
-	err := db.Raw(`SELECT COUNT(*) callback_waiting,CAST(COALESCE(MAX((julianday('now')-julianday(o.paid_at))*86400),0) AS INTEGER) oldest_callback_seconds FROM callbacks c JOIN orders o ON o.id=c.order_id WHERE o.status='PAID' AND c.delivered_at IS NULL AND c.state NOT IN ('merchant_review','exhausted','canceled_refunded')`).Scan(&out).Error
+	err := db.Raw(`SELECT COUNT(*) callback_waiting,MAX(0,CAST(COALESCE(MAX((julianday('now')-julianday(o.paid_at))*86400),0) AS INTEGER)) oldest_callback_seconds FROM callbacks c JOIN orders o ON o.id=c.order_id WHERE o.status='PAID' AND c.delivered_at IS NULL AND c.state NOT IN ('merchant_review','exhausted','canceled_refunded')`).Scan(&out).Error
 	if err != nil {
 		return out, err
 	}
@@ -42,23 +42,34 @@ func (s *Store) QueueStats(ctx context.Context) (QueueStats, error) {
 		Remaining float64
 		Oldest    float64
 	}
-	err = db.Raw(`SELECT count(*) pending,COALESCE(SUM(MAX(0,(julianday("to")-julianday(cursor))*86400)),0) remaining,COALESCE(MAX((julianday('now')-julianday("from"))*86400),0) oldest FROM historical_scans WHERE state='pending'`).Scan(&h).Error
-	out.HistoricalPending = h.Pending
-	out.HistoricalRemainingSeconds = int64(h.Remaining)
-	out.OldestHistoricalSeconds = int64(h.Oldest)
+	err = db.Raw(`SELECT count(*) pending,COALESCE(SUM(MAX(0,(julianday("to")-julianday(cursor))*86400)),0) remaining,MAX(0,COALESCE(MAX((julianday('now')-julianday("from"))*86400),0)) oldest FROM historical_scans WHERE state='pending'`).Scan(&h).Error
 	if err != nil {
 		return out, err
 	}
+	out.HistoricalPending = h.Pending
+	out.HistoricalRemainingSeconds = int64(h.Remaining)
+	out.OldestHistoricalSeconds = int64(h.Oldest)
 	var final struct {
 		Waiting int64
 		Oldest  int64
 	}
-	err = db.Raw(`SELECT count(*) waiting,CAST(COALESCE(MAX((julianday('now')-julianday(a.selected_at))*86400),0) AS INTEGER) oldest FROM payment_attempts a JOIN orders o ON o.id=a.order_id WHERE o.status='READY' AND a.settle_until<=? AND NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=a.expires_at AND (CASE WHEN h.coverage_after>'0002-01-01' THEN h.coverage_after ELSE h.created_at END)>=a.settle_until)`, time.Now()).Scan(&final).Error
+	err = db.Raw(`SELECT count(*) waiting,MAX(0,CAST(COALESCE(MAX((julianday('now')-julianday(a.selected_at))*86400),0) AS INTEGER)) oldest FROM payment_attempts a JOIN orders o ON o.id=a.order_id WHERE o.status='READY' AND a.settle_until<=? AND NOT EXISTS(SELECT 1 FROM historical_scans h WHERE h.automatic=1 AND h.provider=a.provider AND h.receiver=a.receiver AND h.state='completed' AND h."from"<=a.selected_at AND h."to">=a.expires_at AND (CASE WHEN h.coverage_after>'0002-01-01' THEN h.coverage_after ELSE h.created_at END)>=a.settle_until)`, time.Now()).Scan(&final).Error
 	out.FinalReviewWaiting = final.Waiting
 	out.OldestFinalWindowSeconds = final.Oldest
 	return out, err
 }
+
+func validateIntegrationHealth(h model.IntegrationHealth) error {
+	if h.Name != "dujiao_cancel_sync" || h.Pending < 0 || h.Failures < 0 || h.Missing < 0 || h.Conflicts < 0 || h.ReportedAt < 0 || h.DiscoveryPending < 0 || h.DiscoveryPending > 1 || h.DiscoveryLagSeconds < 0 {
+		return gorm.ErrInvalidData
+	}
+	return nil
+}
+
 func (s *Store) SaveIntegrationHealth(ctx context.Context, h model.IntegrationHealth) error {
+	if err := validateIntegrationHealth(h); err != nil {
+		return err
+	}
 	h.Healthy = h.Healthy && h.Pending == 0 && h.Failures == 0 && h.Missing == 0 && h.Conflicts == 0 && h.DiscoveryPending == 0
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var old model.IntegrationHealth
@@ -66,7 +77,7 @@ func (s *Store) SaveIntegrationHealth(ctx context.Context, h model.IntegrationHe
 		if err != nil && err != gorm.ErrRecordNotFound {
 			return err
 		}
-		if err == nil && h.ReportedAt <= old.ReportedAt {
+		if err == nil && (h.ReportedAt < old.ReportedAt || (h.Generation == old.Generation && h.ReportedAt == old.ReportedAt)) {
 			return nil
 		}
 		if !h.Healthy {

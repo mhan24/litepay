@@ -73,6 +73,9 @@ func budgeted(ctx context.Context, n int) context.Context {
 }
 
 func (c *Client) signedGet(ctx context.Context, path string, q url.Values) ([]byte, error) {
+	if c.apiKey == "" || c.apiSecret == "" {
+		return nil, fmt.Errorf("未配置币安 API Key/Secret")
+	}
 	ctx = budgeted(ctx, 3)
 	// Waiting for another caller is bounded by the caller's deadline as well.
 	for !c.requestMu.TryLock() {
@@ -111,6 +114,10 @@ func (c *Client) request(ctx context.Context, path string, q url.Values, signed 
 	if time.Now().Before(c.backoffUntil) {
 		return nil, &APIError{Kind: ErrorRate}
 	}
+	b := ctx.Value(budgetKey{}).(*requestBudget)
+	if b.remaining.Add(-1) < 0 {
+		return nil, &APIError{Kind: ErrorBudget}
+	}
 	if delay := time.Until(c.nextRequest); delay > 0 {
 		timer := time.NewTimer(delay)
 		select {
@@ -123,22 +130,28 @@ func (c *Client) request(ctx context.Context, path string, q url.Values, signed 
 	if ctx.Err() != nil {
 		return nil, timeoutError(ctx)
 	}
-	b := ctx.Value(budgetKey{}).(*requestBudget)
-	if b.remaining.Add(-1) < 0 {
-		return nil, &APIError{Kind: ErrorBudget}
-	}
 	c.nextRequest = time.Now().Add(c.requestInterval)
 	values := url.Values{}
 	for k, v := range q {
+		if k == "signature" {
+			continue
+		}
 		values[k] = append([]string(nil), v...)
 	}
 	if signed {
 		values.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli()+c.clockOffset, 10))
 		values.Set("recvWindow", strconv.Itoa(c.recvWindow))
-		values.Set("signature", sign.HmacSHA256Hex(values.Encode(), c.apiSecret))
+	}
+	encoded := values.Encode()
+	if signed {
+		sig := sign.HmacSHA256Hex(encoded, c.apiSecret)
+		if encoded != "" {
+			encoded += "&"
+		}
+		encoded += "signature=" + sig
 	}
 	target := c.baseURL + path
-	if encoded := values.Encode(); encoded != "" {
+	if encoded != "" {
 		target += "?" + encoded
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)

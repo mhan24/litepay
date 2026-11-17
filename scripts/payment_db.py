@@ -103,7 +103,7 @@ def validate(path):
         if any(db.execute(sql).fetchone()[0] for sql in problems):
             raise ValueError('payment evidence, reservation, or recovery invariants failed')
         for (payload,) in db.execute('SELECT payload FROM settings'):
-            if not isinstance(json.loads(payload), dict):
+            if not isinstance(payload, str) or not isinstance(json.loads(payload), dict):
                 raise ValueError('invalid stored configuration')
         return {'schema': version, 'integrity': 'ok', 'counts': counts}
     finally:
@@ -128,22 +128,31 @@ def snapshot(source, output):
     if source == output:
         raise ValueError('backup destination must differ from live database')
     output.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    output = output.parent.resolve() / output.name
+    if source == output:
+        raise ValueError('backup destination must differ from live database')
+    sidecar = Path(str(output) + '.json')
     # O_EXCL protects existing snapshots and rejects symlinks.
     fd = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
+    sidecar_created = False
     try:
-        src, dest = connect(source), sqlite3.connect(output)
+        src = connect(source)
         try:
-            src.backup(dest, pages=256, sleep=0.01)
-            dest.execute("PRAGMA journal_mode=DELETE")
+            dest = sqlite3.connect(output)
+            try:
+                src.backup(dest, pages=256, sleep=0.01)
+                dest.execute("PRAGMA journal_mode=DELETE")
+            finally:
+                dest.close()
         finally:
-            dest.close()
             src.close()
         result = validate(output)
         fsync_file(output)
         result['sha256'] = hashlib.sha256(output.read_bytes()).hexdigest()
         result['created_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        with open(str(output) + '.json', 'x', opener=lambda name, flags: os.open(name, flags, 0o600)) as file:
+        with open(sidecar, 'x', opener=lambda name, flags: os.open(name, flags, 0o600)) as file:
+            sidecar_created = True
             json.dump(result, file, indent=2)
             file.flush()
             os.fsync(file.fileno())
@@ -151,6 +160,8 @@ def snapshot(source, output):
         return result
     except Exception:
         output.unlink(missing_ok=True)
+        if sidecar_created:
+            sidecar.unlink(missing_ok=True)
         raise
 
 
@@ -159,12 +170,18 @@ def restore(source, target):
     sidecar = Path(str(source) + '.json')
     if not sidecar.is_file():
         raise ValueError('backup manifest is required')
-    expected = json.loads(sidecar.read_text())['sha256']
+    manifest = json.loads(sidecar.read_text())
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('sha256'), str):
+        raise ValueError('invalid backup manifest')
+    expected = manifest['sha256']
     if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
         raise ValueError('backup checksum mismatch')
     validate(source)
     target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    lock_fd = os.open(str(target) + '.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    target = target.parent.resolve() / target.name
+    if source == target:
+        raise ValueError('restore requires a new empty target path; existing data is never overwritten')
+    lock_fd = os.open(str(target) + '.lock', os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if any(os.path.lexists(str(target) + suffix) for suffix in ('', '-wal', '-shm', '-journal')):
@@ -180,11 +197,16 @@ def restore(source, target):
             recovered = sqlite3.connect(staged)
             try:
                 if recovered.execute('PRAGMA user_version').fetchone()[0] >= 14:
+                    old_gen = recovered.execute('SELECT generation FROM gateway_recoveries WHERE id=1').fetchone()[0]
+                    new_gen = secrets.token_hex(16)
+                    while new_gen == old_gen:
+                        new_gen = secrets.token_hex(16)
                     recovered.execute("UPDATE gateway_recoveries SET generation=?,acknowledged=0,reason='SQLite backup restore',created_at=? WHERE id=1",
-                                      (secrets.token_hex(16), datetime.datetime.now(datetime.timezone.utc).isoformat(' ')))
+                                      (new_gen, datetime.datetime.now(datetime.timezone.utc).isoformat(' ')))
                     recovered.commit()
             finally:
                 recovered.close()
+            validate(staged)
             fsync_file(staged)
             os.replace(staged, target)
             fsync_dir(target.parent)

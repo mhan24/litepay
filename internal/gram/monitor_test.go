@@ -60,6 +60,15 @@ func TestPriceFailureDisablesCachedQuoteAndRecovery(t *testing.T) {
 	if err := m.CheckPrice(context.Background()); err != nil || !m.Snapshot().Fresh {
 		t.Fatal(err)
 	}
+	if err := m.UseTestPriceSource(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckPrice(context.Background()); err != nil || !m.Snapshot().Fresh {
+		t.Fatal(err)
+	}
+	if err := m.CheckBalance(context.Background(), nil); err == nil {
+		t.Fatal("expected nil client CheckBalance to fail")
+	}
 }
 
 func TestStaleBalanceIsNotPresentedAsCurrent(t *testing.T) {

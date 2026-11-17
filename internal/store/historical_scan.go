@@ -13,6 +13,7 @@ import (
 )
 
 func (s *Store) RequestHistoricalScan(ctx context.Context, no, operator, reason string) error {
+	operator = strings.TrimSpace(operator)
 	reason = strings.TrimSpace(reason)
 	if operator == "" || reason == "" || utf8.RuneCountInString(reason) > 300 {
 		return errors.New("请填写核对原因（1~300 字）")
@@ -29,6 +30,7 @@ func (s *Store) RequestHistoricalScan(ctx context.Context, no, operator, reason 
 		if len(attempts) == 0 {
 			return errors.New("没有可补扫的付款尝试")
 		}
+		now := time.Now()
 		for _, a := range attempts {
 			var n int64
 			if err := db.Model(&model.HistoricalScan{}).Where("attempt_id = ? AND state = ?", a.ID, "pending").Count(&n).Error; err != nil {
@@ -38,8 +40,11 @@ func (s *Store) RequestHistoricalScan(ctx context.Context, no, operator, reason 
 				continue
 			}
 			end := a.ExpiresAt
-			if end.After(time.Now()) {
-				end = time.Now()
+			if end.After(now) {
+				end = now
+			}
+			if end.Before(a.SelectedAt) {
+				end = a.SelectedAt
 			}
 			if err := db.Create(&model.HistoricalScan{Priority: 1, OrderID: o.ID, AttemptID: a.ID, Provider: a.Provider, Receiver: a.Receiver, From: a.SelectedAt, To: end, Cursor: a.SelectedAt, State: "pending", Operator: operator, Reason: reason}).Error; err != nil {
 				return err
@@ -74,38 +79,67 @@ func (s *Store) NextHistoricalScan(ctx context.Context, provider string) (model.
 	return q, err
 }
 func (s *Store) HistoricalScanFailure(ctx context.Context, q model.HistoricalScan, blocked bool) error {
+	if q.ID == 0 {
+		return errors.New("历史补扫任务无效")
+	}
 	state := "pending"
 	message := "历史查询未完成，将继续重试"
 	if blocked {
 		state = "blocked"
 		message = "历史收款账户与当前配置不一致，需人工核对账户配置后重新申请"
 	}
-	return s.db.WithContext(ctx).Model(&q).Updates(map[string]any{"state": state, "last_error": message, "updated_at": time.Now()}).Error
+	return s.db.WithContext(ctx).Model(&model.HistoricalScan{}).Where("id = ? AND state = ?", q.ID, "pending").Updates(map[string]any{"state": state, "last_error": message, "updated_at": time.Now()}).Error
 }
 func (s *Store) SaveHistoricalScan(ctx context.Context, before, after model.HistoricalScan, rows []model.Transaction) error {
+	before.Cursor = normalizeTime(before.Cursor)
+	before.From = normalizeTime(before.From)
+	before.To = normalizeTime(before.To)
+	after.Cursor = normalizeTime(after.Cursor)
+	after.ChunkTo = normalizeTime(after.ChunkTo)
+	after.OldestAt = normalizeTime(after.OldestAt)
+	after.CoverageAfter = normalizeTime(after.CoverageAfter)
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var current model.HistoricalScan
 		if err := db.First(&current, before.ID).Error; err != nil {
 			return err
 		}
-		if current.State != "pending" || !current.Cursor.Equal(before.Cursor) || current.LT != before.LT || current.Pages != before.Pages {
+		if current.State != "pending" || !current.Cursor.Equal(before.Cursor) || current.LT != before.LT || current.Hash != before.Hash || current.Pages != before.Pages {
 			return errors.New("历史补扫检查点已变化")
+		}
+		if after.ID != current.ID || after.Provider != current.Provider || after.Receiver != current.Receiver || after.Automatic != current.Automatic ||
+			!after.From.Equal(current.From) || !after.To.Equal(current.To) ||
+			after.Cursor.Before(current.Cursor) || after.Cursor.After(current.To) ||
+			(after.State != "pending" && after.State != "completed") ||
+			(after.State == "completed" && after.Cursor.Before(current.To)) {
+			return errors.New("历史补扫结果超出任务边界")
+		}
+		if current.Automatic && !current.RequiredAfter.IsZero() && (after.CoverageAfter.Before(current.RequiredAfter) || after.CoverageAfter.After(current.CreatedAt)) {
+			return errors.New("历史补扫覆盖时间戳无效")
 		}
 		bounded := &Store{db: db}
 		for _, row := range rows {
-			if row.Provider != before.Provider || row.Receiver != before.Receiver || row.OccurredAt.Before(before.From) || row.OccurredAt.After(before.To) {
+			row.OccurredAt = normalizeTime(row.OccurredAt)
+			if row.Provider != current.Provider || row.Receiver != current.Receiver || row.OccurredAt.Before(current.From) || row.OccurredAt.After(current.To) {
 				return errors.New("历史证据不在申请范围")
 			}
 			if _, err := bounded.Process(ctx, row, ""); err != nil {
 				return err
 			}
 		}
-		if before.Automatic && after.Cursor.After(before.Cursor) {
-			proof := model.HistoryCoverage{Provider: before.Provider, Receiver: before.Receiver, From: before.Cursor, To: after.Cursor, ObservedAt: before.CreatedAt, ScanID: before.ID}
+		if current.Automatic && after.Cursor.After(current.Cursor) {
+			proof := model.HistoryCoverage{Provider: current.Provider, Receiver: current.Receiver, From: current.Cursor, To: after.Cursor, ObservedAt: current.CreatedAt, ScanID: current.ID}
 			if err := db.Create(&proof).Error; err != nil {
 				return err
 			}
 		}
+		after.From = current.From
+		after.To = current.To
+		after.OrderID = current.OrderID
+		after.AttemptID = current.AttemptID
+		after.RequiredAfter = current.RequiredAfter
+		after.CreatedAt = current.CreatedAt
+		after.Operator = current.Operator
+		after.Reason = current.Reason
 		after.LastError = ""
 		return db.Save(&after).Error
 	})
@@ -116,6 +150,9 @@ func (s *Store) SaveHistoricalScan(ctx context.Context, before, after model.Hist
 const SettlementRefresh = 15 * time.Minute
 
 func (s *Store) QueueSettlementScan(ctx context.Context, provider, receiver string, lookback time.Duration) error {
+	if provider == "" || receiver == "" {
+		return nil
+	}
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		now := time.Now()
 		for _, priority := range []int{2, 0} {

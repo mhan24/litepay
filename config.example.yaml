@@ -36,6 +36,7 @@ admin:
   # 后台管理入口路径前缀，建议修改为不易被猜测的单层路径；亦可在管理后台中调整
   path: "/admin"
   username: "admin"
+  # 留空将禁用后台管理；本地开发明文密码至少 12 个字符，生产模式必须为 bcrypt 哈希（$2a$/$2b$/$2y$）
   password: ""
   session_hours: 12
 

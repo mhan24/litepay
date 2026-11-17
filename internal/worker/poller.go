@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
 	"litepay/internal/binance"
 	"litepay/internal/config"
 	"litepay/internal/gram"
@@ -78,9 +79,11 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 		}
 		p.clients[provider] = cached
 	}
+	uid := cached.uid
+	src := cached.source
 	p.mu.Unlock()
-	if cached.uid == "" {
-		uid, err := cached.source.AccountUID(ctx)
+	if uid == "" {
+		uid, err := src.AccountUID(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -94,9 +97,11 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 		if uid != want {
 			return nil, errors.New("API 账户与收款 UID 不一致")
 		}
+		p.mu.Lock()
 		cached.uid = uid
+		p.mu.Unlock()
 	}
-	return cached.source, nil
+	return src, nil
 }
 
 // duplicate external references are evidence of ambiguity, not separate payable orders.
@@ -302,7 +307,8 @@ func (p *Poller) Run(ctx context.Context) {
 				if err := p.Scan(ctx, provider); err != nil && ctx.Err() == nil {
 					slog.Warn("收款扫描未完成", "provider", provider)
 				}
-				timer := time.NewTimer(time.Duration(p.cfg.Get().ProviderInterval(provider)) * time.Second)
+				interval := max(p.cfg.Get().ProviderInterval(provider), 1)
+				timer := time.NewTimer(time.Duration(interval) * time.Second)
 				select {
 				case <-ctx.Done():
 					timer.Stop()
@@ -352,6 +358,12 @@ func (p *Poller) monitorGRAM(ctx context.Context) {
 					if balance {
 						if balanceClient == nil || balanceConfig != cfg.TON {
 							balanceClient = gram.New(cfg.TON.BaseURL, cfg.TON.APIKey, cfg.TON.Address)
+							p.mu.Lock()
+							test := p.testTransports
+							p.mu.Unlock()
+							if test {
+								balanceClient.UseTestTransport()
+							}
 							balanceConfig = cfg.TON
 						}
 						_ = p.GRAM.CheckBalance(ctx, balanceClient)
@@ -386,11 +398,17 @@ func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider st
 	// 窗口更晚，必须回溯；已有游标时始终覆盖其后的全部对账历史。
 	var earliest model.PaymentAttempt
 	e := p.st.DB().WithContext(ctx).Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ?", model.Ready, provider).Order("a.selected_at").First(&earliest).Error
+	if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
+		return end, end, e
+	}
 	if e == nil {
 		floor := earliest.SelectedAt.Add(-lookback)
 		if first && floor.Before(start) {
 			start = floor
 		}
+	}
+	if start.After(end) {
+		start = end.Add(-lookback)
 	}
 	if end.Sub(start) > time.Hour {
 		end = start.Add(time.Hour)
@@ -405,7 +423,7 @@ func (p *Poller) scanTON(ctx context.Context, cfg *config.Config, cli interface 
 	if err != nil {
 		return false, err
 	}
-	if !cp.Active {
+	if !cp.Active || cp.From.After(cp.To) {
 		start, stop, err := p.scanBounds(ctx, cfg, config.ProviderTON, end)
 		if err != nil {
 			return false, err
@@ -419,7 +437,9 @@ func (p *Poller) scanTON(ctx context.Context, cfg *config.Config, cli interface 
 	if err != nil {
 		return false, err
 	}
-	err = p.st.SaveTONPage(ctx, cp, next, rows)
+	save, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	err = p.st.SaveTONPage(save, cp, next, rows)
 	return !next.Active && err == nil, err
 }
 

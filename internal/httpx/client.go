@@ -22,6 +22,9 @@ type Client struct {
 // NewClient 返回只访问公网地址、不跟随重定向的 HTTP 客户端。
 // testsOnly 仅用于本地测试注入；生产代码不得传入 true。
 func NewClient(timeout time.Duration, testsOnly bool) *Client {
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	if !testsOnly {
@@ -83,6 +86,9 @@ func publicDialer(ctx context.Context, network, address string) (net.Conn, error
 }
 
 func publicIP(ip netip.Addr) bool {
+	if ip.Zone() != "" {
+		return false
+	}
 	ip = ip.Unmap()
 	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 		return false
@@ -90,7 +96,7 @@ func publicIP(ip netip.Addr) bool {
 	for _, raw := range []string{
 		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
 		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
-		"2001:db8::/32", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
+		"::/96", "100::/64", "2001::/23", "2001:db8::/32", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
 	} {
 		if netip.MustParsePrefix(raw).Contains(ip) {
 			return false

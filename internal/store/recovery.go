@@ -44,6 +44,9 @@ func (s *Store) PaymentOperationsReady(ctx context.Context) (bool, error) {
 }
 
 func (s *Store) AcknowledgeRecovery(ctx context.Context, generation string, complete bool, h model.IntegrationHealth) error {
+	if err := validateIntegrationHealth(h); err != nil {
+		return err
+	}
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var r model.GatewayRecovery
 		if err := db.First(&r, 1).Error; err != nil {
@@ -57,7 +60,7 @@ func (s *Store) AcknowledgeRecovery(ctx context.Context, generation string, comp
 		if err != nil && err != gorm.ErrRecordNotFound {
 			return err
 		}
-		if err == nil && h.ReportedAt <= old.ReportedAt {
+		if err == nil && (h.ReportedAt < old.ReportedAt || (h.Generation == old.Generation && h.ReportedAt == old.ReportedAt)) {
 			return nil
 		}
 		// A fresh source heartbeat alone cannot release delivery while cancellation

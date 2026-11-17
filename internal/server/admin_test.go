@@ -646,3 +646,134 @@ func TestAdminEpochRecoversAfterStorageFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestAdminLoginPreservesValidNextAndRejectsOpenRedirect(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Path = "/manage-panel"
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "correct-horse-battery-staple"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Open redirect target in query string must not be rendered in the login form's next input.
+	w := getRequest(engine, "/manage-panel/login?next=https://evil.example/steal")
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "evil.example") {
+		t.Fatalf("unsafe next rendered into login page: code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// Failed login preserves a valid internal next path and rejects external next.
+	form := url.Values{"username": {"admin"}, "password": {"wrong-password"}, "next": {"/manage-panel/orders?page=2"}}
+	req := httptest.NewRequest(http.MethodPost, "/manage-panel/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w = httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if !strings.Contains(w.Header().Get("Location"), "next=%2Fmanage-panel%2Forders%3Fpage%3D2") {
+		t.Fatalf("valid next lost on login failure: %s", w.Header().Get("Location"))
+	}
+
+	// Trailing slash on admin root works and preserves SessionHours change.
+	token, _, err := newAdminAuth(mgr.Get()).issue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/manage-panel/", nil)
+	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+	w = httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected /manage-panel/ to serve dashboard, got %d", w.Code)
+	}
+}
+
+func TestReselectDisabledRejectsProviderSwitchInSelectPayment(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.BEpusdt.Reselect = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	cfg.OKX.APIKey = "key"
+	cfg.OKX.APISecret = "secret"
+	cfg.OKX.Passphrase = "pass"
+	cfg.Checkout.OKX.UID = "okx-receiver"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	no := createOrderViaBEpusdt(t, engine, mgr.Get().BEpusdt.APIToken, "https://shop.example/notify")
+	selectPayment(t, engine, no, "binance")
+
+	w := postForm(engine, "/api/order/payment", url.Values{"trade_no": {no}, "provider": {"okx"}, "currency": {"USDT"}})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "不允许更换") {
+		t.Fatalf("expected reselect=false to reject provider switch, got code=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestNilPollerAndNilLoggerDefensiveHandling(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Password = "defensive-check-password"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if w := getRequest(engine, "/readyz"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected /readyz to return 503 with nil poller instead of panicking, got %d", w.Code)
+	}
+
+	token, _, err := newAdminAuth(mgr.Get()).issue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/admin", "/admin/operations", "/admin/gram/status"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		if path == "/admin/gram/status" {
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503 on %s with nil poller, got %d", path, w.Code)
+			}
+		} else if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 on %s with nil poller, got %d", path, w.Code)
+		}
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,7 +30,20 @@ type Store struct {
 	masterKey []byte
 }
 
+// normalizeTime converts non-zero timestamps to the process local location so SQLite
+// text comparisons stay consistent with time.Now() and time.Unix().
+func normalizeTime(t time.Time) time.Time {
+	if t.IsZero() {
+		return time.Time{}
+	}
+	return t.Local()
+}
+
 func Open(path string) (*Store, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, errors.New("数据库路径不能为空")
+	}
 	var lock *os.File
 	if path != ":memory:" {
 		absolute, err := filepath.Abs(path)
@@ -87,6 +101,8 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetConnMaxLifetime(0)
 	fail := func(err error) (*Store, error) { return nil, errors.Join(err, sqlDB.Close()) }
 	// An in-memory database retains its existing single-connection lifetime.
 	// File databases use DSN pragmas so replacement connections get the same safeguards.
@@ -233,14 +249,17 @@ func runSchemaMigrations(db *gorm.DB, version int, tables int64, steps []schemaM
 }
 func (s *Store) DB() *gorm.DB { return s.db }
 func (s *Store) Close() error {
+	var lockErr error
 	if s.lock != nil {
-		defer s.lock.Close()
+		if err := s.lock.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			lockErr = err
+		}
 	}
 	d, e := s.db.DB()
 	if e != nil {
-		return e
+		return errors.Join(e, lockErr)
 	}
-	return d.Close()
+	return errors.Join(d.Close(), lockErr)
 }
 func (s *Store) Ping(ctx context.Context) error {
 	d, e := s.db.DB()
@@ -260,6 +279,10 @@ func (s *Store) HasActivePayments(ctx context.Context) (bool, error) {
 	return n > 0, e
 }
 func (s *Store) Create(ctx context.Context, o model.Order) (*model.Order, error) {
+	if strings.TrimSpace(o.TradeNo) == "" || strings.TrimSpace(o.OutTradeNo) == "" || o.OriginUnits <= 0 || o.ExpiresAt.IsZero() {
+		return nil, errors.New("订单缺少必要参数")
+	}
+	o.ExpiresAt = normalizeTime(o.ExpiresAt)
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var old model.Order
 		err := db.Where("out_trade_no = ?", o.OutTradeNo).First(&old).Error
@@ -290,6 +313,18 @@ func (s *Store) Create(ctx context.Context, o model.Order) (*model.Order, error)
 			return errors.New("商户订单已取消，禁止重新创建")
 		}
 		o.Status = model.Pending
+		o.Provider = ""
+		o.Currency = ""
+		o.Receiver = ""
+		o.PayUnits = 0
+		o.Precision = 0
+		o.SelectedAt = nil
+		o.PaidAt = nil
+		o.RateUSD = ""
+		o.RateAt = nil
+		o.SelectionChanges = 0
+		o.LastSelectionAt = nil
+		o.NextExpiryCheckAt = time.Time{}
 		return db.Create(&o).Error
 	})
 	return &o, err
@@ -311,6 +346,9 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 	}
 	if provider != "ton" && ((provider != "binance" && provider != "okx") || (currency != "USDT" && currency != "USDC")) {
 		return nil, errors.New("收款平台与币种不匹配")
+	}
+	if strings.TrimSpace(receiver) == "" {
+		return nil, errors.New("收款账户不能为空")
 	}
 	if precision < 2 || precision > 6 || step <= 0 || step > amount.Scale || step%amount.Quantum(precision) != 0 || maxOffset < 1 || maxOffset > 900 || minUnits <= 0 {
 		return nil, errors.New("金额配置无效")
@@ -348,6 +386,10 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 				return errors.New("历史付款金额超出可核销范围")
 			}
 			applyAttempt(&o, previous)
+			o.Status = model.Ready
+			if o.NextExpiryCheckAt.IsZero() {
+				o.NextExpiryCheckAt = o.ExpiresAt.Add(LateVisibilityWindow)
+			}
 			o.SelectionChanges++
 			o.LastSelectionAt = &now
 			return db.Save(&o).Error
@@ -375,6 +417,8 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 			if err != nil {
 				return err
 			}
+		} else if base >= amount.MaxMall {
+			return errors.New("应付金额超出可核销范围")
 		}
 		base = ((base + q - 1) / q) * q
 		ceiling := base + step*int64(maxOffset)
@@ -389,7 +433,7 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 		o.RateAt = nil
 		if quoted != 0 {
 			o.RateUSD = quote.USD
-			at := quote.PriceAt
+			at := normalizeTime(quote.PriceAt)
 			o.RateAt = &at
 		}
 		o.Provider = provider
@@ -448,10 +492,10 @@ func (s *Store) cancelReference(ctx context.Context, tradeNo, outTradeNo string,
 				return e
 			}
 			var saved model.CancellationIntent
-			if e := db.First(&saved, "out_trade_no=?", outTradeNo).Error; e != nil {
+			if e := db.First(&saved, "out_trade_no=? OR trade_no=?", outTradeNo, tradeNo).Error; e != nil {
 				return e
 			}
-			if saved.TradeNo != tradeNo {
+			if saved.TradeNo != tradeNo || saved.OutTradeNo != outTradeNo {
 				return errors.New("网关订单号与商户订单号不一致")
 			}
 			o = model.Order{TradeNo: tradeNo, OutTradeNo: outTradeNo, Status: model.Canceled}
@@ -487,7 +531,10 @@ func (s *Store) cancelReference(ctx context.Context, tradeNo, outTradeNo string,
 			return err
 		}
 		o.Status = model.Canceled
-		return db.Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("order_id", nil).Error
+		if err := db.Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("order_id", nil).Error; err != nil {
+			return err
+		}
+		return collectCanceledOrderReceipts(db, o)
 	})
 	if err == nil && paidConflict {
 		err = errors.New("已支付订单不能关闭")
@@ -498,12 +545,18 @@ func (s *Store) cancelReference(ctx context.Context, tradeNo, outTradeNo string,
 // Process records evidence and atomically consumes a unique provider event.
 // expectedTrade is a restriction, never a hint that can override ownership.
 func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade string) (string, error) {
+	switch t.State {
+	case model.Confirmed, model.Unconfirmed, model.Ambiguous, model.Rejected:
+	default:
+		return "invalid_evidence", errors.New("交易状态无效")
+	}
 	if t.Provider == "ton" && t.State == model.Confirmed && t.MasterchainSeqno <= 0 {
 		return "unfinalized", errors.New("TON 到账缺少主链最终性确认")
 	}
 	if t.EventID == "" || (t.Provider != "binance" && t.Provider != "okx" && t.Provider != "ton") || t.OccurredAt.IsZero() {
 		return "invalid_evidence", errors.New("交易缺少可靠身份或时间")
 	}
+	t.OccurredAt = normalizeTime(t.OccurredAt)
 	result := "unmatched"
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var old model.Transaction
@@ -520,11 +573,26 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 				}
 				return nil
 			}
+			var reviewed int64
+			if err := db.Model(&model.CancellationReview{}).Where("provider = ? AND event_id = ?", t.Provider, t.EventID).Count(&reviewed).Error; err != nil {
+				return err
+			}
+			if reviewed > 0 {
+				result = old.Reason
+				if result == "" {
+					result = old.State
+				}
+				return nil
+			}
 			if old.State == model.Ambiguous || old.State == model.Rejected {
 				result = old.State
 				return nil
 			}
-			if old.Receiver != t.Receiver || old.Currency != t.Currency || old.Units != t.Units || !old.OccurredAt.Equal(t.OccurredAt) || old.Assets != t.Assets {
+			if (old.State == model.Confirmed && t.State != model.Confirmed) ||
+				old.Receiver != t.Receiver || old.Currency != t.Currency || old.Units != t.Units ||
+				!old.OccurredAt.Equal(t.OccurredAt) || old.Assets != t.Assets ||
+				(old.Reference != "" && t.Reference != old.Reference) ||
+				(old.MasterchainSeqno > 0 && t.MasterchainSeqno != old.MasterchainSeqno) {
 				t.State = model.Ambiguous
 				t.Reason = "conflicting_evidence"
 			}
@@ -542,6 +610,7 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			}
 		}
 		t.OrderID = nil
+		t.AttemptID = nil
 		if e = db.Save(&t).Error; e != nil {
 			return e
 		}
@@ -632,11 +701,13 @@ func (s *Store) ScanDue(ctx context.Context, provider, receiver string) (bool, e
 	if err = db.Table("payment_attempts a").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ?", model.Ready, provider).Count(&n).Error; err != nil || n > 0 {
 		return n > 0, err
 	}
-	if err = db.Model(&model.TONScanCheckpoint{}).Where("active = ? AND receiver = ?", true, receiver).Count(&n).Error; err != nil {
-		return false, err
-	}
-	if provider == "ton" && n > 0 {
-		return true, nil
+	if provider == "ton" {
+		if err = db.Model(&model.TONScanCheckpoint{}).Where("active = ? AND receiver = ?", true, receiver).Count(&n).Error; err != nil {
+			return false, err
+		}
+		if n > 0 {
+			return true, nil
+		}
 	}
 	err = db.Model(&model.ConfirmationTask{}).Where("provider = ? AND state = ? AND deadline > ?", provider, "pending", time.Now()).Count(&n).Error
 	return n > 0, err
@@ -682,6 +753,9 @@ func backfillConfirmationTasks(db *gorm.DB) error {
 }
 
 func (s *Store) PendingTimes(ctx context.Context, provider string, offset, limit int) ([]time.Time, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
 	db := s.db.WithContext(ctx)
 	if err := db.Model(&model.ConfirmationTask{}).Where("state = ? AND deadline <= ?", "pending", time.Now()).Update("state", "manual_review").Error; err != nil {
 		return nil, err
@@ -699,24 +773,36 @@ func (s *Store) PendingTimes(ctx context.Context, provider string, offset, limit
 // ScannedUntil, so a failing recheck stays visible in the dashboard without making the regular
 // scan or the expiry decision look broken.
 func (s *Store) PendingResult(ctx context.Context, provider string, recheckErr error) error {
-	cursor, err := s.Cursor(ctx, provider)
-	if err != nil {
-		return err
+	if strings.TrimSpace(provider) == "" {
+		return errors.New("收款平台不能为空")
 	}
-	cursor.PendingAt = time.Now()
-	cursor.PendingError = ""
+	pendingErr := ""
 	if recheckErr != nil {
-		cursor.PendingError = fmt.Sprint(recheckErr)
+		pendingErr = fmt.Sprint(recheckErr)
 	}
-	return s.db.WithContext(ctx).Save(&cursor).Error
+	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.ScanCursor{Provider: provider}).Error; err != nil {
+			return err
+		}
+		return db.Model(&model.ScanCursor{}).Where("provider = ?", provider).Updates(map[string]any{
+			"pending_at":    time.Now(),
+			"pending_error": pendingErr,
+		}).Error
+	})
 }
 
 func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (*model.Callback, *model.Order, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	if timeout <= 0 {
+		timeout = 10
+	}
 	var task model.Callback
 	var o model.Order
 	missing := false
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state NOT IN ?", maxAttempts, time.Now(), []string{"exhausted", "merchant_review", "canceled_refunded"}).Updates(map[string]any{"state": "exhausted"}).Error; err != nil {
+		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state NOT IN ?", maxAttempts, time.Now(), []string{"exhausted", "merchant_review", "canceled_refunded"}).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Updates(map[string]any{"state": "exhausted", "lease_until": time.Time{}}).Error; err != nil {
 			return err
 		}
 		// Only paid orders are notified. Filtering here keeps a task whose order is not paid
@@ -749,7 +835,7 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 // ReleaseCallback returns an unsent reservation without consuming the merchant retry
 // budget. The lease fence prevents an old worker from releasing a newer attempt.
 func (s *Store) ReleaseCallback(ctx context.Context, task model.Callback) error {
-	return s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(map[string]any{"attempts": task.Attempts - 1, "next_at": time.Now(), "lease_until": time.Time{}, "state": gorm.Expr("CASE WHEN EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id) THEN 'merchant_review' ELSE 'queued' END")}).Error
+	return s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND attempts > attempt_base AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(map[string]any{"attempts": max(task.Attempts-1, 0), "next_at": time.Now(), "lease_until": time.Time{}, "state": gorm.Expr("CASE WHEN EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id) THEN 'merchant_review' ELSE 'queued' END")}).Error
 }
 
 func (s *Store) FinishCallback(ctx context.Context, task model.Callback, status int, ok bool, message string, delay time.Duration) error {
@@ -789,18 +875,28 @@ func (s *Store) Cursor(ctx context.Context, provider string) (model.ScanCursor, 
 	return c, e
 }
 func (s *Store) ScanResult(ctx context.Context, provider string, end time.Time, scanErr error) error {
-	c, e := s.Cursor(ctx, provider)
-	if e != nil {
-		return e
+	if strings.TrimSpace(provider) == "" {
+		return errors.New("收款平台不能为空")
 	}
-	if scanErr != nil {
-		c.LastError = fmt.Sprint(scanErr)
-	} else {
-		if end.After(c.ScannedUntil) {
-			c.ScannedUntil = end
+	end = normalizeTime(end)
+	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.ScanCursor{Provider: provider}).Error; err != nil {
+			return err
 		}
-		c.LastSuccess = time.Now()
-		c.LastError = ""
-	}
-	return s.db.WithContext(ctx).Save(&c).Error
+		if scanErr != nil {
+			return db.Model(&model.ScanCursor{}).Where("provider = ?", provider).Update("last_error", fmt.Sprint(scanErr)).Error
+		}
+		var c model.ScanCursor
+		if err := db.First(&c, "provider = ?", provider).Error; err != nil {
+			return err
+		}
+		updates := map[string]any{
+			"last_success": time.Now(),
+			"last_error":   "",
+		}
+		if end.After(c.ScannedUntil) {
+			updates["scanned_until"] = end
+		}
+		return db.Model(&model.ScanCursor{}).Where("provider = ?", provider).Updates(updates).Error
+	})
 }

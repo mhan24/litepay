@@ -198,7 +198,7 @@
   <form id="rotate-token" method="post" action="{{adminPath}}/settings/token" hidden><input type="hidden" name="csrf" value="{{.Base.CSRF}}"></form>
 </main>
 {{template "theme_script" .}}
-<script nonce="{{.Nonce}}">
+ <script nonce="{{.Nonce}}">
 (function(){
  var nav=document.querySelector('.settings-nav'),panels=document.querySelectorAll('[data-settings-panel]'),buttons=nav.querySelectorAll('[data-settings-view]');
  function show(name){
@@ -213,19 +213,23 @@
   box.addEventListener('change',function(){
    var form=box.closest('form');
    form.querySelectorAll('[data-section-fields] input').forEach(function(input){input.disabled=box.checked});
-   form.querySelector('[name="verify_accounts"]').disabled=box.checked;
+   var verify=form.querySelector('[name="verify_accounts"]');if(verify)verify.disabled=box.checked;
   });
  });
  var balance=document.getElementById('gram-balance'),price=document.getElementById('gram-price');
+ var gramTimer=null;
  async function checkGRAM(){
+  if(gramTimer){clearTimeout(gramTimer);gramTimer=null;}
+  if(document.hidden){return;}
   try{
-   var response=await fetch('{{adminPath}}/gram/status',{credentials:'same-origin'});if(!response.ok)throw new Error('unavailable');
+   var response=await fetch({{adminPath}}+'/gram/status',{credentials:'same-origin'});if(!response.ok)throw new Error('unavailable');
    var s=(await response.json()).data;
    balance.textContent=s.balance_error||(!s.balance_fresh?'余额等待检测或已过期':'余额 '+s.balance_gram+' GRAM · 检测于 '+new Date(s.balance_checked_at).toLocaleTimeString());
    price.textContent=s.price_fresh?'1 GRAM = '+s.usd_per_gram.replace(/0+$/,'').replace(/\.$/,'')+' USD · 检测于 '+new Date(s.price_checked_at).toLocaleTimeString():(s.price_error||'GRAM/USD 行情未就绪');
   }catch(error){price.textContent='无法读取检测状态，请稍后刷新重试'}
-  setTimeout(checkGRAM,5000);
+  gramTimer=setTimeout(checkGRAM,5000);
  }
+ document.addEventListener('visibilitychange',function(){if(!document.hidden)checkGRAM();});
  checkGRAM();
 })();
 </script>

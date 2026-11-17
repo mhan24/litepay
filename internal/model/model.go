@@ -49,8 +49,13 @@ type Order struct {
 	UpdatedAt         time.Time
 }
 
-func (o Order) Original() string  { return amount.String(o.OriginUnits) }
-func (o Order) PayAmount() string { return amount.Text(o.PayUnits, o.Precision) }
+func (o Order) Original() string { return amount.String(o.OriginUnits) }
+func (o Order) PayAmount() string {
+	if o.Precision <= 0 {
+		return amount.String(o.PayUnits)
+	}
+	return amount.Text(o.PayUnits, o.Precision)
+}
 
 type Slot struct {
 	Provider  string    `gorm:"primaryKey"`
@@ -271,7 +276,12 @@ type HistoryCoverage struct {
 	ScanID     uint      `gorm:"index"`
 }
 
-func (a PaymentAttempt) Amount() string { return amount.Text(a.Units, a.Precision) }
+func (a PaymentAttempt) Amount() string {
+	if a.Precision <= 0 {
+		return amount.String(a.Units)
+	}
+	return amount.Text(a.Units, a.Precision)
+}
 
 func (o Order) PaymentPhase(now time.Time) string {
 	switch o.Status {
@@ -279,14 +289,17 @@ func (o Order) PaymentPhase(now time.Time) string {
 		return "paid"
 	case Canceled, Expired:
 		return "closed"
-	}
-	if !now.Before(o.ExpiresAt) {
-		if o.Status == Ready {
-			return "settling"
+	case Pending, Ready:
+		if !now.Before(o.ExpiresAt) {
+			if o.Status == Ready {
+				return "settling"
+			}
+			return "closed"
 		}
+		return "accepting_payment"
+	default:
 		return "closed"
 	}
-	return "accepting_payment"
 }
 
 // CancellationReview records funds requiring an external refund after merchant cancellation.

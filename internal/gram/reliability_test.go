@@ -136,6 +136,10 @@ func TestHistoryPageInclusiveAnchorAtEndOfHistory(t *testing.T) {
 	if err != nil || len(rows) != 0 || next.Active {
 		t.Fatal(rows, next, err)
 	}
+	badCP := model.TONScanCheckpoint{Receiver: DefaultAddress, From: time.Unix(1, 0), To: time.Now(), LT: "", Hash: raw.ID.Hash, Active: true}
+	if _, _, err := c.HistoryPage(context.Background(), badCP); err == nil {
+		t.Fatal("expected partial checkpoint boundary to fail")
+	}
 }
 
 func rowsForFinality(r *http.Request, rows []rawTransaction) []rawTransaction {

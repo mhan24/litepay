@@ -90,7 +90,9 @@ func (p Patch) Apply(c *config.Config) {
 		c.Admin.Username = strings.TrimSpace(*p.AdminUsername)
 	}
 	if p.AdminPasswordHash != nil {
-		c.Admin.Password = *p.AdminPasswordHash
+		if config.IsBcryptHash(*p.AdminPasswordHash) {
+			c.Admin.Password = *p.AdminPasswordHash
+		}
 	}
 	if p.BEpusdtReselect != nil {
 		c.BEpusdt.Reselect = *p.BEpusdtReselect
@@ -261,6 +263,9 @@ func (m *Manager) Store() *store.Store { return m.st }
 
 // Load 启动时应用数据库中的覆盖项。
 func (m *Manager) Load(ctx context.Context) error {
+	if m == nil || m.st == nil {
+		return nil
+	}
 	if !m.st.HasMasterKey() {
 		key, err := store.ResolveMasterKey(m.Get().Server.MasterKeyFile, m.Get().Server.Production)
 		if err != nil {
@@ -416,8 +421,8 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 	}
 	// Verify changed collection accounts before publishing or persisting credentials.
 	changed := map[string]bool{
-		config.ProviderBinance: current.Binance.APIKey != next.Binance.APIKey || current.Binance.APISecret != next.Binance.APISecret || current.Checkout.Binance.UID != next.Checkout.Binance.UID,
-		config.ProviderOKX:     current.OKX.APIKey != next.OKX.APIKey || current.OKX.APISecret != next.OKX.APISecret || current.OKX.Passphrase != next.OKX.Passphrase || current.Checkout.OKX.UID != next.Checkout.OKX.UID,
+		config.ProviderBinance: !current.BinanceEnabled() || current.Binance.APIKey != next.Binance.APIKey || current.Binance.APISecret != next.Binance.APISecret || current.Checkout.Binance.UID != next.Checkout.Binance.UID,
+		config.ProviderOKX:     !current.OKXEnabled() || current.OKX.APIKey != next.OKX.APIKey || current.OKX.APISecret != next.OKX.APISecret || current.OKX.Passphrase != next.OKX.Passphrase || current.Checkout.OKX.UID != next.Checkout.OKX.UID,
 		config.ProviderTON:     !current.TONEnabled() || current.TON.Address != next.TON.Address || current.TON.APIKey != next.TON.APIKey,
 	}
 	checks := verificationTargets(next)
@@ -529,6 +534,9 @@ func Validate(c *config.Config) error {
 	}
 	if c.TON.PollInterval < 2 || c.TON.PollInterval > 60 {
 		return fmt.Errorf("GRAM 到账查询间隔需在 2~60 秒之间")
+	}
+	if c.TON.LookbackBuffer < 1 || c.TON.LookbackBuffer > 60 {
+		return fmt.Errorf("GRAM 回看缓冲需在 1~60 分钟之间")
 	}
 	if len(c.Notify.RetryDelays) == 0 {
 		return fmt.Errorf("结果通知重试序列不能为空")

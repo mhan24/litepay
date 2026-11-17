@@ -46,6 +46,9 @@ type Client struct {
 }
 
 func New(base, key, receiver string) *Client {
+	if strings.TrimSpace(base) == "" {
+		base = "https://toncenter.com/api/v2"
+	}
 	a, _ := ParseAddress(receiver)
 	return &Client{base: strings.TrimRight(base, "/"), key: key, receiver: receiver, addr: a, http: httpx.NewClient(20*time.Second, false)}
 }
@@ -65,6 +68,9 @@ func (c *Client) get(ctx context.Context, method string, q url.Values, out any) 
 func (c *Client) requestJSON(ctx context.Context, base, method string, q url.Values, out any, enveloped bool) error {
 	if c.addr == nil {
 		return errors.New("GRAM 收款地址无效")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if !c.test {
 		requestBudget.Lock()
@@ -137,6 +143,9 @@ type rawTransaction struct {
 
 func (c *Client) decode(raw rawTransaction) (model.Transaction, uint64, error) {
 	var result model.Transaction
+	if c.addr == nil {
+		return result, 0, errors.New("GRAM 收款地址无效")
+	}
 	b, err := base64.StdEncoding.DecodeString(raw.Data)
 	if err != nil {
 		return result, 0, errors.New("交易 BOC 无效")
@@ -197,7 +206,7 @@ func (c *Client) decode(raw rawTransaction) (model.Transaction, uint64, error) {
 		result.Reason = "not_plain_deposit"
 		return result, lt, nil
 	}
-	if msg.Body != nil && msg.Body.BitsSize() > 0 {
+	if msg.Body != nil && (msg.Body.BitsSize() > 0 || msg.Body.RefsNum() > 0) {
 		s, err := msg.Body.BeginParse()
 		if err != nil {
 			return result, 0, err
@@ -223,6 +232,9 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 	if c.addr == nil {
 		return nil, errors.New("GRAM 收款地址无效")
 	}
+	if start.IsZero() || end.Before(start) {
+		return nil, errors.New("TON 查询时间范围无效")
+	}
 	var out []model.Transaction
 	q := url.Values{"limit": {"100"}, "archival": {"true"}}
 	seen := map[uint64]bool{}
@@ -232,8 +244,11 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 		if err := c.get(ctx, "getTransactions", q, &rows); err != nil {
 			return nil, err
 		}
-		if rows == nil {
+		if rows == nil || len(rows) > 100 {
 			return nil, errors.New("交易列表缺失")
+		}
+		if boundary > 0 && (len(rows) == 0 || rows[0].ID.LT != q.Get("lt") || rows[0].ID.Hash != q.Get("hash")) {
+			return nil, errors.New("TON 分页未返回请求的锚点")
 		}
 		if len(rows) == 0 {
 			return out, nil
@@ -250,7 +265,7 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 			}
 			previous = lt
 			if seen[lt] {
-				if i == 0 && lt == boundary {
+				if i == 0 && lt == boundary && raw.ID.Hash == q.Get("hash") {
 					continue
 				}
 				return nil, errors.New("交易分页重复")
@@ -266,6 +281,9 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 			}
 		}
 		if !progress {
+			if boundary > 0 && len(rows) == 1 {
+				return out, nil
+			}
 			return nil, errors.New("交易分页未推进")
 		}
 		if finished || len(rows) < 100 {

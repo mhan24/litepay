@@ -196,7 +196,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     </svg>
     <h2 id="ov-title">支付成功</h2>
     <p id="ov-desc">正在跳转回商户页面…</p>
-    <a class="review-link" id="ov-review" href="/pay/{{.TradeNo}}" hidden >查看订单状态</a>
+    <a class="review-link" id="ov-review" href="/pay/{{urlEscape .TradeNo}}" hidden >查看订单状态</a>
   </div>
 </dialog>
 

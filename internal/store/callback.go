@@ -14,9 +14,13 @@ import (
 // RetryCallback opens a new attempt budget, keeping lifetime attempts and all delivery logs.
 // The same trade/order/event identifiers remain the merchant's delivery idempotency key.
 func (s *Store) RetryCallback(ctx context.Context, tradeNo, operator, reason string, maxAttempts int) error {
+	operator = strings.TrimSpace(operator)
 	reason = strings.TrimSpace(reason)
 	if reason == "" || utf8.RuneCountInString(reason) > 300 || operator == "" {
 		return errors.New("请填写核对商城状态后的重试原因（1~300 字）")
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 5
 	}
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var o model.Order

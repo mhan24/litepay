@@ -33,7 +33,9 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 		return err
 	}
 	if receiver != job.Receiver {
-		return p.st.HistoricalScanFailure(ctx, job, true)
+		save, done := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
+		defer done()
+		return p.st.HistoricalScanFailure(save, job, true)
 	}
 	job, err = p.st.ReuseHistoricalCoverage(ctx, job)
 	if err != nil || job.State == "completed" {

@@ -288,6 +288,44 @@ class CompleteCancellationReviewDBTest(CancellationReviewDBTest):
         self.db.commit()
         self.assertEqual(tool.drill(self.path)['schema'],17)
 
+    def test_snapshot_cleanup_and_manifest_validation_edge_cases(self):
+        from unittest.mock import patch
+        missing = self.root / 'missing.db'
+        out = self.root / 'out.db'
+        with self.assertRaises(sqlite3.Error):
+            tool.snapshot(missing, out)
+        self.assertFalse(out.exists())
+
+        preexisting_sidecar = Path(str(out) + '.json')
+        preexisting_sidecar.write_text('keep-me')
+        with self.assertRaises(FileExistsError):
+            tool.snapshot(self.path, out)
+        self.assertFalse(out.exists())
+        self.assertEqual(preexisting_sidecar.read_text(), 'keep-me')
+
+        backup = self.root / 'valid-backup.db'
+        tool.snapshot(self.path, backup)
+        sidecar = Path(str(backup) + '.json')
+        sidecar.write_text('[]')
+        with self.assertRaises(ValueError):
+            tool.restore(backup, self.root / 'r1.db')
+        with self.assertRaises(ValueError):
+            tool.restore(backup, backup)
+
+        # Collision retry on gateway_recoveries.generation rotation.
+        tool.snapshot(self.path, self.root / 'valid-backup2.db')
+        old_gen = self.db.execute('SELECT generation FROM gateway_recoveries WHERE id=1').fetchone()[0]
+        restored = self.root / 'r2.db'
+        with patch.object(tool.secrets, 'token_hex', side_effect=[old_gen, 'b' * 32]):
+            tool.restore(self.root / 'valid-backup2.db', restored)
+        with sqlite3.connect(restored) as conn:
+            self.assertEqual(conn.execute('SELECT generation FROM gateway_recoveries WHERE id=1').fetchone()[0], 'b' * 32)
+
+        self.db.execute('UPDATE settings SET payload=NULL')
+        self.db.commit()
+        with self.assertRaises(ValueError):
+            tool.validate(self.path)
+
 
 if __name__ == '__main__':
     unittest.main()

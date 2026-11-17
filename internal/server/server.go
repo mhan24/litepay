@@ -48,6 +48,8 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 			}
 			return false
 		},
+		"urlEscape": url.PathEscape,
+		"queryEscape": url.QueryEscape,
 	}).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, err
@@ -72,7 +74,9 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		if strings.HasPrefix(mgr.Get().Server.BaseURL, "https://") {
 			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+		}
 		c.Next()
 	})
 	r.Use(requestLogger())
@@ -154,6 +158,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 
 		adm := adminRoot.Group("", h.AdminAuth())
 		adm.GET("", h.AdminDashboard)
+		adm.GET("/", h.AdminDashboard)
 		adm.GET("/operations", h.AdminOperations)
 		adm.GET("/orders", h.AdminOrders)
 		adm.GET("/orders/:trade_no", h.AdminOrderDetail)
@@ -183,8 +188,11 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 // externalURL 只允许绝对 HTTP(S) 地址进入页面链接和跳转脚本。
 func externalURL(raw string) string {
 	raw = strings.TrimSpace(raw)
+	if strings.ContainsAny(raw, "\r\n\t") {
+		return ""
+	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
 		u.User != nil {
 		return ""
 	}

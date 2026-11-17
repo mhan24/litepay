@@ -20,6 +20,7 @@ database:
 admin:
   path: "/admin"
   username: "admin"
+  # 留空将禁用后台管理；生产模式必须为 bcrypt 哈希（$2a$/$2b$/$2y$），禁止明文密码
   password: ""
   session_hours: 12
 log_level: "info"

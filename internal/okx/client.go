@@ -49,6 +49,8 @@ func (c *Client) UseTestTransport() {
 	c.requestInterval = 0
 }
 func (c *Client) AccountUID(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	body, err := c.get(ctx, "/api/v5/account/config", nil)
 	if err != nil {
 		return "", err
@@ -59,8 +61,11 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	if json.Unmarshal(body, &rows) != nil || len(rows) != 1 || rows[0].UID == "" {
 		return "", fmt.Errorf("OKX missing account UID")
 	}
-	c.receiver = string(rows[0].UID)
-	return c.receiver, nil
+	uid := string(rows[0].UID)
+	c.clockMu.Lock()
+	c.receiver = uid
+	c.clockMu.Unlock()
+	return uid, nil
 }
 
 // History 按 ts 分页读取充值历史：文档规定 after 返回「早于该 ts」的记录，因此每页以
@@ -69,7 +74,13 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Transaction, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if c.receiver == "" {
+	if start.IsZero() || end.Before(start) {
+		return nil, fmt.Errorf("OKX invalid history time range")
+	}
+	c.clockMu.RLock()
+	receiver := c.receiver
+	c.clockMu.RUnlock()
+	if receiver == "" {
 		if _, err := c.AccountUID(ctx); err != nil {
 			return nil, err
 		}
@@ -123,16 +134,19 @@ func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, er
 	if json.Unmarshal(body, &rows) != nil || rows == nil {
 		return nil, fmt.Errorf("OKX invalid deposit response")
 	}
+	c.clockMu.RLock()
+	receiver := c.receiver
+	c.clockMu.RUnlock()
 	out := []model.Transaction{}
 	seen := map[string]bool{}
 	for _, r := range rows {
 		ms, e := r.Time.Millis()
-		if e != nil || r.ID == "" || seen[string(r.ID)] {
+		if e != nil || ms >= after || r.ID == "" || strings.TrimSpace(string(r.Currency)) == "" || seen[string(r.ID)] {
 			return nil, fmt.Errorf("OKX invalid deposit evidence")
 		}
 		seen[string(r.ID)] = true
 		n, amountErr := r.Amount.SignedUnits()
-		t := model.Transaction{Provider: "okx", EventID: string(r.ID), Reference: string(r.Reference), Receiver: c.receiver, Currency: strings.ToUpper(string(r.Currency)), Units: n, OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
+		t := model.Transaction{Provider: "okx", EventID: string(r.ID), Reference: string(r.Reference), Receiver: receiver, Currency: strings.ToUpper(string(r.Currency)), Units: n, OccurredAt: time.UnixMilli(ms), State: model.Confirmed}
 		switch {
 		case amountErr != nil:
 			// 充值金额可达 8 位小数，支付域只有 6 位：保留原始金额与原因供后台核对，
@@ -156,6 +170,9 @@ func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, er
 	return out, nil
 }
 func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {
+	if c.apiKey == "" || c.apiSecret == "" || c.passphrase == "" {
+		return nil, fmt.Errorf("未配置 OKX API Key / Secret / Passphrase")
+	}
 	c.rateMu.Lock()
 	if delay := time.Until(c.nextRequest); delay > 0 {
 		timer := time.NewTimer(delay)
@@ -169,9 +186,6 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 	}
 	c.nextRequest = time.Now().Add(c.requestInterval)
 	c.rateMu.Unlock()
-	if c.apiKey == "" || c.apiSecret == "" || c.passphrase == "" {
-		return nil, fmt.Errorf("未配置 OKX API Key / Secret / Passphrase")
-	}
 
 	requestPath := path
 	if encoded := q.Encode(); encoded != "" {

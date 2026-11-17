@@ -17,7 +17,7 @@ func (c *Client) HistoryPage(ctx context.Context, cp model.TONScanCheckpoint) ([
 	}
 	q := url.Values{"limit": {"100"}, "archival": {"true"}}
 	var boundary uint64
-	if cp.LT != "" {
+	if cp.LT != "" || cp.Hash != "" {
 		var err error
 		boundary, err = strconv.ParseUint(cp.LT, 10, 64)
 		if err != nil || boundary == 0 || cp.Hash == "" {

@@ -21,6 +21,14 @@ func TestBEpusdtSignOfficialExample(t *testing.T) {
 	if !BEpusdtVerifyGeneric(params, token) {
 		t.Fatal("BEpusdtVerifyGeneric() rejected official example")
 	}
+	emptySigned := map[string]interface{}{
+		"order_id":  "20220201030210321",
+		"amount":    "42",
+		"signature": BEpusdtSignGeneric(params, ""),
+	}
+	if BEpusdtVerifyGeneric(emptySigned, "") || BEpusdtVerifyGeneric(emptySigned, "   ") {
+		t.Fatal("BEpusdtVerifyGeneric() accepted empty token")
+	}
 }
 
 func TestBEpusdtGenericSignaturesPreserveJSONTypes(t *testing.T) {

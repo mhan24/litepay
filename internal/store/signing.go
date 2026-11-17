@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -32,6 +33,10 @@ func findSigningKeyByPlaintext(db *gorm.DB, masterKey []byte, plainToken string)
 
 // InstallSigningKey pins existing rows once; future callbacks never read a mutable global key.
 func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, rotate bool) (uint, error) {
+	operator = strings.TrimSpace(operator)
+	if strings.TrimSpace(token) == "" || operator == "" {
+		return 0, errors.New("签名 Token 和操作人不能为空")
+	}
 	var key model.SigningKey
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		txStore := &Store{db: db, masterKey: s.masterKey}
@@ -67,7 +72,7 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 			if e := db.Model(&model.Callback{}).Where("signing_key_id = 0").Update("signing_key_id", old.ID).Error; e != nil {
 				return e
 			}
-			if rotate {
+			if rotate && token != currentValue {
 				if e := db.Model(&old).Update("retired_at", time.Now()).Error; e != nil {
 					return e
 				}
@@ -78,6 +83,12 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 			return e
 		}
 		if found {
+			if foundKey.RetiredAt != nil {
+				if e = db.Model(&foundKey).Update("retired_at", nil).Error; e != nil {
+					return e
+				}
+				foundKey.RetiredAt = nil
+			}
 			key = foundKey
 		} else {
 			storedToken := token

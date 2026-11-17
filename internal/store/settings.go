@@ -177,7 +177,7 @@ func (s *Store) HasMasterKey() bool {
 	return len(s.masterKey) == 32
 }
 
-func encryptSettingPayload(key []byte, payload string) (string, bool, error) {
+func encryptSettingPayload(key []byte, payload string, allowEncrypted bool) (string, bool, error) {
 	if strings.TrimSpace(payload) == "" || len(key) == 0 {
 		return payload, false, nil
 	}
@@ -191,7 +191,15 @@ func encryptSettingPayload(key []byte, payload string) (string, bool, error) {
 		if !ok || strings.TrimSpace(raw) == "" {
 			continue
 		}
-		enc, err := upgradeSecret(key, key, raw, field, false)
+		var (
+			enc string
+			err error
+		)
+		if allowEncrypted {
+			enc, err = upgradeSecret(key, key, raw, field, false)
+		} else {
+			enc, err = EncryptSecret(key, raw, field)
+		}
 		if err != nil {
 			return "", false, err
 		}
@@ -281,7 +289,7 @@ func rewriteSecrets(db *gorm.DB, oldKey, newKey []byte, rotate bool) (bool, erro
 				return false, err
 			}
 		}
-		encrypted, updated, err := encryptSettingPayload(newKey, payload)
+		encrypted, updated, err := encryptSettingPayload(newKey, payload, !rotate)
 		if err != nil {
 			return false, err
 		}
@@ -444,7 +452,7 @@ func (s *Store) SaveSettingPayload(ctx context.Context, payload, operator string
 	stored := payload
 	if s.HasMasterKey() {
 		var err error
-		stored, _, err = encryptSettingPayload(s.masterKey, payload)
+		stored, _, err = encryptSettingPayload(s.masterKey, payload, false)
 		if err != nil {
 			return err
 		}
@@ -491,7 +499,10 @@ func (s *Store) LoadCredential(ctx context.Context, name string) (*model.Credent
 
 // SaveCredential 保存或轮换系统凭据。
 func (s *Store) SaveCredential(ctx context.Context, row model.Credential) error {
-	if s.HasMasterKey() && !plainCredential(row.Name) && row.Value != "" && !IsEncryptedSecret(row.Value) {
+	if strings.TrimSpace(row.Name) == "" {
+		return errors.New("凭据名称不能为空")
+	}
+	if s.HasMasterKey() && !plainCredential(row.Name) && row.Value != "" {
 		enc, err := EncryptSecret(s.masterKey, row.Value, row.Name)
 		if err != nil {
 			return err

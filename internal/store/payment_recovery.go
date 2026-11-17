@@ -14,6 +14,7 @@ import (
 // ReconcilePayment can only consume already-validated, unclaimed evidence matching a stored
 // instruction within its original payment window. It never trusts a typed amount or screenshot.
 func (s *Store) ReconcilePayment(ctx context.Context, tradeNo, provider, eventID, operator, reason string) error {
+	operator = strings.TrimSpace(operator)
 	reason = strings.TrimSpace(reason)
 	if operator == "" || reason == "" || utf8.RuneCountInString(reason) > 300 {
 		return errors.New("请填写核对商城和真实到账后的补单原因（1~300 字）")
@@ -30,7 +31,8 @@ func (s *Store) ReconcilePayment(ctx context.Context, tradeNo, provider, eventID
 		if err := db.Where("provider = ? AND event_id = ?", provider, eventID).First(&t).Error; err != nil {
 			return err
 		}
-		if t.State != model.Confirmed || t.OrderID != nil || t.Units <= 0 || t.Provider == "ton" && t.MasterchainSeqno <= 0 {
+		validCurrency := (t.Provider == "ton" && t.Currency == "GRAM") || ((t.Provider == "binance" || t.Provider == "okx") && (t.Currency == "USDT" || t.Currency == "USDC"))
+		if t.State != model.Confirmed || t.OrderID != nil || t.Units <= 0 || t.Receiver == "" || !validCurrency || (t.Provider == "ton" && t.MasterchainSeqno <= 0) {
 			return errors.New("必须选择未认领、已确认且满足最终性的到账证据")
 		}
 		var candidates []model.PaymentAttempt

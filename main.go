@@ -39,10 +39,10 @@ func run() error {
 		return err
 	}
 	level := slog.LevelInfo
-	switch strings.ToLower(cfg.LogLevel) {
+	switch strings.ToLower(strings.TrimSpace(cfg.LogLevel)) {
 	case "debug":
 		level = slog.LevelDebug
-	case "warn":
+	case "warn", "warning":
 		level = slog.LevelWarn
 	case "error":
 		level = slog.LevelError
@@ -54,7 +54,7 @@ func run() error {
 	}
 	defer st.Close()
 	if strings.TrimSpace(*rotateFrom) != "" {
-		oldKey, err := store.LoadMasterKeyFromFile(*rotateFrom, cfg.Server.Production)
+		oldKey, err := store.LoadMasterKeyFromFile(strings.TrimSpace(*rotateFrom), cfg.Server.Production)
 		if err != nil {
 			return err
 		}
@@ -86,14 +86,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var workers sync.WaitGroup
-	for _, run := range []func(context.Context){poller.Run, notifier.Run} {
-		workers.Go(func() { run(ctx) })
+	for _, runFn := range []func(context.Context){poller.Run, notifier.Run} {
+		workers.Go(func() { runFn(ctx) })
 	}
 	srv := &http.Server{Addr: cfg.Server.Addr, Handler: engine, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
 	failures := make(chan error, 1)
 	go func() {
 		err := srv.ListenAndServe()
-		if !errors.Is(err, http.ErrServerClosed) {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			failures <- err
 		}
 		stop()

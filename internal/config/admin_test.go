@@ -20,7 +20,7 @@ func TestAdminPasswordPolicyAndSessionHours(t *testing.T) {
 		t.Fatalf("expected production plaintext password rejection, got: %v", err)
 	}
 
-	// 2. Production accepts $2a$, $2b$, and $2y$ bcrypt hashes.
+	// 2. Production accepts valid $2a$, $2b$, and $2y$ bcrypt hashes and rejects malformed $2 hashes.
 	for _, prefix := range []string{"$2a$", "$2b$", "$2y$"} {
 		c = Default()
 		c.Server.Production = true
@@ -33,6 +33,20 @@ func TestAdminPasswordPolicyAndSessionHours(t *testing.T) {
 		}
 		if err := c.normalize(); err != nil {
 			t.Fatalf("expected %s hash accepted in production, got: %v", prefix, err)
+		}
+	}
+	for _, badHash := range []string{"$2a$short", "$2y$not-valid-bcrypt-hash", "$2x$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"} {
+		c = Default()
+		c.Server.Production = true
+		c.Server.BaseURL = "https://pay.example.com"
+		c.Server.NotifyHosts = []string{"shop.example.com"}
+		c.Server.TrustedProxies = []string{"127.0.0.1"}
+		c.Admin.Password = badHash
+		if IsBcryptHash(c.Admin.Password) {
+			t.Fatalf("expected malformed hash %q to be rejected", badHash)
+		}
+		if err := c.normalize(); err == nil {
+			t.Fatalf("expected malformed hash %q to fail normalize", badHash)
 		}
 	}
 
@@ -109,5 +123,31 @@ func TestReadinessTokenMinimumLengthAtStartup(t *testing.T) {
 				t.Fatalf("token=%q alias=%v err=%v", token, alias, err)
 			}
 		}
+	}
+}
+
+func TestNormalizeWebRoutesOrderAndPortChecks(t *testing.T) {
+	c := Default()
+	c.Server.Production = false
+	c.Server.Addr = "[::]:9090"
+	c.Server.StoreURL = "http://127.0.0.1:9090/shop"
+	if err := c.normalize(); err == nil {
+		t.Fatal("expected StoreURL pointing to inferred IPv6 gateway port to be rejected")
+	}
+
+	c = Default()
+	c.Server.Production = false
+	c.Server.BaseURL = "https://pay.example.com"
+	c.Server.StoreURL = "https://pay.example.com:8443/shop"
+	if err := c.normalize(); err != nil {
+		t.Fatalf("expected different port on same host to be allowed as separate store site, got: %v", err)
+	}
+
+	c = Default()
+	c.Server.Production = false
+	c.Server.BaseURL = "https://pay.example.com"
+	c.Server.StoreURL = "https://pay.example.com:443/shop"
+	if err := c.normalize(); err == nil {
+		t.Fatal("expected default HTTPS port 443 matching gateway base_url to be rejected")
 	}
 }

@@ -339,6 +339,38 @@ func TestOrderSignedAPIRateLimitReplayAndLogThrottle(t *testing.T) {
 		t.Fatalf("expected replayed generation request to be rejected, got: %s", w.Body.String())
 	}
 
+	// Empty generation in cancel-sync-status must be rejected.
+	hbPayload := map[string]any{
+		"timestamp":             fmt.Sprint(time.Now().Unix()),
+		"source":                "sqlite",
+		"pending":               "0",
+		"failures":              "0",
+		"conflicts":             "0",
+		"missing":               "0",
+		"discovery_pending":     "0",
+		"discovery_lag_seconds": "0",
+		"generation":            "",
+		"healthy":               "true",
+		"replay_complete":       "true",
+	}
+	hbPayload["signature"] = sign.BEpusdtSignGeneric(hbPayload, mgr.Get().BEpusdt.APIToken)
+	hbRaw, _ := json.Marshal(hbPayload)
+	hbReq := httptest.NewRequest(http.MethodPost, "/api/v1/order/cancel-sync-status", bytes.NewReader(hbRaw))
+	hbReq.Header.Set("Content-Type", "application/json")
+	hbW := httptest.NewRecorder()
+	engine.ServeHTTP(hbW, hbReq)
+	if !strings.Contains(hbW.Body.String(), "invalid generation") {
+		t.Fatalf("expected empty generation heartbeat rejection, got: %s", hbW.Body.String())
+	}
+
+	// Non-object JSON body (like `null`) must be rejected with invalid_signature instead of crashing.
+	nullReq := httptest.NewRequest(http.MethodPost, "/api/v1/order/cancel-sync-generation", strings.NewReader("null"))
+	nullW := httptest.NewRecorder()
+	engine.ServeHTTP(nullW, nullReq)
+	if !strings.Contains(nullW.Body.String(), "signature verification failed") {
+		t.Fatalf("expected null JSON body rejection, got: %s", nullW.Body.String())
+	}
+
 	// 2. Signature failure rate limit (per IP) and log throttling (at most 1 Warn log per minute per IP with reason).
 	logBuf.Reset()
 	for i := range 15 {

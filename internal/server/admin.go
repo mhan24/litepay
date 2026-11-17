@@ -39,10 +39,12 @@ func (h *Handlers) currentAdmin() *adminAuth {
 	cfg := h.C()
 	if h.admin == nil {
 		h.admin = newAdminAuth(cfg)
-		if err := h.admin.loadEpoch(h.st); err != nil {
-			return h.admin
+		if h.st != nil {
+			if err := h.admin.loadEpoch(h.st); err != nil {
+				return h.admin
+			}
 		}
-	} else if h.admin.user != cfg.Admin.Username || h.admin.pass != cfg.Admin.Password {
+	} else if h.admin.user != cfg.Admin.Username || h.admin.pass != cfg.Admin.Password || h.admin.ttl != adminSessionTTL(cfg) {
 		next := newAdminAuth(cfg)
 		h.admin.mu.Lock()
 		next.epoch, next.st, next.epochRetryAt = h.admin.epoch, h.admin.st, h.admin.epochRetryAt
@@ -107,14 +109,7 @@ type loginAttempt struct {
 	until    time.Time
 }
 
-func newAdminAuth(cfg *config.Config) *adminAuth {
-	// PBKDF2 降低密码泄漏后离线猜测会话签名密钥的速度。修改账号或密码
-	// 会派生不同密钥，所有旧会话随之失效。
-	key, err := pbkdf2.Key(sha256.New, cfg.Admin.Username+"\x00"+cfg.Admin.Password,
-		[]byte(adminSessionSalt), adminSessionIterations, adminSessionKeyBytes)
-	if err != nil {
-		panic(fmt.Sprintf("派生后台会话密钥失败: %v", err))
-	}
+func adminSessionTTL(cfg *config.Config) time.Duration {
 	hours := cfg.Admin.SessionHours
 	if cfg.Server.Production && hours > 72 {
 		hours = 72
@@ -123,11 +118,22 @@ func newAdminAuth(cfg *config.Config) *adminAuth {
 	if ttl <= 0 {
 		ttl = 12 * time.Hour
 	}
+	return ttl
+}
+
+func newAdminAuth(cfg *config.Config) *adminAuth {
+	// PBKDF2 降低密码泄漏后离线猜测会话签名密钥的速度。修改账号或密码
+	// 会派生不同密钥，所有旧会话随之失效。
+	key, err := pbkdf2.Key(sha256.New, cfg.Admin.Username+"\x00"+cfg.Admin.Password,
+		[]byte(adminSessionSalt), adminSessionIterations, adminSessionKeyBytes)
+	if err != nil {
+		panic(fmt.Sprintf("派生后台会话密钥失败: %v", err))
+	}
 	return &adminAuth{
 		user:       cfg.Admin.Username,
 		pass:       cfg.Admin.Password,
 		key:        key,
-		ttl:        ttl,
+		ttl:        adminSessionTTL(cfg),
 		epoch:      1,
 		attempts:   make(map[string]*loginAttempt),
 		ipAttempts: make(map[string]*loginAttempt),
@@ -526,9 +532,13 @@ func (h *Handlers) AdminLoginPage(c *gin.Context) {
 			return
 		}
 	}
+	next := c.Query("next")
+	if !safeAdminNext(next, h.C().AdminPath()) {
+		next = ""
+	}
 	c.Header("Cache-Control", "no-store")
 	renderHTML(c, http.StatusOK, "admin_login.html", gin.H{
-		"Next":     c.Query("next"),
+		"Next":     next,
 		"Error":    c.Query("err"),
 		"SiteName": "LitePay 管理后台",
 	})
@@ -556,7 +566,11 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 			// Attempts are reserved atomically in allow, including concurrent requests.
 			auth.failed(ip, user)
 		}
-		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("管理员账号或密码错误，请核对后重试"))
+		errTarget := h.adminURL("/admin/login?err=") + url.QueryEscape("管理员账号或密码错误，请核对后重试")
+		if safeAdminNext(next, h.C().AdminPath()) {
+			errTarget += "&next=" + url.QueryEscape(next)
+		}
+		c.Redirect(http.StatusSeeOther, errTarget)
 		return
 	}
 	if !hasSession {
@@ -580,15 +594,22 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	c.Redirect(http.StatusSeeOther, next)
 }
 
-// AdminLogout POST /admin/logout
-func (h *Handlers) AdminLogout(c *gin.Context) {
+func (h *Handlers) logoutAdmin(c *gin.Context, cookiePath string) {
 	if _, err := h.currentAdmin().bumpEpoch(); err != nil {
 		c.String(http.StatusInternalServerError, "会话吊销失败，请稍后重试")
 		return
 	}
+	if cookiePath == "" {
+		cookiePath = h.C().AdminPath()
+	}
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(adminCookieName, "", -1, h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
+	c.SetCookie(adminCookieName, "", -1, cookiePath, "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
 	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login"))
+}
+
+// AdminLogout POST /admin/logout
+func (h *Handlers) AdminLogout(c *gin.Context) {
+	h.logoutAdmin(c, h.C().AdminPath())
 }
 
 // -----------------------------------------------------------------------------
@@ -696,9 +717,8 @@ func verificationMessage(checks []settings.AccountVerification) (string, bool) {
 // AdminAccountSave updates credentials after reauthentication.
 func (h *Handlers) AdminAccountSave(c *gin.Context) {
 	fail := func(msg string) {
-		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape(msg)+"&t=err")
+		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?view=account&msg=")+url.QueryEscape(msg)+"&t=err")
 	}
-	auth := h.currentAdmin()
 	if !h.reauthenticate(c) {
 		fail("当前密码错误或验证过于频繁，请重新登录后重试")
 		return
@@ -728,11 +748,11 @@ func (h *Handlers) AdminAccountSave(c *gin.Context) {
 		value := string(hash)
 		p.AdminPasswordHash = &value
 	}
-	if err := h.cfg.Update(c.Request.Context(), p, auth.user); err != nil {
+	if err := h.cfg.Update(c.Request.Context(), p, c.GetString("admin_user")); err != nil {
 		fail(err.Error())
 		return
 	}
-	h.AdminLogout(c)
+	h.logoutAdmin(c, "")
 }
 
 // AdminSiteSave changes the public redirect and admin entry after reauthentication.
@@ -740,7 +760,6 @@ func (h *Handlers) AdminSiteSave(c *gin.Context) {
 	fail := func(msg string) {
 		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?view=account&msg=")+url.QueryEscape(msg)+"&t=err")
 	}
-	auth := h.currentAdmin()
 	if !h.reauthenticate(c) {
 		fail("当前密码错误或验证过于频繁，请重新登录后重试")
 		return
@@ -753,13 +772,11 @@ func (h *Handlers) AdminSiteSave(c *gin.Context) {
 		return
 	}
 	oldRoot := h.C().AdminPath()
-	if err := h.cfg.Update(c.Request.Context(), settings.Patch{AdminPath: &root, StoreURL: &storeURL}, auth.user); err != nil {
+	if err := h.cfg.Update(c.Request.Context(), settings.Patch{AdminPath: &root, StoreURL: &storeURL}, c.GetString("admin_user")); err != nil {
 		fail(err.Error())
 		return
 	}
-	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(adminCookieName, "", -1, oldRoot, "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
-	h.AdminLogout(c)
+	h.logoutAdmin(c, oldRoot)
 }
 
 // AdminRotateToken POST /admin/settings/token —— 服务端生成新 Token，
@@ -996,7 +1013,11 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 		h.renderAdminError(c, err)
 		return
 	}
-	renderHTML(c, 200, "admin_dashboard.html", gin.H{"CancellationReviewQueue": cancellationQueue, "Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "Queues": queues, "CancelHealth": cancelHealth, "CancelWarning": cancelWarning, "CancelRequired": h.C().Server.CancelSyncRequired, "ProviderHealths": h.providerHealths(c), "BinanceUsage": h.poller.BinanceUsage(), "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
+	var binanceUsage any
+	if h.poller != nil {
+		binanceUsage = h.poller.BinanceUsage()
+	}
+	renderHTML(c, 200, "admin_dashboard.html", gin.H{"CancellationReviewQueue": cancellationQueue, "Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "Queues": queues, "CancelHealth": cancelHealth, "CancelWarning": cancelWarning, "CancelRequired": h.C().Server.CancelSyncRequired, "ProviderHealths": h.providerHealths(c), "BinanceUsage": binanceUsage, "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
 }
 func (h *Handlers) AdminOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
@@ -1017,6 +1038,14 @@ func (h *Handlers) AdminOrders(c *gin.Context) {
 	}
 	renderHTML(c, 200, "admin_orders.html", gin.H{"Base": h.adminBase(c, "orders", "订单"), "Orders": orders, "Page": page, "Prev": max(1, page-1), "Next": page + 1, "Query": c.Query("q")})
 }
+// logger returns the configured logger or slog.Default when unset (e.g., direct handler tests).
+func (h *Handlers) logger() *slog.Logger {
+	if h.log != nil {
+		return h.log
+	}
+	return slog.Default()
+}
+
 func (h *Handlers) AdminCloseOrder(c *gin.Context) {
 	no := c.Param("trade_no")
 	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
@@ -1024,7 +1053,7 @@ func (h *Handlers) AdminCloseOrder(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.log.Info("管理员关闭订单", "trade_id", no, "operator", c.GetString("admin_user"))
+	h.logger().Info("管理员关闭订单", "trade_id", no, "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("订单已关闭"))
 }
 
@@ -1098,11 +1127,7 @@ func (h *Handlers) AdminIntegrationReveal(c *gin.Context) {
 	}
 
 	operator := c.GetString("admin_user")
-	if h.log != nil {
-		h.log.Warn("管理员查看完整 BEpusdt API Token", "operator", operator, "ip", c.ClientIP())
-	} else {
-		slog.Warn("管理员查看完整 BEpusdt API Token", "operator", operator, "ip", c.ClientIP())
-	}
+	h.logger().Warn("管理员查看完整 BEpusdt API Token", "operator", operator, "ip", c.ClientIP())
 	renderHTML(c, 200, "admin_integration.html", gin.H{
 		"Base":               h.adminBase(c, "integration", "接入信息"),
 		"BaseURL":            h.C().Server.BaseURL,
@@ -1120,7 +1145,7 @@ func (h *Handlers) AdminRetryNotify(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.log.Warn("管理员重新通知商城", "trade_id", no, "operator", c.GetString("admin_user"))
+	h.logger().Warn("管理员重新通知商城", "trade_id", no, "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("商户通知已重新入队，将按原订单号发送"))
 }
 
@@ -1145,7 +1170,7 @@ func (h *Handlers) AdminReconcilePayment(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.log.Warn("管理员按已验证到账证据补单", "trade_id", no, "operator", c.GetString("admin_user"))
+	h.logger().Warn("管理员按已验证到账证据补单", "trade_id", no, "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("补单核销已完成，并已创建商户通知任务"))
 }
 
@@ -1178,7 +1203,7 @@ func (h *Handlers) AdminRecordRefund(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.log.Warn("管理员登记取消到账的外部退款凭证", "trade_id", no, "operator", c.GetString("admin_user"))
+	h.logger().Warn("管理员登记取消到账的外部退款凭证", "trade_id", no, "operator", c.GetString("admin_user"))
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("退款凭证已保存，请确认原付款账户已收到退款"))
 }
 

@@ -164,4 +164,17 @@ func TestSettlementPhaseAndFinalCloseAreDistinct(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "订单已取消") {
 		t.Fatal(w.Body.String())
 	}
+
+	// Expired PENDING order never renders "0 USD" as a zero-selected-amount block.
+	if _, err := st.Create(ctx, model.Order{TradeNo: "pending-expired", OutTradeNo: "pending-expired", OriginUnits: 12340000, ExpiresAt: time.Now().Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	w = getRequest(engine, "/pay/pending-expired")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "12.34<span>USD</span>") {
+		t.Fatalf("expected expired pending order to render origin amount, got code=%d body=%s", w.Code, w.Body.String())
+	}
+	w = getRequest(engine, "/api/order/status?order_id=pending-expired")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"amount":""`) {
+		t.Fatalf("expected empty selected amount in status JSON for unselected order, got code=%d body=%s", w.Code, w.Body.String())
+	}
 }

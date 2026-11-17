@@ -57,27 +57,38 @@ func Parse(raw string) (int64, error) {
 	return n*Scale + f, nil
 }
 func Text(units int64, precision int) string {
-	if units < 0 {
-		return "-" + Text(-units, precision)
-	}
 	if precision < 0 || precision > 6 {
 		precision = 6
 	}
-	whole := strconv.FormatInt(units/Scale, 10)
+	neg := units < 0
+	var u uint64
+	if neg {
+		u = uint64(-(units + 1)) + 1
+	} else {
+		u = uint64(units)
+	}
+	scale := uint64(Scale)
+	whole := strconv.FormatUint(u/scale, 10)
+	if neg {
+		whole = "-" + whole
+	}
 	if precision == 0 {
 		return whole
 	}
-	frac := strconv.FormatInt(Scale+units%Scale, 10)[1:]
+	frac := strconv.FormatUint(scale+u%scale, 10)[1:]
 	return whole + "." + frac[:precision]
 }
 func String(units int64) string {
 	s := strings.TrimRight(strings.TrimRight(Text(units, 6), "0"), ".")
-	if s == "" {
+	if s == "" || s == "-" {
 		return "0"
 	}
 	return s
 }
 func Quantum(precision int) int64 {
+	if precision < 0 || precision > 6 {
+		precision = 6
+	}
 	q := Scale
 	for range precision {
 		q /= 10

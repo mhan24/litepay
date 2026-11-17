@@ -42,4 +42,13 @@ func TestSelectionEndpointRateLimitAndBoundedMemory(t *testing.T) {
 	if ok, _ := l.allow("after-expiry", 1, now.Add(2*time.Minute)); !ok {
 		t.Fatal("expired limiter entries not reclaimed")
 	}
+	// Even when cleanup interval hasn't elapsed yet, an entry-cap hit reclaims expired keys first.
+	l2 := newSelectionLimiter()
+	l2.cleanup = now.Add(10 * time.Minute)
+	for i := range 20000 {
+		l2.entries[string(rune(i+1))] = selectionWindow{count: 1, until: now.Add(-time.Second)}
+	}
+	if ok, _ := l2.allow("fresh-key", 1, now); !ok {
+		t.Fatal("expired entries blocked new key before cleanup interval")
+	}
 }

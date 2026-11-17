@@ -336,6 +336,9 @@ func TestNotifierRetryDelayLowerBoundAndRunErrorLogging(t *testing.T) {
 	if got := retryDelaySeconds(delays, 99); got != 30 {
 		t.Fatalf("expected upper bound delay 30 for attempts=99, got %d", got)
 	}
+	if got := retryDelaySeconds([]int{0, -3}, 1); got != 5 {
+		t.Fatalf("expected fallback delay 5 for non-positive delay, got %d", got)
+	}
 
 	ctx := context.Background()
 	st, err := store.Open(":memory:")

@@ -55,13 +55,15 @@ func (m *Monitor) UseTestPriceSource(endpoint string) error {
 	if err != nil || u.Scheme != "http" || !net.ParseIP(u.Hostname()).IsLoopback() || u.User != nil {
 		return errors.New("行情测试源必须为本机 HTTP 地址")
 	}
+	m.mu.Lock()
 	m.priceURL = endpoint
 	m.http = httpx.NewClient(8*time.Second, true)
+	m.mu.Unlock()
 	return nil
 }
 
 func positiveDecimal(raw string) (*big.Rat, error) {
-	if len(raw) == 0 || len(raw) > 40 || strings.Count(raw, ".") > 1 {
+	if len(raw) == 0 || len(raw) > 40 || strings.Count(raw, ".") > 1 || strings.HasPrefix(raw, ".") || strings.HasSuffix(raw, ".") {
 		return nil, errors.New("行情价格无效")
 	}
 	for _, r := range raw {
@@ -78,12 +80,20 @@ func positiveDecimal(raw string) (*big.Rat, error) {
 
 func (m *Monitor) CheckPrice(ctx context.Context) error {
 	started := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.priceURL+"&nonce="+strconv.FormatInt(started.UnixNano(), 10), nil)
+	m.mu.RLock()
+	priceURL := m.priceURL
+	httpClient := m.http
+	m.mu.RUnlock()
+	sep := "?"
+	if strings.Contains(priceURL, "?") {
+		sep = "&"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, priceURL+sep+"nonce="+strconv.FormatInt(started.UnixNano(), 10), nil)
 	var bid, ask, price string
 	if err == nil {
 		var status int
 		var body []byte
-		status, body, err = m.http.Do(req)
+		status, body, err = httpClient.Do(req)
 		if err == nil && status != 200 {
 			err = fmt.Errorf("行情 HTTP %d", status)
 		}
@@ -131,6 +141,12 @@ func (m *Monitor) CheckPrice(ctx context.Context) error {
 }
 
 func (m *Monitor) CheckBalance(ctx context.Context, cli *Client) error {
+	if cli == nil {
+		m.mu.Lock()
+		m.snapshot.BalanceError = "GRAM 余额检测失败"
+		m.mu.Unlock()
+		return errors.New("GRAM 客户端未初始化")
+	}
 	started := time.Now()
 	b, err := cli.Balance(ctx)
 	m.mu.Lock()

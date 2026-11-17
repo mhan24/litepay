@@ -8,6 +8,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -266,9 +267,8 @@ func Load(path string) (*Config, error) {
 
 // normalize 补齐派生字段并做基本校验。
 func (c *Config) normalize() error {
-	if err := c.ValidateWebRoutes(); err != nil {
-		return err
-	}
+	c.Admin.Path = strings.TrimSpace(c.Admin.Path)
+	c.Server.StoreURL = strings.TrimSpace(c.Server.StoreURL)
 	c.Server.BaseURL = strings.TrimRight(strings.TrimSpace(c.Server.BaseURL), "/")
 	if c.Server.BaseURL == "" {
 		c.Server.BaseURL = "http://127.0.0.1" + portSuffix(c.Server.Addr)
@@ -281,13 +281,19 @@ func (c *Config) normalize() error {
 		c.Server.NotifyHosts[i] = host
 	}
 	base, err := url.Parse(c.Server.BaseURL)
-	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") {
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") {
 		return fmt.Errorf("server.base_url 必须是无路径、查询参数和用户信息的 HTTP(S) 站点地址")
 	}
 	if c.Server.Production && (base.Scheme != "https" || len(c.Server.NotifyHosts) == 0) {
 		return fmt.Errorf("production 模式要求 HTTPS base_url 和非空 notify_hosts")
 	}
-	c.Binance.BaseURL = strings.TrimRight(c.Binance.BaseURL, "/")
+	if err := c.ValidateWebRoutes(); err != nil {
+		return err
+	}
+	c.Binance.BaseURL = strings.TrimRight(strings.TrimSpace(c.Binance.BaseURL), "/")
+	if c.Binance.BaseURL == "" {
+		c.Binance.BaseURL = "https://api.binance.com"
+	}
 	if c.Binance.PollInterval < 1 {
 		c.Binance.PollInterval = 4
 	}
@@ -312,6 +318,16 @@ func (c *Config) normalize() error {
 	}
 	if c.OKX.LookbackBuffer <= 0 {
 		c.OKX.LookbackBuffer = 2
+	}
+	c.TON.BaseURL = strings.TrimRight(strings.TrimSpace(c.TON.BaseURL), "/")
+	if c.TON.BaseURL == "" {
+		c.TON.BaseURL = "https://toncenter.com/api/v2"
+	}
+	if c.TON.PollInterval < 1 {
+		c.TON.PollInterval = 5
+	}
+	if c.TON.LookbackBuffer <= 0 {
+		c.TON.LookbackBuffer = 2
 	}
 	c.Checkout.Binance.UID = strings.TrimSpace(c.Checkout.Binance.UID)
 	c.Checkout.OKX.UID = strings.TrimSpace(c.Checkout.OKX.UID)
@@ -343,6 +359,7 @@ func (c *Config) normalize() error {
 	if c.Notify.TimeoutSeconds <= 0 {
 		c.Notify.TimeoutSeconds = 10
 	}
+	c.Admin.Username = strings.TrimSpace(c.Admin.Username)
 	if c.Admin.Username == "" {
 		c.Admin.Username = "admin"
 	}
@@ -358,9 +375,14 @@ func (c *Config) normalize() error {
 	if c.Admin.SessionHours > 720 {
 		return fmt.Errorf("admin.session_hours 需在 1~720 小时之间")
 	}
+	if strings.TrimSpace(c.Admin.Password) == "" {
+		c.Admin.Password = ""
+	}
 	if c.Admin.Password != "" {
 		if IsBcryptHash(c.Admin.Password) {
 			// bcrypt 哈希密码（$2a$ / $2b$ / $2y$）
+		} else if strings.HasPrefix(c.Admin.Password, "$2") {
+			return fmt.Errorf("admin.password bcrypt 哈希格式无效")
 		} else {
 			if c.Server.Production {
 				return fmt.Errorf("production 模式要求 admin.password 必须为 bcrypt 哈希密码，禁止明文密码")
@@ -382,9 +404,11 @@ func (c *Config) normalize() error {
 	return nil
 }
 
-// IsBcryptHash 判断密码配置是否为 bcrypt 哈希（支持 $2a$、$2b$、$2y$ 前缀）。
+var bcryptHashPattern = regexp.MustCompile(`^\$2[aby]\$(?:0[4-9]|[12][0-9]|3[01])\$[./A-Za-z0-9]{53}$`)
+
+// IsBcryptHash 判断密码配置是否为合法的 60 位 bcrypt 哈希（支持 $2a$、$2b$、$2y$ 前缀，cost 04~31）。
 func IsBcryptHash(s string) bool {
-	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
+	return bcryptHashPattern.MatchString(s)
 }
 
 // AdminPath returns the configured mount point; existing installations retain /admin.
@@ -410,15 +434,35 @@ func (c *Config) ValidateWebRoutes() error {
 	}
 	if c.Server.StoreURL != "" {
 		u, err := url.Parse(c.Server.StoreURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || strings.ContainsAny(c.Server.StoreURL, "\r\n") {
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || strings.ContainsAny(c.Server.StoreURL, "\r\n") {
 			return fmt.Errorf("server.store_url 必须是无用户信息的 HTTP(S) 商店地址")
 		}
-		base, _ := url.Parse(c.Server.BaseURL)
-		if base != nil && strings.EqualFold(u.Host, base.Host) {
+		baseRaw := strings.TrimRight(strings.TrimSpace(c.Server.BaseURL), "/")
+		if baseRaw == "" {
+			baseRaw = "http://127.0.0.1" + portSuffix(c.Server.Addr)
+		}
+		base, _ := url.Parse(baseRaw)
+		if base != nil && sameSiteHost(u, base) {
 			return fmt.Errorf("server.store_url 必须指向网关以外的商店站点")
 		}
 	}
 	return nil
+}
+
+func sameSiteHost(a, b *url.URL) bool {
+	if !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	portOf := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			if (u.Scheme == "http" && p == "80") || (u.Scheme == "https" && p == "443") {
+				return ""
+			}
+			return p
+		}
+		return ""
+	}
+	return portOf(a) == portOf(b)
 }
 
 // BinanceEnabled 是否同时具备只读查询凭据和站内转账收款 UID。
@@ -452,10 +496,11 @@ func (c *Config) ProviderEnabled(provider string) bool {
 
 // ProviderInterval 返回指定平台的查询间隔。
 func (c *Config) ProviderInterval(provider string) int {
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == ProviderTON {
 		return c.TON.PollInterval
 	}
-	if strings.EqualFold(provider, ProviderOKX) {
+	if provider == ProviderOKX {
 		return c.OKX.PollInterval
 	}
 	return c.Binance.PollInterval
@@ -463,10 +508,11 @@ func (c *Config) ProviderInterval(provider string) int {
 
 // ProviderLookback 返回指定通道的订单时间回看缓冲。
 func (c *Config) ProviderLookback(provider string) int {
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == ProviderTON {
 		return c.TON.LookbackBuffer
 	}
-	if strings.EqualFold(provider, ProviderOKX) {
+	if provider == ProviderOKX {
 		return c.OKX.LookbackBuffer
 	}
 	return c.Binance.LookbackBuffer
@@ -494,8 +540,8 @@ func (c *Config) CurrencyEnabled(cur string) bool {
 func (c *Config) AdminEnabled() bool { return c.Admin.Password != "" }
 
 func portSuffix(addr string) string {
-	if i := strings.LastIndex(addr, ":"); i >= 0 {
-		return addr[i:]
+	if _, port, err := net.SplitHostPort(strings.TrimSpace(addr)); err == nil && port != "" {
+		return ":" + port
 	}
 	return ":8080"
 }
@@ -506,6 +552,7 @@ func (c *Config) TONEnabled() bool {
 
 // FilterProviderCurrencies keeps each currency within its supported payment channels.
 func FilterProviderCurrencies(provider string, currencies []string) []string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	out := []string{}
 	for _, currency := range NormalizeCurrencies(currencies) {
 		if provider == ProviderTON && currency == "GRAM" || (provider == ProviderBinance || provider == ProviderOKX) && (currency == "USDT" || currency == "USDC") {
@@ -516,6 +563,7 @@ func FilterProviderCurrencies(provider string, currencies []string) []string {
 }
 
 func (c *Config) ProviderCurrencies(provider string) []string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	var currencies []string
 	switch provider {
 	case ProviderBinance:
@@ -534,6 +582,7 @@ func (c *Config) ProviderCurrencies(provider string) []string {
 }
 
 func (c *Config) ProviderCurrency(provider, currency string) bool {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
 	for _, v := range c.ProviderCurrencies(provider) {
 		if v == currency {
 			return true

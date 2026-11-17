@@ -11,7 +11,8 @@ RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S -g 10001 litepay \
     && adduser -S -D -H -u 10001 -G litepay litepay \
     && mkdir -p /app/data \
-    && chown -R litepay:litepay /app
+    && chown -R litepay:litepay /app \
+    && chmod 0700 /app/data
 ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=builder --chown=litepay:litepay --chmod=0755 /out/litepay /app/litepay

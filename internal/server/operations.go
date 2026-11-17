@@ -7,6 +7,7 @@ import (
 	"litepay/internal/sign"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,7 +22,7 @@ func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
 		h.bepusdtSigFail(c, "invalid_signature", "signature verification failed")
 		return
 	}
-	text := func(key string) string { v, _ := body[key].(string); return v }
+	text := func(key string) string { v, _ := body[key].(string); return strings.TrimSpace(v) }
 	now := time.Now()
 	stamp, err := strconv.ParseInt(text("timestamp"), 10, 64)
 	if err != nil || stamp < now.Unix()-60 || stamp > now.Unix()+10 {
@@ -46,11 +47,15 @@ func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
 			return
 		}
 	}
+	generation := text("generation")
+	if generation == "" {
+		h.bepusdtFail(c, "invalid generation")
+		return
+	}
 	if h.replays != nil && !h.replays.accept("cancel-sync-status", body, now) {
 		h.bepusdtFail(c, "replayed health report")
 		return
 	}
-	generation := text("generation")
 	report := model.IntegrationHealth{DiscoveryPending: counts[4], DiscoveryLagSeconds: counts[5], Generation: generation, Missing: counts[3], Name: "dujiao_cancel_sync", Source: source, ReportedAt: stamp, Healthy: text("healthy") == "true", Pending: counts[0], Failures: counts[1], Conflicts: counts[2]}
 	if err = h.st.AcknowledgeRecovery(c.Request.Context(), generation, text("replay_complete") == "true", report); err != nil {
 		h.bepusdtFail(c, "health write failed")
@@ -59,13 +64,23 @@ func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
 	c.JSON(200, bepusdtResponse{StatusCode: 200, Message: "success"})
 }
 func (h *Handlers) AdminOperations(c *gin.Context) {
-	stats, err := h.st.QueueStats(c.Request.Context())
+	ctx := c.Request.Context()
+	stats, err := h.st.QueueStats(ctx)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "queue metrics unavailable"})
 		return
 	}
-	health, _ := h.st.IntegrationHealth(c.Request.Context())
-	c.JSON(200, gin.H{"recovery": func() any { r, _ := h.st.Recovery(c.Request.Context()); return r }(), "payment_operations_ready": !h.paymentOperationsBlocked(c), "queues": stats, "cancel_sync": health, "binance": h.poller.BinanceUsage(), "cancel_sync_required": h.C().Server.CancelSyncRequired, "production": h.C().Server.Production, "providers": h.providerHealths(c)})
+	recovery, recErr := h.st.Recovery(ctx)
+	if recErr != nil {
+		c.JSON(503, gin.H{"error": "recovery state unavailable"})
+		return
+	}
+	health, _ := h.st.IntegrationHealth(ctx)
+	var binanceUsage any
+	if h.poller != nil {
+		binanceUsage = h.poller.BinanceUsage()
+	}
+	c.JSON(200, gin.H{"recovery": recovery, "payment_operations_ready": !h.paymentOperationsBlocked(c), "queues": stats, "cancel_sync": health, "binance": binanceUsage, "cancel_sync_required": h.C().Server.CancelSyncRequired, "production": h.C().Server.Production, "providers": h.providerHealths(c)})
 }
 
 func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
@@ -81,7 +96,7 @@ func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
 	}
 	now := time.Now()
 	stamp, _ := body["timestamp"].(string)
-	at, err := strconv.ParseInt(stamp, 10, 64)
+	at, err := strconv.ParseInt(strings.TrimSpace(stamp), 10, 64)
 	if err != nil || at < now.Unix()-60 || at > now.Unix()+10 {
 		h.bepusdtFail(c, "stale generation request")
 		return
@@ -117,9 +132,10 @@ func (h *Handlers) CancellationReviewStatus(c *gin.Context) {
 		return
 	}
 	now := time.Now()
-	text := func(k string) string { v, _ := body[k].(string); return v }
+	text := func(k string) string { v, _ := body[k].(string); return strings.TrimSpace(v) }
 	at, err := strconv.ParseInt(text("timestamp"), 10, 64)
-	if err != nil || at < now.Unix()-60 || at > now.Unix()+10 || text("trade_id") == "" || text("order_id") == "" || len(text("trade_id")) > 128 || len(text("order_id")) > 128 {
+	tradeID, orderID := text("trade_id"), text("order_id")
+	if err != nil || at < now.Unix()-60 || at > now.Unix()+10 || tradeID == "" || orderID == "" || len(tradeID) > 128 || len(orderID) > 128 {
 		h.bepusdtFail(c, "invalid review request")
 		return
 	}
@@ -127,10 +143,10 @@ func (h *Handlers) CancellationReviewStatus(c *gin.Context) {
 		h.bepusdtFail(c, "replayed review request")
 		return
 	}
-	review, err := h.st.CancellationReviewByReference(c.Request.Context(), text("trade_id"), text("order_id"))
+	review, err := h.st.CancellationReviewByReference(c.Request.Context(), tradeID, orderID)
 	if err != nil {
 		h.bepusdtFail(c, "review unavailable")
 		return
 	}
-	c.JSON(200, bepusdtResponse{StatusCode: 200, Message: "success", Data: gin.H{"trade_id": text("trade_id"), "order_id": text("order_id"), "generation": review.Generation, "refund_recorded": review.Current(), "cancellation_review_status": review.Status()}})
+	c.JSON(200, bepusdtResponse{StatusCode: 200, Message: "success", Data: gin.H{"trade_id": tradeID, "order_id": orderID, "generation": review.Generation, "refund_recorded": review.Current(), "cancellation_review_status": review.Status()}})
 }

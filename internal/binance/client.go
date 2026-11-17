@@ -37,6 +37,9 @@ type Client struct {
 
 // New 创建客户端。
 func New(apiKey, apiSecret, baseURL string, recvWindow, limit int) *Client {
+	if recvWindow <= 0 || recvWindow > 60000 {
+		recvWindow = 5000
+	}
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
@@ -225,7 +228,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 				t.State = model.Rejected
 				t.Reason = "invalid_amount"
 				t.RawAmount = joinRawAmounts(string(d.Amount), string(fund.Amount))
-			case top == -fundUnits && top != 0:
+			case top < 0 && top == -fundUnits:
 				// 出账转账：顶层带负号、明细为正幅度。方向拒绝，不是金额冲突。
 				t.State = model.Rejected
 				t.Reason = "not_incoming_payment"
@@ -249,7 +252,7 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 			continue
 		}
 		t.Units = n
-		if t.State == model.Confirmed && (n <= 0 || (d.Type != "PAY" && d.Type != "C2C") || t.Receiver == "") {
+		if t.State == model.Confirmed && (n <= 0 || (d.Type != "PAY" && d.Type != "C2C") || t.Receiver == "" || t.Currency == "") {
 			// 只认收款方向的 PAY / C2C：付款方向金额为负，退款与提现不是客户付款。
 			t.State = model.Rejected
 			t.Reason = "not_incoming_payment"

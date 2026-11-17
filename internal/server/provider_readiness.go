@@ -75,6 +75,14 @@ type providerHealth struct {
 
 func (h *Handlers) providerState(c *gin.Context, cfg *config.Config, provider string) providerHealth {
 	state := providerHealth{Provider: provider, Configured: cfg.ProviderEnabled(provider)}
+	if h.poller == nil {
+		if state.Configured {
+			state.Reason = "收款扫描器尚未启动"
+		} else {
+			state.Reason = "平台未启用"
+		}
+		return state
+	}
 	ready, err := h.poller.ProviderReady(c.Request.Context(), cfg, provider)
 	switch {
 	case !state.Configured:

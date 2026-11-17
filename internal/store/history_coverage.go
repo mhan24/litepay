@@ -14,6 +14,11 @@ func (s *Store) ReuseHistoricalCoverage(ctx context.Context, job model.Historica
 	if !job.Automatic || job.LT != "" {
 		return job, nil
 	}
+	job.Cursor = normalizeTime(job.Cursor)
+	job.To = normalizeTime(job.To)
+	job.CoverageAfter = normalizeTime(job.CoverageAfter)
+	job.RequiredAfter = normalizeTime(job.RequiredAfter)
+	job.CreatedAt = normalizeTime(job.CreatedAt)
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		original := job.Cursor
 		required := job.RequiredAfter
@@ -63,6 +68,11 @@ func (s *Store) UncoveredChunkEnd(ctx context.Context, job model.HistoricalScan,
 	if !job.Automatic || job.LT != "" {
 		return end, nil
 	}
+	job.Cursor = normalizeTime(job.Cursor)
+	job.CoverageAfter = normalizeTime(job.CoverageAfter)
+	job.RequiredAfter = normalizeTime(job.RequiredAfter)
+	job.CreatedAt = normalizeTime(job.CreatedAt)
+	end = normalizeTime(end)
 	required := job.RequiredAfter
 	if required.IsZero() {
 		required = job.CoverageAfter

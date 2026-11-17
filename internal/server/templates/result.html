@@ -56,7 +56,7 @@
     <p>该订单自动结算已结束，请返回商户页面查看订单状态。<br>如已付款，请联系商户客服核对处理。</p>
     {{end}}
 
-    {{if .CancellationReview}}{{range .ReviewAmounts}}<div class="amount">{{.}}</div>{{end}}{{else}}<div class="amount">{{.Amount}}<span>{{.Currency}}</span></div>{{end}}
+    {{if .CancellationReview}}{{range .ReviewAmounts}}<div class="amount">{{.}}</div>{{end}}{{else if .Amount}}<div class="amount">{{.Amount}}<span>{{.Currency}}</span></div>{{else}}<div class="amount">{{.OriginMoney}}<span>USD</span></div>{{end}}
     <div class="meta">
       <div><span>商品名称</span><b>{{if .Name}}{{.Name}}{{else}}未填写{{end}}</b></div>
       <div><span>商户订单号</span><b class="mono">{{.OutTradeNo}}</b></div>

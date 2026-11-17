@@ -22,7 +22,7 @@
 
     <section class="card"><div class="card-b">
       <h2>队列与取消同步</h2>
-      {{if .Queues.CancellationReviewWaiting}}<p class="banner" role="alert">{{.Queues.CancellationReviewWaiting}} 笔取消后到账待核对或退款，请进入对应订单详情登记退款凭证。</p>{{range .CancellationReviewQueue}}<p class="wrap-anywhere" ><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.TradeNo}}</a> · {{.Provider}} / {{.EventID}} · 待核对退款</p>{{end}}{{end}}
+      {{if .Queues.CancellationReviewWaiting}}<p class="banner" role="alert">{{.Queues.CancellationReviewWaiting}} 笔取消后到账待核对或退款，请进入对应订单详情登记退款凭证。</p>{{range .CancellationReviewQueue}}<p class="wrap-anywhere" ><a href="{{adminPath}}/orders/{{urlEscape .TradeNo}}">{{.TradeNo}}</a> · {{.Provider}} / {{.EventID}} · 待核对退款</p>{{end}}{{end}}
       {{range .ProviderHealths}}{{if .Configured}}<p {{if not .Ready}}class="banner" role="alert"{{end}}>{{.Provider}}：{{if .Ready}}运行正常{{else}}{{.Reason}}{{end}}</p>{{end}}{{end}}
       <p>商户通知：待确认 {{.Queues.CallbackWaiting}} 笔 · 发送中 {{.Queues.CallbackInFlight}} 笔 · 最早待确认已等待 {{.Queues.OldestCallbackSeconds}} 秒</p>
       <p>历史补扫：待处理 {{.Queues.HistoricalPending}} 项 · 剩余窗口 {{.Queues.HistoricalRemainingSeconds}} 秒 · 最早窗口距今 {{.Queues.OldestHistoricalSeconds}} 秒</p>
@@ -61,7 +61,7 @@
           <tbody>
             {{range .Orders}}
             <tr>
-              <td><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.OutTradeNo}}</a></td>
+              <td><a href="{{adminPath}}/orders/{{urlEscape .TradeNo}}">{{.OutTradeNo}}</a></td>
               <td>{{.Provider}} {{.Currency}}</td>
               <td>{{if .PayUnits}}{{.PayAmount}}{{else}}未选定{{end}}</td>
               <td>{{.Status}}</td>
@@ -112,7 +112,7 @@
     <section class="card">
       <div class="card-b">
         {{range .Callbacks}}
-        <p><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.OutTradeNo}}</a> · {{if eq .State "merchant_review"}}待核对商城状态{{else}}{{.State}}{{end}} · 已尝试 {{.Attempts}} 次 · {{.LastError}} · 下次调度 {{.NextAt.Format "01-02 15:04:05"}}</p>
+        <p><a href="{{adminPath}}/orders/{{urlEscape .TradeNo}}">{{.OutTradeNo}}</a> · {{if eq .State "merchant_review"}}待核对商城状态{{else}}{{.State}}{{end}} · 已尝试 {{.Attempts}} 次 · {{.LastError}} · 下次调度 {{.NextAt.Format "01-02 15:04:05"}}</p>
         {{else}}
         暂无待确认回调
         {{end}}

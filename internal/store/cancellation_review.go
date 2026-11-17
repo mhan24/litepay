@@ -13,7 +13,7 @@ import (
 )
 
 func ensureCancellationReview(db *gorm.DB, o model.Order, t model.Transaction) error {
-	if t.State != model.Confirmed || t.EventID == "" || t.Units <= 0 || t.Provider == "ton" && t.MasterchainSeqno <= 0 || t.OrderID != nil && *t.OrderID != o.ID {
+	if (o.Status != model.Canceled && o.Status != model.Paid) || t.State != model.Confirmed || t.EventID == "" || t.Units <= 0 || (t.Provider == "ton" && t.MasterchainSeqno <= 0) || (t.OrderID != nil && *t.OrderID != o.ID) {
 		return errors.New("资金证据尚不能用于取消到账核对")
 	}
 	review := model.CancellationReview{OrderID: o.ID, Provider: t.Provider, EventID: t.EventID, State: "open"}
@@ -32,6 +32,7 @@ func ensureCancellationReview(db *gorm.DB, o model.Order, t model.Transaction) e
 }
 
 func (s *Store) RecordCancellationRefund(ctx context.Context, tradeNo, provider, eventID, operator, reference, reason string) error {
+	operator = strings.TrimSpace(operator)
 	reference = strings.TrimSpace(reference)
 	reason = strings.TrimSpace(reason)
 	if operator == "" || reference == "" || reason == "" || utf8.RuneCountInString(reference) > 200 || utf8.RuneCountInString(reason) > 300 {
@@ -100,7 +101,7 @@ func (s *Store) RecordCancellationRefund(ctx context.Context, tradeNo, provider,
 		if err := db.Model(&review).Updates(map[string]any{"state": "refund_recorded", "review_generation": r.Generation, "operator": operator, "reason": reason, "refund_reference": reference, "resolved_at": time.Now()}).Error; err != nil {
 			return err
 		}
-		if err := db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL AND state='in_flight' AND lease_until<=?", o.ID, time.Now()).Update("state", "merchant_review").Error; err != nil {
+		if err := db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL AND state='in_flight' AND lease_until<=?", o.ID, time.Now()).Updates(map[string]any{"state": "merchant_review", "lease_until": time.Time{}}).Error; err != nil {
 			return err
 		}
 		return refreshCancellationCallback(db, o.ID)
@@ -270,10 +271,41 @@ func (s *Store) CallbackCanSend(ctx context.Context, task model.Callback) (bool,
 	return n == 1, err
 }
 
+// collectCanceledOrderReceipts links previously recorded confirmed receipts when a READY/EXPIRED
+// order transitions to CANCELED, keeping refund review state independent of arrival order.
+func collectCanceledOrderReceipts(db *gorm.DB, o model.Order) error {
+	var rows []model.Transaction
+	if err := db.Table("transactions t").Select("DISTINCT t.*").
+		Joins("JOIN payment_attempts a ON a.provider=t.provider AND a.receiver=t.receiver AND a.currency=t.currency AND a.units=t.units AND a.selected_at<=t.occurred_at AND a.expires_at>=t.occurred_at").
+		Where("a.order_id = ? AND t.order_id IS NULL AND t.state = ?", o.ID, model.Confirmed).
+		Order("t.occurred_at, t.event_id").Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, t := range rows {
+		a, matched, reason, err := matchAttempt(db, t, false)
+		if err != nil {
+			return err
+		}
+		if matched.ID != o.ID || reason != "order_closed" {
+			continue
+		}
+		if t.AttemptID == nil || *t.AttemptID != a.ID {
+			if err := db.Model(&t).Update("attempt_id", a.ID).Error; err != nil {
+				return err
+			}
+			t.AttemptID = &a.ID
+		}
+		if err := ensureCancellationReview(db, o, t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func backfillCancellationReviews(db *gorm.DB) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		var rows []model.Transaction
-		if err := tx.Where("state=? AND reason=? AND order_id IS NULL", model.Confirmed, "order_closed").Find(&rows).Error; err != nil {
+		if err := tx.Where("state=? AND order_id IS NULL", model.Confirmed).Find(&rows).Error; err != nil {
 			return err
 		}
 		for _, t := range rows {
@@ -284,8 +316,11 @@ func backfillCancellationReviews(db *gorm.DB) error {
 			if reason != "order_closed" || o.Status != model.Canceled {
 				continue
 			}
-			if err = tx.Model(&t).Update("attempt_id", a.ID).Error; err != nil {
-				return err
+			if t.AttemptID == nil || *t.AttemptID != a.ID {
+				if err = tx.Model(&t).Update("attempt_id", a.ID).Error; err != nil {
+					return err
+				}
+				t.AttemptID = &a.ID
 			}
 			if err = ensureCancellationReview(tx, o, t); err != nil {
 				return err

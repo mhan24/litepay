@@ -45,6 +45,9 @@ func BEpusdtSignGeneric(params map[string]interface{}, token string) string {
 }
 
 func BEpusdtVerifyGeneric(params map[string]interface{}, token string) bool {
+	if strings.TrimSpace(token) == "" {
+		return false
+	}
 	got, _ := params["signature"].(string)
 	return compareSign(got, BEpusdtSignGeneric(params, token))
 }
@@ -58,6 +61,8 @@ func genericValue(v interface{}) string {
 			return "true"
 		}
 		return "false"
+	case float32:
+		return strconv.FormatFloat(float64(value), 'f', -1, 32)
 	case float64:
 		return strconv.FormatFloat(value, 'f', -1, 64)
 	case json.Number:

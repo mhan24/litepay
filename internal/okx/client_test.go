@@ -75,6 +75,9 @@ func TestDepositFieldParsing(t *testing.T) {
 	if _, e = c.History(context.Background(), time.UnixMilli(90000), time.UnixMilli(110000)); e == nil {
 		t.Fatal("accepted missing depId")
 	}
+	if _, e = c.History(context.Background(), time.UnixMilli(110000), time.UnixMilli(90000)); e == nil {
+		t.Fatal("accepted inverted time range")
+	}
 }
 
 func TestTimeSyncFailureLogsTypeOnceAndContinuesPrivateRequests(t *testing.T) {

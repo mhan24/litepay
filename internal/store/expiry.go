@@ -23,6 +23,9 @@ func initializeExpiryAndSelection(db *gorm.DB) error {
 // Expire only visits due orders in bounded batches. All attempt/cursor/finality predicates
 // are evaluated in SQL; future orders require no per-order reads and blocked ones back off.
 func (s *Store) Expire(ctx context.Context, grace int) error {
+	if grace < 0 {
+		grace = 0
+	}
 	now := time.Now()
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		if err := db.Model(&model.Order{}).Where("status = ? AND expires_at < ?", model.Pending, now.Add(-time.Duration(grace)*time.Second)).Update("status", model.Expired).Error; err != nil {
