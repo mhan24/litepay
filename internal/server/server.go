@@ -110,6 +110,9 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 	}
 	if cfg.AdminEnabled() {
 		h.admin = newAdminAuth(cfg)
+		if err := h.admin.loadEpoch(st); err != nil {
+			return nil, err
+		}
 	}
 
 	// ---- BEpusdt API（独角数卡收银台模式）----
@@ -144,7 +147,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		})
 		adminRoot.GET("/login", h.AdminLoginPage)
 		adminRoot.POST("/login", h.AdminLoginSubmit)
-		adminRoot.POST("/logout", h.AdminLogout)
+		adminRoot.POST("/logout", h.AdminAuth(), h.AdminLogout)
 
 		adm := adminRoot.Group("", h.AdminAuth())
 		adm.GET("", h.AdminDashboard)

@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 
 	"litepay/internal/config"
@@ -274,5 +276,122 @@ func TestCheckCredentialsConstantTimeSHA256Comparison(t *testing.T) {
 		if auth.checkCredentials(tc[0], tc[1]) {
 			t.Fatalf("expected mismatched credentials %v to fail", tc)
 		}
+	}
+}
+
+func TestAdminReauthenticationRevokesSession(t *testing.T) {
+	for _, endpoint := range []string{"account", "site"} {
+		t.Run(endpoint, func(t *testing.T) {
+			st, err := store.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			cfg := config.Default()
+			cfg.Server.Production = false
+			cfg.Admin.Password = "correct-admin-password"
+			mgr := settings.New(cfg, st)
+			if err := mgr.Load(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			h := &Handlers{cfg: mgr, st: st}
+			auth := h.currentAdmin()
+			token, csrf, err := auth.issue()
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := gin.New()
+			handler := h.AdminAccountSave
+			if endpoint == "site" {
+				handler = h.AdminSiteSave
+			}
+			r.POST("/save", h.AdminAuth(), handler)
+			for i := 0; i <= adminUserAttemptLimit; i++ {
+				pass := "wrong"
+				if i == adminUserAttemptLimit {
+					pass = cfg.Admin.Password
+				}
+				form := url.Values{"csrf": {csrf}, "current_password": {pass}, "admin_username": {"changed"}, "admin_path": {"/changed"}}
+				req := httptest.NewRequest("POST", "/save", strings.NewReader(form.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
+				if i == adminUserAttemptLimit && !strings.Contains(w.Header().Get("Location"), "/admin/login") {
+					t.Fatalf("exhausted session accepted: %s", w.Header().Get("Location"))
+				}
+			}
+			if _, ok := auth.parse(token); ok {
+				t.Fatal("session not revoked")
+			}
+			if mgr.Get().Admin.Username != cfg.Admin.Username || mgr.Get().AdminPath() != cfg.AdminPath() {
+				t.Fatal("configuration changed")
+			}
+		})
+	}
+}
+
+func TestAdminRevocationSurvivesRestart(t *testing.T) {
+	for _, action := range []string{"logout", "password"} {
+		t.Run(action, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "admin.db")
+			cfg := config.Default()
+			cfg.Server.Production = false
+			cfg.Admin.Password = "original-admin-password"
+			st, err := store.Open(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mgr := settings.New(cfg, st)
+			if err := mgr.Load(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			h := &Handlers{cfg: mgr, st: st}
+			token, csrf, err := h.currentAdmin().issue()
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := gin.New()
+			handler := h.AdminLogout
+			form := url.Values{"csrf": {csrf}}
+			if action == "password" {
+				handler = h.AdminAccountSave
+				form.Set("current_password", cfg.Admin.Password)
+				form.Set("admin_username", cfg.Admin.Username)
+				form.Set("new_password", "new-admin-password-123")
+				form.Set("confirm_password", "new-admin-password-123")
+			}
+			r.POST("/save", h.AdminAuth(), handler)
+			req := httptest.NewRequest("POST", "/save", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != 303 || strings.Contains(w.Header().Get("Location"), "t=err") {
+				t.Fatalf("action failed: %d %s", w.Code, w.Header().Get("Location"))
+			}
+			st.Close()
+			reopened, err := store.Open(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			// Keep the original signing password to prove durable epoch revocation independently of key derivation.
+			restarted := newAdminAuth(cfg)
+			if err := restarted.loadEpoch(reopened); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := restarted.parse(token); ok {
+				t.Fatal("old cookie revived after restart")
+			}
+			nextMgr := settings.New(cfg, reopened)
+			if err := nextMgr.Load(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			next := &Handlers{cfg: nextMgr, st: reopened}
+			if _, ok := next.currentAdmin().parse(token); ok {
+				t.Fatal("old cookie accepted with persisted settings")
+			}
+		})
 	}
 }

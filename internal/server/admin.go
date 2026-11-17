@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/pbkdf2"
 	"crypto/rand"
@@ -27,6 +28,7 @@ import (
 	"litepay/internal/config"
 	"litepay/internal/model"
 	"litepay/internal/settings"
+	"litepay/internal/store"
 )
 
 func (h *Handlers) currentAdmin() *adminAuth {
@@ -35,9 +37,14 @@ func (h *Handlers) currentAdmin() *adminAuth {
 	cfg := h.C()
 	if h.admin == nil {
 		h.admin = newAdminAuth(cfg)
+		if err := h.admin.loadEpoch(h.st); err != nil {
+			h.admin.epoch = 0
+			slog.Error("加载后台会话版本失败", "err", err)
+		}
 	} else if h.admin.user != cfg.Admin.Username || h.admin.pass != cfg.Admin.Password {
 		next := newAdminAuth(cfg)
-		next.epoch = h.admin.currentEpoch() + 1
+		next.epoch = h.admin.currentEpoch()
+		next.st = h.admin.st
 		h.admin = next
 	}
 	return h.admin
@@ -78,6 +85,8 @@ type adminAuth struct {
 
 	mu             sync.Mutex
 	epoch          uint64
+	st             *store.Store
+	reauth         *adminAuth
 	attempts       map[string]*loginAttempt
 	ipAttempts     map[string]*loginAttempt
 	globalCount    int
@@ -121,24 +130,70 @@ func newAdminAuth(cfg *config.Config) *adminAuth {
 func (a *adminAuth) currentEpoch() uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.epoch == 0 {
-		a.epoch = 1
-	}
 	return a.epoch
 }
 
-func (a *adminAuth) bumpEpoch() uint64 {
+func (a *adminAuth) loadEpoch(st *store.Store) error {
+	epoch, err := st.AdminSessionEpoch(context.Background(), false)
+	if err != nil {
+		return err
+	}
+	a.st, a.epoch = st, epoch
+	return nil
+}
+
+func (a *adminAuth) bumpEpoch() (uint64, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.epoch == 0 {
-		a.epoch = 1
+	if a.st != nil {
+		epoch, err := a.st.AdminSessionEpoch(context.Background(), true)
+		if err != nil {
+			a.epoch = 0
+			return 0, err
+		}
+		a.epoch = epoch
+	} else {
+		a.epoch++
 	}
-	a.epoch++
-	return a.epoch
+	return a.epoch, nil
+}
+
+// reauthenticate reserves by session ID and username, with a separate global budget.
+func (h *Handlers) reauthenticate(c *gin.Context) bool {
+	a := h.currentAdmin()
+	a.mu.Lock()
+	if a.reauth == nil {
+		a.reauth = &adminAuth{attempts: make(map[string]*loginAttempt), ipAttempts: make(map[string]*loginAttempt)}
+	}
+	limiter := a.reauth
+	a.mu.Unlock()
+	sid, user := c.GetString("admin_sid"), c.GetString("admin_user")
+	allowed := sid != "" && limiter.allow(sid, user)
+	if allowed && a.checkCredentials(user, c.PostForm("current_password")) {
+		limiter.succeeded(sid, user)
+		return true
+	}
+	exhausted := !allowed
+	if allowed {
+		limiter.failed(sid, user)
+		limiter.mu.Lock()
+		_, key := adminAttemptKeys(sid, user)
+		attempt := limiter.attempts[key]
+		exhausted = (attempt != nil && attempt.count >= adminUserAttemptLimit) || limiter.globalCount >= adminGlobalAttemptLimit
+		limiter.mu.Unlock()
+	}
+	if exhausted {
+		_, err := a.bumpEpoch()
+		slog.Warn("后台密码重新验证达到上限，已吊销会话", "operator", user, "session_id", sid, "err", err)
+	}
+	return false
 }
 
 // issue 生成新会话 token 与 CSRF token。
 func (a *adminAuth) issue() (token, csrf string, err error) {
+	if a.currentEpoch() == 0 {
+		return "", "", fmt.Errorf("后台会话版本不可用")
+	}
 	sidBuf := make([]byte, 16)
 	if _, err := rand.Read(sidBuf); err != nil {
 		return "", "", fmt.Errorf("生成后台会话 ID 失败: %w", err)
@@ -188,7 +243,7 @@ func (a *adminAuth) parse(token string) (*adminSession, bool) {
 	if err := json.Unmarshal(payload, &s); err != nil {
 		return nil, false
 	}
-	if s.ID == "" || s.User != a.user || s.Epoch != a.currentEpoch() {
+	if s.Epoch == 0 || s.ID == "" || s.User != a.user || s.Epoch != a.currentEpoch() {
 		return nil, false
 	}
 	if time.Now().Unix() > s.Exp {
@@ -392,6 +447,7 @@ func (h *Handlers) AdminAuth() gin.HandlerFunc {
 			}
 		}
 
+		c.Set("admin_sid", sess.ID)
 		c.Set("admin_user", sess.User)
 		c.Set("admin_csrf", sess.CSRF)
 		c.Next()
@@ -498,7 +554,11 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 
 // AdminLogout POST /admin/logout
 func (h *Handlers) AdminLogout(c *gin.Context) {
-	h.currentAdmin().bumpEpoch()
+	if _, err := h.currentAdmin().bumpEpoch(); err != nil {
+		slog.Error("持久化后台会话吊销失败", "err", err)
+		c.String(http.StatusInternalServerError, "会话吊销失败，请稍后重试")
+		return
+	}
 	c.SetSameSite(http.SameSiteStrictMode)
 	c.SetCookie(adminCookieName, "", -1, h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
 	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login"))
@@ -602,23 +662,11 @@ func (h *Handlers) AdminAccountSave(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?msg=")+url.QueryEscape(msg)+"&t=err")
 	}
 	auth := h.currentAdmin()
-	ip := c.ClientIP()
-	currentUser := c.GetString("admin_user")
-	hasSession := h.hasValidAdminSession(c)
-	if !hasSession && !auth.allow(ip, currentUser) {
-		fail("密码验证过于频繁，请 10 分钟后再试")
+	if !h.reauthenticate(c) {
+		fail("当前密码错误或验证过于频繁，请重新登录后重试")
 		return
 	}
-	if !auth.checkCredentials(currentUser, c.PostForm("current_password")) {
-		if !hasSession {
-			auth.failed(ip, currentUser)
-		}
-		fail("当前密码错误，请核对后重新输入")
-		return
-	}
-	if !hasSession {
-		auth.succeeded(ip, currentUser)
-	}
+
 	user := strings.TrimSpace(c.PostForm("admin_username"))
 	pass := c.PostForm("new_password")
 	if user == "" || utf8.RuneCountInString(user) > 64 {
@@ -656,23 +704,11 @@ func (h *Handlers) AdminSiteSave(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/settings?view=account&msg=")+url.QueryEscape(msg)+"&t=err")
 	}
 	auth := h.currentAdmin()
-	ip := c.ClientIP()
-	currentUser := c.GetString("admin_user")
-	hasSession := h.hasValidAdminSession(c)
-	if !hasSession && !auth.allow(ip, currentUser) {
-		fail("密码验证过于频繁，请 10 分钟后再试")
+	if !h.reauthenticate(c) {
+		fail("当前密码错误或验证过于频繁，请重新登录后重试")
 		return
 	}
-	if !auth.checkCredentials(currentUser, c.PostForm("current_password")) {
-		if !hasSession {
-			auth.failed(ip, currentUser)
-		}
-		fail("当前密码错误，请核对后重新输入")
-		return
-	}
-	if !hasSession {
-		auth.succeeded(ip, currentUser)
-	}
+
 	root := strings.TrimSpace(c.PostForm("admin_path"))
 	storeURL := strings.TrimSpace(c.PostForm("store_url"))
 	if root == "" {
