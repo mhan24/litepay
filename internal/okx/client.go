@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -183,6 +184,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 	if needSync {
 		if err := c.syncServerTime(ctx); err != nil {
 			// 时间同步失败不阻断真实请求，后续可能仍能通过 30 秒窗口。
+			slog.Debug("OKX 时间同步失败，继续使用本机时间", "error_type", fmt.Sprintf("%T", err))
 		}
 	}
 	c.clockMu.RLock()

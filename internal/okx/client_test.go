@@ -1,10 +1,14 @@
 package okx
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,5 +74,44 @@ func TestDepositFieldParsing(t *testing.T) {
 	missing = true
 	if _, e = c.History(context.Background(), time.UnixMilli(90000), time.UnixMilli(110000)); e == nil {
 		t.Fatal("accepted missing depId")
+	}
+}
+
+func TestTimeSyncFailureLogsTypeOnceAndContinuesPrivateRequests(t *testing.T) {
+	var timeRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/public/time" {
+			timeRequests.Add(1)
+			http.Error(w, "sensitive-time-endpoint-body", http.StatusServiceUnavailable)
+			return
+		}
+		if r.Header.Get("OK-ACCESS-SIGN") == "" {
+			t.Error("fallback request is unsigned")
+		}
+		if _, err := time.Parse("2006-01-02T15:04:05.000Z", r.Header.Get("OK-ACCESS-TIMESTAMP")); err != nil {
+			t.Error("invalid fallback timestamp", err)
+		}
+		fmt.Fprint(w, `{"code":"0","data":[{"uid":"receiver"}]}`)
+	}))
+	defer srv.Close()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(previous)
+	client := New("private-api-key", "private-api-secret", "private-passphrase", srv.URL, 100)
+	client.UseTestTransport()
+	for range 2 {
+		uid, err := client.AccountUID(context.Background())
+		if err != nil || uid != "receiver" {
+			t.Fatal("time-sync failure blocked private request", uid, err)
+		}
+	}
+	if timeRequests.Load() != 1 || strings.Count(logs.String(), "OKX 时间同步失败") != 1 || !strings.Contains(logs.String(), "error_type=") || !strings.Contains(logs.String(), "level=DEBUG") {
+		t.Fatal("missing or repeated bounded diagnostic", logs.String())
+	}
+	for _, secret := range []string{"private-api-key", "private-api-secret", "private-passphrase", "sensitive-time-endpoint-body", srv.URL} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatal("time sync log leaked credentials or endpoint")
+		}
 	}
 }
