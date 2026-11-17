@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -39,13 +40,13 @@ func (h *Handlers) currentAdmin() *adminAuth {
 	if h.admin == nil {
 		h.admin = newAdminAuth(cfg)
 		if err := h.admin.loadEpoch(h.st); err != nil {
-			h.admin.epoch = 0
-			slog.Error("加载后台会话版本失败", "err", err)
+			return h.admin
 		}
 	} else if h.admin.user != cfg.Admin.Username || h.admin.pass != cfg.Admin.Password {
 		next := newAdminAuth(cfg)
-		next.epoch = h.admin.currentEpoch()
-		next.st = h.admin.st
+		h.admin.mu.Lock()
+		next.epoch, next.st, next.epochRetryAt = h.admin.epoch, h.admin.st, h.admin.epochRetryAt
+		h.admin.mu.Unlock()
 		h.admin = next
 	}
 	return h.admin
@@ -57,6 +58,8 @@ func (h *Handlers) currentAdmin() *adminAuth {
 
 const adminCookieName = "lp_admin"
 
+var errAdminEpochUnavailable = errors.New("后台会话版本不可用")
+
 const (
 	adminSessionSalt        = "litepay-admin-session-v1"
 	adminSessionIterations  = 210000
@@ -67,6 +70,7 @@ const (
 	adminGlobalAttemptLimit = 300
 	adminMaxAttemptKeys     = 10000
 	adminAttemptWindow      = 10 * time.Minute
+	adminEpochRetryInterval = 5 * time.Second
 )
 
 // adminSession 会话载荷（Base64(JSON) + "." + HMAC 签名）。
@@ -86,6 +90,7 @@ type adminAuth struct {
 
 	mu             sync.Mutex
 	epoch          uint64
+	epochRetryAt   time.Time
 	st             *store.Store
 	reauth         *adminAuth
 	hardLimits     bool
@@ -132,15 +137,33 @@ func newAdminAuth(cfg *config.Config) *adminAuth {
 func (a *adminAuth) currentEpoch() uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.epoch == 0 && a.st != nil {
+		_ = a.loadEpochLocked(a.st, false) // Failure stays closed; the helper limits retries and logs.
+	}
 	return a.epoch
 }
 
 func (a *adminAuth) loadEpoch(st *store.Store) error {
-	epoch, err := st.AdminSessionEpoch(context.Background(), false)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.loadEpochLocked(st, false)
+}
+
+// The caller holds mu. Recovery advances the durable epoch so a failed revocation
+// cannot revive cookies signed before storage failed.
+func (a *adminAuth) loadEpochLocked(st *store.Store, bump bool) error {
+	a.st = st
+	if a.epoch == 0 && time.Now().Before(a.epochRetryAt) {
+		return errAdminEpochUnavailable
+	}
+	epoch, err := st.AdminSessionEpoch(context.Background(), bump || a.epoch == 0)
 	if err != nil {
+		a.epoch = 0
+		a.epochRetryAt = time.Now().Add(adminEpochRetryInterval)
+		slog.Error("加载或推进后台会话版本失败，后台会话暂不可用", "err", err)
 		return err
 	}
-	a.st, a.epoch = st, epoch
+	a.epoch, a.epochRetryAt = epoch, time.Time{}
 	return nil
 }
 
@@ -148,12 +171,9 @@ func (a *adminAuth) bumpEpoch() (uint64, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.st != nil {
-		epoch, err := a.st.AdminSessionEpoch(context.Background(), true)
-		if err != nil {
-			a.epoch = 0
+		if err := a.loadEpochLocked(a.st, true); err != nil {
 			return 0, err
 		}
-		a.epoch = epoch
 	} else {
 		a.epoch++
 	}
@@ -193,8 +213,9 @@ func (h *Handlers) reauthenticate(c *gin.Context) bool {
 
 // issue 生成新会话 token 与 CSRF token。
 func (a *adminAuth) issue() (token, csrf string, err error) {
-	if a.currentEpoch() == 0 {
-		return "", "", fmt.Errorf("后台会话版本不可用")
+	epoch := a.currentEpoch()
+	if epoch == 0 {
+		return "", "", errAdminEpochUnavailable
 	}
 	sidBuf := make([]byte, 16)
 	if _, err := rand.Read(sidBuf); err != nil {
@@ -209,7 +230,7 @@ func (a *adminAuth) issue() (token, csrf string, err error) {
 
 	s := adminSession{
 		ID:    sid,
-		Epoch: a.currentEpoch(),
+		Epoch: epoch,
 		User:  a.user,
 		Exp:   time.Now().Add(a.ttl).Unix(),
 		CSRF:  csrf,
@@ -544,7 +565,9 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 
 	token, _, err := auth.issue()
 	if err != nil {
-		slog.Error("创建后台会话失败", "err", err)
+		if !errors.Is(err, errAdminEpochUnavailable) {
+			slog.Error("创建后台会话失败", "err", err)
+		}
 		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("登录服务暂时不可用，请稍后重试"))
 		return
 	}
@@ -560,7 +583,6 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 // AdminLogout POST /admin/logout
 func (h *Handlers) AdminLogout(c *gin.Context) {
 	if _, err := h.currentAdmin().bumpEpoch(); err != nil {
-		slog.Error("持久化后台会话吊销失败", "err", err)
 		c.String(http.StatusInternalServerError, "会话吊销失败，请稍后重试")
 		return
 	}

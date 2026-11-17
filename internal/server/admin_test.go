@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,10 +11,14 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"litepay/internal/config"
 	"litepay/internal/settings"
@@ -467,5 +472,177 @@ func TestUntrustedProxyHeadersWarnOnce(t *testing.T) {
 	}
 	if strings.Count(buf.String(), "检测到未受信任对端的转发头") != 1 {
 		t.Fatal(buf.String())
+	}
+}
+
+func TestAdminEpochRecoversAfterStorageFailure(t *testing.T) {
+	for _, failure := range []string{"load", "bump"} {
+		t.Run(failure, func(t *testing.T) {
+			st, err := store.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			cfg := config.Default()
+			cfg.Server.Production = false
+			cfg.Admin.Password = "epoch-recovery-password"
+			mgr := settings.New(cfg, st)
+			if err := mgr.Load(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			h := &Handlers{cfg: mgr, st: st}
+			oldToken, csrf, err := h.currentAdmin().issue()
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldEpoch := h.currentAdmin().currentEpoch()
+
+			var unavailable atomic.Bool
+			var attempts atomic.Int32
+			const callback = "test:admin_epoch_storage_failure"
+			if err := st.DB().Callback().Create().Before("gorm:create").Register(callback, func(db *gorm.DB) {
+				if db.Statement.Table != "credentials" {
+					return
+				}
+				attempts.Add(1)
+				if unavailable.Load() {
+					db.AddError(errors.New("temporary epoch storage failure"))
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			defer st.DB().Callback().Create().Remove(callback)
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			defer slog.SetDefault(previous)
+
+			r := gin.New()
+			r.POST("/admin/login", h.AdminLoginSubmit)
+			r.POST("/admin/logout", h.AdminAuth(), h.AdminLogout)
+			r.GET("/private", h.AdminAuth(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+			login := func() *httptest.ResponseRecorder {
+				form := url.Values{"username": {cfg.Admin.Username}, "password": {cfg.Admin.Password}}
+				req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(form.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
+				return w
+			}
+			unavailable.Store(true)
+			failedAt := time.Now()
+			if failure == "load" {
+				h.admin = nil
+				h.currentAdmin()
+			} else {
+				req := httptest.NewRequest(http.MethodPost, "/admin/logout", strings.NewReader(url.Values{"csrf": {csrf}}.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.AddCookie(&http.Cookie{Name: adminCookieName, Value: oldToken})
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
+				if w.Code != http.StatusInternalServerError {
+					t.Fatalf("failed revocation returned %d", w.Code)
+				}
+			}
+			auth := h.currentAdmin()
+			auth.mu.Lock()
+			epoch, attached, retryAt := auth.epoch, auth.st, auth.epochRetryAt
+			auth.mu.Unlock()
+			if epoch != 0 || attached != st || retryAt.Before(failedAt.Add(5*time.Second)) {
+				t.Fatalf("failure did not retain closed recovery state: epoch=%d attached=%v retry=%v", epoch, attached == st, retryAt)
+			}
+
+			for range 10 {
+				if auth.currentEpoch() != 0 {
+					t.Fatal("unavailable storage opened sessions")
+				}
+				if _, ok := auth.parse(oldToken); ok {
+					t.Fatal("old cookie accepted during failure")
+				}
+				if _, err := auth.bumpEpoch(); err == nil {
+					t.Fatal("revocation succeeded during backoff")
+				}
+				if w := login(); len(w.Result().Cookies()) != 0 || !strings.Contains(w.Header().Get("Location"), "err=") {
+					t.Fatal("login succeeded while epoch unavailable")
+				}
+			}
+			if attempts.Load() != 1 || strings.Count(logs.String(), "level=ERROR") != 1 {
+				t.Fatalf("backoff repeated storage/logging: attempts=%d logs=%s", attempts.Load(), logs.String())
+			}
+
+			// Advance only the retry deadline, without sleeping through the production cooldown.
+			expireRetry := func() {
+				auth.mu.Lock()
+				auth.epochRetryAt = time.Now().Add(-time.Millisecond)
+				auth.mu.Unlock()
+			}
+			expireRetry()
+			if auth.currentEpoch() != 0 || attempts.Load() != 2 {
+				t.Fatal("due failed retry was not attempted once")
+			}
+			for range 10 {
+				auth.currentEpoch()
+			}
+			if attempts.Load() != 2 || strings.Count(logs.String(), "level=ERROR") != 2 {
+				t.Fatal("failed retries were not throttled", logs.String())
+			}
+
+			unavailable.Store(false)
+			if auth.currentEpoch() != 0 || attempts.Load() != 2 {
+				t.Fatal("recovery ignored retry cooldown")
+			}
+			expireRetry()
+			var wg sync.WaitGroup
+			epochs := make(chan uint64, 32)
+			for range 32 {
+				wg.Go(func() { epochs <- auth.currentEpoch() })
+			}
+			wg.Wait()
+			close(epochs)
+			for epoch := range epochs {
+				if epoch != oldEpoch+1 {
+					t.Fatalf("recovery did not advance epoch once: %d", epoch)
+				}
+			}
+			if attempts.Load() != 3 || strings.Count(logs.String(), "level=ERROR") != 2 {
+				t.Fatalf("concurrent recovery repeated storage/logging: %d %s", attempts.Load(), logs.String())
+			}
+
+			w := login()
+			if w.Header().Get("Location") != "/admin" {
+				t.Fatal("login did not recover", w.Header().Get("Location"))
+			}
+			var newCookie *http.Cookie
+			for _, cookie := range w.Result().Cookies() {
+				if cookie.Name == adminCookieName {
+					newCookie = cookie
+				}
+			}
+			if newCookie == nil {
+				t.Fatal("recovered login did not issue a cookie")
+			}
+			for _, tc := range []struct {
+				token string
+				want  int
+			}{{oldToken, http.StatusSeeOther}, {newCookie.Value, http.StatusNoContent}} {
+				req := httptest.NewRequest(http.MethodGet, "/private", nil)
+				req.AddCookie(&http.Cookie{Name: adminCookieName, Value: tc.token})
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
+				if w.Code != tc.want {
+					t.Fatalf("session validation after recovery: got %d want %d", w.Code, tc.want)
+				}
+			}
+			restarted := newAdminAuth(mgr.Get())
+			if err := restarted.loadEpoch(st); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := restarted.parse(oldToken); ok {
+				t.Fatal("old cookie revived after restart")
+			}
+			if _, ok := restarted.parse(newCookie.Value); !ok {
+				t.Fatal("new cookie invalid after restart")
+			}
+		})
 	}
 }
