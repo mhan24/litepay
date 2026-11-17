@@ -28,12 +28,21 @@ chmod 600 "$task_tmp/master.key"
 docker volume create "$name-keys" >/dev/null
 docker run --rm -i --network none --user 0:0 --entrypoint /bin/sh -v "$name-keys:/keys" "$image" -c 'umask 077; cat > /keys/master.key; chown 10001:10001 /keys/master.key; chmod 400 /keys/master.key' <"$task_tmp/master.key"
 docker run -d --name "$name" --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /tmp:size=16m,mode=1777 --tmpfs /app/data:uid=10001,gid=10001,mode=0700 -e LITEPAY_MASTER_KEY_FILE=/run/secrets/master.key -v "$name-keys:/run/secrets:ro" -v "$task_tmp/config.yaml:/app/config.yaml:ro" "$image" >/dev/null
+[ "$(docker inspect -f '{{.Config.Healthcheck.Interval}}' "$name")" = 30000000000 ]
+[ "$(docker inspect -f '{{.Config.Healthcheck.Timeout}}' "$name")" = 3000000000 ]
+[ "$(docker inspect -f '{{.Config.Healthcheck.Retries}}' "$name")" = 3 ]
+docker inspect -f '{{json .Config.Healthcheck.Test}}' "$name" >"$task_tmp/probe.json"
+grep -q 'wget' "$task_tmp/probe.json"
+grep -q 'http://127.0.0.1:8080/healthz' "$task_tmp/probe.json"
 attempt=0
-while [ "$attempt" -lt 30 ]; do
+# The first image probe runs after 30 seconds; allow it to finish before asserting healthy.
+while [ "$attempt" -lt 45 ]; do
     if docker exec "$name" wget -qO- http://127.0.0.1:8080/healthz >"$task_tmp/health.json"; then
         grep -q '"ok":true' "$task_tmp/health.json"
-        echo 'PASS: default image refuses unconfigured production; explicit HTTPS configuration starts as UID 10001'
-        exit 0
+        if [ "$(docker inspect -f '{{.State.Health.Status}}' "$name")" = healthy ]; then
+            echo 'PASS: default production fails closed; configured UID 10001 image starts and HEALTHCHECK becomes healthy'
+            exit 0
+        fi
     fi
     attempt=$((attempt+1))
     sleep 1

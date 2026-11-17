@@ -121,6 +121,7 @@ docker build -t litepay:dev .
 ### 容器化与生产部署安全规范
 
 - **非 root 运行**：Dockerfile 以非 root 用户（UID 10001）运行，内置 `config.production.yaml` 强制进行生产级安全校验。
+- **容器探活**：镜像每 30 秒以 wget 请求 `http://127.0.0.1:8080/healthz`，超时 3 秒，连续失败 3 次标记为 unhealthy。修改容器内监听端口时，请同时覆盖 Docker 健康检查命令。
 - **生产配置约束**：未填写 HTTPS `base_url` 或商户 `notify_hosts` 白名单时，容器直接拒绝启动。
 - **文件挂载方式**：将配置完成的文件只读挂载至 `/app/config.yaml`，数据持久化目录挂载至 `/app/data`。`config.example.yaml` 仅用于显式的本地开发。
 - **运维演练工具**：仓库提供 `scripts/payment_db.py` 用于一致性备份、完整性检查、数据恢复与离线演练；生产部署与版本回滚请严格参照 [支付运维](docs/operations.md) 执行。

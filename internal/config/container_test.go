@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -56,5 +57,32 @@ func TestCISecurityToolsUseFixedVersions(t *testing.T) {
 	}
 	if installs != 2 {
 		t.Fatalf("expected vulnerability and security scanners, got %d", installs)
+	}
+}
+
+func TestProductionImageHealthcheckUsesLocalProbe(t *testing.T) {
+	raw, err := os.ReadFile("../../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probes := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "HEALTHCHECK ") {
+			continue
+		}
+		probes++
+		for _, option := range []string{"--interval=30s", "--timeout=3s", "--retries=3"} {
+			if !strings.Contains(line, option) {
+				t.Fatal("missing image probe setting", option)
+			}
+		}
+		_, command, ok := strings.Cut(line, " CMD ")
+		var args []string
+		if !ok || json.Unmarshal([]byte(command), &args) != nil || len(args) == 0 || args[0] != "wget" || args[len(args)-1] != "http://127.0.0.1:8080/healthz" {
+			t.Fatal("invalid image health command", line)
+		}
+	}
+	if probes != 1 {
+		t.Fatal("expected one runtime healthcheck", probes)
 	}
 }

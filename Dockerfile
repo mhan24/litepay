@@ -19,5 +19,6 @@ COPY --chown=litepay:litepay --chmod=0400 config.production.yaml /app/config.yam
 VOLUME ["/app/data"]
 EXPOSE 8080
 USER 10001:10001
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
 ENTRYPOINT ["/app/litepay"]
 CMD ["-config", "/app/config.yaml"]
