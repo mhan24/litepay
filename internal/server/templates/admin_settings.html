@@ -7,7 +7,8 @@
 <title>设置 · LitePay 管理后台</title>
 {{template "theme_head" .}}
 {{template "admin_css" .}}
-<style>.currency-toggles{display:flex;gap:20px;flex-wrap:wrap}.section-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--line)}.section-actions .actions{margin-left:auto}@media(max-width:640px){.section-actions .actions{width:100%;margin-left:0}.section-actions .btn{flex:1}}</style>
+<style nonce="{{.Nonce}}">.currency-toggles{display:flex;gap:20px;flex-wrap:wrap}.section-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--line)}.section-actions .actions{margin-left:auto}@media(max-width:640px){.section-actions .actions{width:100%;margin-left:0}.section-actions .btn{flex:1}}</style>
+{{template "layout_css" .}}
 </head>
 <body>
 {{template "admin_nav" .}}
@@ -37,7 +38,7 @@
   </nav>
   <form data-settings-account data-settings-panel="account" method="post" action="{{adminPath}}/settings/account" aria-labelledby="settings-head-account">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
-    <section data-settings-group="account" class="card" style="margin-bottom:12px">
+    <section data-settings-group="account" class="mb-12 card" >
       <div class="card-h"><h2 id="settings-head-account">管理员账号</h2><span class="hint">保存后需重新登录</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -52,7 +53,7 @@
   </form>
   <form data-settings-site data-settings-panel="account" method="post" action="{{adminPath}}/settings/site" aria-labelledby="settings-head-site">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
-    <section data-settings-group="account" class="card" style="margin-bottom:12px">
+    <section data-settings-group="account" class="mb-12 card" >
       <div class="card-h"><h2 id="settings-head-site">访问入口</h2><span class="hint">保存后立即生效，请重新登录</span></div>
       <div class="card-b">
         <p class="section-desc">修改后台入口后旧地址将立即失效，请先记录新入口地址；前台收银台与支付 API 地址保持不变。</p>
@@ -61,14 +62,14 @@
           <div class="field full"><label for="site-store-url">商店跳转地址</label><input id="site-store-url" class="input" type="url" name="store_url" value="{{.Cfg.Server.StoreURL}}" placeholder="https://shop.example.com"><span class="hint">访问网关首页 / 时跳转至此地址，留空则返回 404。</span></div>
           <div class="field full"><label for="site-current-password">当前密码</label><input id="site-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required></div>
         </div>
-        <button class="btn" type="submit" style="margin-top:16px">保存访问入口并重新登录</button>
+        <button class="mt-16 btn" type="submit" >保存访问入口并重新登录</button>
       </div>
     </section>
   </form>
   <form data-settings-panel="binance" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-binance">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <input type="hidden" name="settings_scope" value="binance">
-    <section class="card" style="margin-bottom:12px"><div class="card-h"><h2 id="settings-head-binance">币安 · Binance</h2><span class="badge {{if .BinanceOn}}b-ok{{else}}b-gray{{end}}">{{if .BinanceOn}}可收款{{else}}未启用收款{{end}}</span></div>
+    <section class="mb-12 card" ><div class="card-h"><h2 id="settings-head-binance">币安 · Binance</h2><span class="badge {{if .BinanceOn}}b-ok{{else}}b-gray{{end}}">{{if .BinanceOn}}可收款{{else}}未启用收款{{end}}</span></div>
 <div class="card-b"><p class="section-desc">收款 UID 必须与当前 API 凭据所属账户一致。API 凭据仅需只读查询权限；密钥输入框留空则保留原值。</p><div data-section-fields><div class="form-grid">
 <div class="field"><label for="setting-binance_uid">收款 UID</label><input id="setting-binance_uid" class="input" name="binance_uid" value="{{.Cfg.Checkout.Binance.UID}}" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"></div>
 <div class="field"><label>开放币种</label><div class="currency-toggles">{{range .KnownCurrencies}}<label class="switch"><input type="checkbox" role="switch" name="binance_currencies" value="{{.}}" {{if hasStr $.BinanceCurrencies .}}checked{{end}}><span>{{.}}</span></label>{{end}}</div></div>
@@ -82,7 +83,7 @@
   <form data-settings-panel="okx" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-okx">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <input type="hidden" name="settings_scope" value="okx">
-    <section class="card" style="margin-bottom:12px"><div class="card-h"><h2 id="settings-head-okx">欧易 · OKX</h2><span class="badge {{if .OKXOn}}b-ok{{else}}b-gray{{end}}">{{if .OKXOn}}可收款{{else}}未启用收款{{end}}</span></div>
+    <section class="mb-12 card" ><div class="card-h"><h2 id="settings-head-okx">欧易 · OKX</h2><span class="badge {{if .OKXOn}}b-ok{{else}}b-gray{{end}}">{{if .OKXOn}}可收款{{else}}未启用收款{{end}}</span></div>
 <div class="card-b"><p class="section-desc">收款 UID 必须与当前 API 凭据所属账户一致。API 凭据仅需只读查询权限；密钥输入框留空则保留原值。</p><div data-section-fields><div class="form-grid">
 <div class="field"><label for="setting-okx_uid">收款 UID</label><input id="setting-okx_uid" class="input" name="okx_uid" value="{{.Cfg.Checkout.OKX.UID}}" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"></div>
 <div class="field"><label>开放币种</label><div class="currency-toggles">{{range .KnownCurrencies}}<label class="switch"><input type="checkbox" role="switch" name="okx_currencies" value="{{.}}" {{if hasStr $.OKXCurrencies .}}checked{{end}}><span>{{.}}</span></label>{{end}}</div></div>
@@ -97,7 +98,7 @@
   <form data-settings-panel="ton" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-ton">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <input type="hidden" name="settings_scope" value="ton">
-    <section class="card" style="margin-bottom:12px"><div class="card-h"><h2 id="settings-head-ton">GRAM · TON 主网</h2><span class="badge {{if .Cfg.TONEnabled}}b-ok{{else}}b-gray{{end}}">{{if .Cfg.TONEnabled}}可收款{{else}}未启用收款{{end}}</span></div>
+    <section class="mb-12 card" ><div class="card-h"><h2 id="settings-head-ton">GRAM · TON 主网</h2><span class="badge {{if .Cfg.TONEnabled}}b-ok{{else}}b-gray{{end}}">{{if .Cfg.TONEnabled}}可收款{{else}}未启用收款{{end}}</span></div>
 <div class="card-b"><p class="section-desc">系统每 5 秒刷新行情、每 15 秒检测余额。报价过期或买卖价差超过 0.5% 时自动暂停生成新报价；订单换算与识别尾差合计不超过 0.1%。</p><div data-section-fields><div class="form-grid">
 <div class="field"><label for="setting-ton_address">GRAM 收款地址</label><input id="setting-ton_address" class="input" name="ton_address" value="{{.Cfg.TON.Address}}" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"><span class="hint">请确保您持有该收款钱包；公开只读接口仅能查询链上数据，无法校验钱包所有权。</span></div>
 <div class="field"><label>开放币种</label><label class="switch"><input type="checkbox" role="switch" name="ton_currencies" value="GRAM" {{if hasStr .TONCurrencies "GRAM"}}checked{{end}}><span>GRAM</span></label></div><div class="field"><label for="setting-ton_api_key">Toncenter API Key（可选）</label><input id="setting-ton_api_key" class="input" name="ton_api_key" type="password" value="" placeholder="{{.TONKey}}" autocomplete="new-password"></div>
@@ -114,7 +115,7 @@
   <form data-settings-panel="orders" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-orders">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <input type="hidden" name="settings_scope" value="orders">
-    <section class="card" style="margin-bottom:12px">
+    <section class="mb-12 card" >
       <div class="card-h"><h2 id="settings-head-orders">订单</h2><span class="hint">USD 订单 · GRAM 按行情换算</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -152,20 +153,20 @@
   <form data-settings-panel="merchant" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-merchant">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <input type="hidden" name="settings_scope" value="merchant">
-    <section class="card" style="margin-bottom:12px">
+    <section class="mb-12 card" >
       <div class="card-h"><h2 id="settings-head-merchant">独角数卡</h2><span class="hint">BEpusdt 收银台模式</span></div>
       <div class="card-b">
         <div class="form-grid">
           <div class="field full">
             <label>API Token</label>
-            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-              <span class="mono" style="padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)">{{.BEpusdtKeyMask}}</span>
+            <div class="inline-actions" >
+              <span class="secret-mask mono" >{{.BEpusdtKeyMask}}</span>
               <div class="field"><label for="merchant-rotate-current-password">当前密码</label><input id="merchant-rotate-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required form="rotate-token"></div><button class="btn btn-ghost btn-sm" type="submit" form="rotate-token" formaction="{{adminPath}}/settings/token" {{if not .CanRotateToken}}disabled{{end}}>轮换并生成新 Token</button>
               <a class="btn btn-ghost btn-sm" href="{{adminPath}}/integration">查看接入信息</a>
             </div>
             <span class="hint">{{if not .CanRotateToken}}生产环境已暂停 Token 轮换，需先完成商城端历史密钥验签兼容性验收。{{end}}当前待确认通知 {{.PendingNotifyCount}} 笔。轮换后新订单使用新 Token，历史通知继续使用原密钥版本；请先确认商城支持旧版本密钥验签。新 Token 可在「接入」页查看。</span>
           </div>
-          <div class="field"><label>结算法币</label><div class="input" style="display:flex;align-items:center">USD · 固定 1:1</div></div>
+          <div class="field"><label>结算法币</label><div class="fixed-fiat input" >USD · 固定 1:1</div></div>
           <div class="field">
             <label class="switch"><input type="checkbox" role="switch" name="bepusdt_reselect" {{if .Cfg.BEpusdt.Reselect}}checked{{end}}><span>允许付款人重新选择平台与币种</span></label>
           </div>
@@ -173,7 +174,7 @@
       </div>
     </section>
 
-    <section class="card" style="margin-bottom:12px">
+    <section class="mb-12 card" >
       <div class="card-h"><h2>支付结果通知</h2><span class="hint">发送给独角数卡</span></div>
       <div class="card-b">
         <div class="form-grid">
@@ -197,7 +198,7 @@
   <form id="rotate-token" method="post" action="{{adminPath}}/settings/token" hidden><input type="hidden" name="csrf" value="{{.Base.CSRF}}"></form>
 </main>
 {{template "theme_script" .}}
-<script>
+<script nonce="{{.Nonce}}">
 (function(){
  var nav=document.querySelector('.settings-nav'),panels=document.querySelectorAll('[data-settings-panel]'),buttons=nav.querySelectorAll('[data-settings-view]');
  function show(name){

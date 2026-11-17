@@ -527,7 +527,7 @@ func (h *Handlers) AdminLoginPage(c *gin.Context) {
 		}
 	}
 	c.Header("Cache-Control", "no-store")
-	c.HTML(http.StatusOK, "admin_login.html", gin.H{
+	renderHTML(c, http.StatusOK, "admin_login.html", gin.H{
 		"Next":     c.Query("next"),
 		"Error":    c.Query("err"),
 		"SiteName": "LitePay 管理后台",
@@ -600,7 +600,7 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 	cfg := h.C()
 	updated := h.cfg.UpdatedAt(c.Request.Context())
 
-	c.HTML(http.StatusOK, "admin_settings.html", gin.H{
+	renderHTML(c, http.StatusOK, "admin_settings.html", gin.H{
 		"Base":               h.adminBase(c, "settings", "设置"),
 		"HasSaved":           !updated.IsZero(),
 		"UpdatedAt":          updated.Format("2006-01-02 15:04:05"),
@@ -933,7 +933,7 @@ func joinInts(v []int) string {
 // -----------------------------------------------------------------------------
 
 func (h *Handlers) renderAdminError(c *gin.Context, err error) {
-	c.HTML(http.StatusOK, "admin_error.html", gin.H{
+	renderHTML(c, http.StatusOK, "admin_error.html", gin.H{
 		"Base":  h.adminBase(c, "orders", "操作失败"),
 		"Error": err.Error(),
 	})
@@ -996,7 +996,7 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 		h.renderAdminError(c, err)
 		return
 	}
-	c.HTML(200, "admin_dashboard.html", gin.H{"CancellationReviewQueue": cancellationQueue, "Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "Queues": queues, "CancelHealth": cancelHealth, "CancelWarning": cancelWarning, "CancelRequired": h.C().Server.CancelSyncRequired, "ProviderHealths": h.providerHealths(c), "BinanceUsage": h.poller.BinanceUsage(), "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
+	renderHTML(c, 200, "admin_dashboard.html", gin.H{"CancellationReviewQueue": cancellationQueue, "Base": h.adminBase(c, "dashboard", "收款概览"), "Orders": orders, "Evidence": evidence, "Scans": cursors, "Callbacks": callbacks, "ExhaustedCallbacks": exhausted, "Queues": queues, "CancelHealth": cancelHealth, "CancelWarning": cancelWarning, "CancelRequired": h.C().Server.CancelSyncRequired, "ProviderHealths": h.providerHealths(c), "BinanceUsage": h.poller.BinanceUsage(), "MerchantReviewCallbacks": merchantReview, "ReviewConfirmations": review, "TONCheckpoints": ton, "ConfirmationReviews": reviews})
 }
 func (h *Handlers) AdminOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.Query("page"))
@@ -1015,7 +1015,7 @@ func (h *Handlers) AdminOrders(c *gin.Context) {
 		h.renderAdminError(c, err)
 		return
 	}
-	c.HTML(200, "admin_orders.html", gin.H{"Base": h.adminBase(c, "orders", "订单"), "Orders": orders, "Page": page, "Prev": max(1, page-1), "Next": page + 1, "Query": c.Query("q")})
+	renderHTML(c, 200, "admin_orders.html", gin.H{"Base": h.adminBase(c, "orders", "订单"), "Orders": orders, "Page": page, "Prev": max(1, page-1), "Next": page + 1, "Query": c.Query("q")})
 }
 func (h *Handlers) AdminCloseOrder(c *gin.Context) {
 	no := c.Param("trade_no")
@@ -1078,10 +1078,10 @@ func (h *Handlers) AdminOrderDetail(c *gin.Context) {
 		h.renderAdminError(c, summaryErr)
 		return
 	}
-	c.HTML(200, "admin_order.html", gin.H{"RefundReviewGenerationCurrent": summary.Current(), "UncoveredCancellationReceipts": summary.Uncovered, "CancellationReviews": views, "CancellationReviewAudits": reviewAudits, "Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts, "PaymentAttempts": attempts, "PaymentRecoveries": paymentRecoveries, "HistoricalScans": history})
+	renderHTML(c, 200, "admin_order.html", gin.H{"RefundReviewGenerationCurrent": summary.Current(), "UncoveredCancellationReceipts": summary.Uncovered, "CancellationReviews": views, "CancellationReviewAudits": reviewAudits, "Base": h.adminBase(c, "orders", "订单详情"), "Order": o, "Transactions": tx, "Callbacks": tasks, "Logs": logs, "Recoveries": recoveries, "Confirmations": checks, "NotifyMaxAttempts": h.C().Notify.MaxAttempts, "PaymentAttempts": attempts, "PaymentRecoveries": paymentRecoveries, "HistoricalScans": history})
 }
 func (h *Handlers) AdminIntegration(c *gin.Context) {
-	c.HTML(200, "admin_integration.html", gin.H{
+	renderHTML(c, 200, "admin_integration.html", gin.H{
 		"Base":               h.adminBase(c, "integration", "接入信息"),
 		"BaseURL":            h.C().Server.BaseURL,
 		"TokenMask":          maskSecret(h.C().BEpusdt.APIToken),
@@ -1103,7 +1103,7 @@ func (h *Handlers) AdminIntegrationReveal(c *gin.Context) {
 	} else {
 		slog.Warn("管理员查看完整 BEpusdt API Token", "operator", operator, "ip", c.ClientIP())
 	}
-	c.HTML(200, "admin_integration.html", gin.H{
+	renderHTML(c, 200, "admin_integration.html", gin.H{
 		"Base":               h.adminBase(c, "integration", "接入信息"),
 		"BaseURL":            h.C().Server.BaseURL,
 		"TokenMask":          maskSecret(h.C().BEpusdt.APIToken),

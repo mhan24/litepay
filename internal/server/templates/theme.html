@@ -1,6 +1,6 @@
 {{define "theme_head"}}
 <meta name="color-scheme" content="light dark">
-<script>
+<script nonce="{{.Nonce}}">
 (function () {
   var meta = document.querySelector('meta[name="color-scheme"]');
   try {
@@ -18,7 +18,7 @@
 {{end}}
 
 {{define "theme_css"}}
-<style>
+<style nonce="{{.Nonce}}">
   :root{
     color-scheme:light dark;
     --font-sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif;
@@ -79,7 +79,7 @@
 {{end}}
 
 {{define "theme_script"}}
-<script>
+<script nonce="{{.Nonce}}">
 (function () {
   var root = document.documentElement;
   function apply(theme) {
@@ -101,7 +101,34 @@
     });
   });
 })();
+document.querySelectorAll('form[data-confirm]').forEach(function(form){
+ form.addEventListener('submit',function(event){if(!confirm(form.dataset.confirm))event.preventDefault()});
+});
 </script>
 {{end}}
 
 {{define "brand_mark"}}<svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M6 5v22h21" stroke="currentColor" stroke-width="3.5"/><path d="M13 5h14v14H13V5Z" stroke="currentColor" stroke-width="3.5"/><path d="M13 12h14" stroke="currentColor" stroke-width="3.5"/></svg>{{end}}
+
+{{define "layout_css"}}
+<style nonce="{{.Nonce}}">
+.inline-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.m-0{margin:0}
+.orders-columns{--label-1:'商户订单号';--label-2:'付款方式';--label-3:'应付金额';--label-4:'状态';--label-5:'创建时间';--label-6:'操作'}
+.admin-error-body{text-align:center;padding:48px 20px}
+.admin-error-icon{width:54px;height:54px;border-radius:50%;background:var(--danger-soft);color:var(--danger);display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;margin:0 auto 16px}
+.admin-error-title{margin:0 0 8px;font-size:17px}
+.admin-error-detail{margin:0 0 18px;font-size:13px}
+.brand-link{text-decoration:none}
+.cashier-amount-note{margin-top:13px}
+.review-link{display:none;margin-top:20px;font-size:14px;text-underline-offset:4px}
+.mt-16{margin-top:16px}
+.wrap-anywhere{overflow-wrap:anywhere}
+.mt-12{margin-top:12px}
+.notify-actions{margin:16px 0}
+.mb-12{margin-bottom:12px}
+.secret-mask{padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}
+.fixed-fiat{display:flex;align-items:center}
+.dashboard-columns{--label-1:'商户订单号';--label-2:'付款方式';--label-3:'应付金额';--label-4:'状态';--label-5:'创建时间'}
+.evidence-columns{--label-1:'平台 / 原始资金事件';--label-2:'查询参考号';--label-3:'币种 / 到账金额';--label-4:'状态与原因'}
+</style>
+{{end}}

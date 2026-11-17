@@ -45,6 +45,7 @@ func (h *Handlers) C() *config.Config { return h.cfg.Get() }
 
 // CashierData 收银台模板数据。
 type CashierData struct {
+	Nonce              string
 	ReviewAmounts      []string
 	CancellationReview bool
 	RefundRecorded     bool
@@ -206,7 +207,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		NeedsCurrency:    needsCurrency,
 		ProviderSubtitle: providerSubtitle,
 	}
-	c.HTML(http.StatusOK, "cashier.html", data)
+	renderHTML(c, http.StatusOK, "cashier.html", data)
 }
 
 type providerOption struct {
@@ -401,10 +402,10 @@ func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 		}
 	}
 
-	c.HTML(200, "result.html", CashierData{ReviewAmounts: reviewAmounts, CancellationReview: review.Present(), RefundRecorded: review.Current(), RefundRecheck: review.Status() == "recheck_required", Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
+	renderHTML(c, 200, "result.html", CashierData{ReviewAmounts: reviewAmounts, CancellationReview: review.Present(), RefundRecorded: review.Current(), RefundRecheck: review.Status() == "recheck_required", Title: "付款结果", TradeNo: o.TradeNo, OutTradeNo: o.OutTradeNo, Name: o.Name, Amount: o.PayAmount(), Currency: o.Currency, OriginMoney: o.Original(), ReturnURL: o.ReturnURL, Status: o.Status, SettlementPending: o.PaymentPhase(time.Now()) == "settling", MerchantReview: cb.State == "merchant_review", CreatedAt: o.CreatedAt.Format("2006-01-02 15:04:05"), Provider: o.Provider, NotifyStatus: ack})
 }
 func (h *Handlers) renderError(c *gin.Context, status int, title, detail string) {
-	c.HTML(status, "error.html", gin.H{"Title": title, "Detail": detail})
+	renderHTML(c, status, "error.html", gin.H{"Title": title, "Detail": detail})
 }
 func (h *Handlers) OrderStatus(c *gin.Context) {
 	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Query("order_id"))

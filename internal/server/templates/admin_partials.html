@@ -1,6 +1,6 @@
 {{define "admin_css"}}
 {{template "theme_css" .}}
-<style>
+<style nonce="{{.Nonce}}">
 /* 1440px = 88px rail + 2x32px gutters + 1288px canvas. Shared 16px grid gap. */
 body{padding-left:88px}
 .topbar{position:fixed;inset:0 auto 0 0;width:88px;z-index:20;background:var(--bg);border-right:1px solid var(--line)}
@@ -57,7 +57,7 @@ body{padding-left:88px}
     <div class="userbox">
       {{template "theme_toggle" .}}
       <span class="who">{{.Base.User}}</span>
-      <form method="post" action="{{adminPath}}/logout" style="margin:0">
+      <form class="m-0" method="post" action="{{adminPath}}/logout" >
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
         <button type="submit" class="linkbtn">退出</button>
       </form>

@@ -7,6 +7,7 @@
   <title>{{.Base.Title}} · LitePay</title>
   {{template "theme_head" .}}
   {{template "admin_css" .}}
+{{template "layout_css" .}}
 </head>
 <body>
   {{template "admin_nav" .}}
@@ -21,7 +22,7 @@
 
     <section class="card"><div class="card-b">
       <h2>队列与取消同步</h2>
-      {{if .Queues.CancellationReviewWaiting}}<p class="banner" role="alert">{{.Queues.CancellationReviewWaiting}} 笔取消后到账待核对或退款，请进入对应订单详情登记退款凭证。</p>{{range .CancellationReviewQueue}}<p style="overflow-wrap:anywhere"><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.TradeNo}}</a> · {{.Provider}} / {{.EventID}} · 待核对退款</p>{{end}}{{end}}
+      {{if .Queues.CancellationReviewWaiting}}<p class="banner" role="alert">{{.Queues.CancellationReviewWaiting}} 笔取消后到账待核对或退款，请进入对应订单详情登记退款凭证。</p>{{range .CancellationReviewQueue}}<p class="wrap-anywhere" ><a href="{{adminPath}}/orders/{{.TradeNo}}">{{.TradeNo}}</a> · {{.Provider}} / {{.EventID}} · 待核对退款</p>{{end}}{{end}}
       {{range .ProviderHealths}}{{if .Configured}}<p {{if not .Ready}}class="banner" role="alert"{{end}}>{{.Provider}}：{{if .Ready}}运行正常{{else}}{{.Reason}}{{end}}</p>{{end}}{{end}}
       <p>商户通知：待确认 {{.Queues.CallbackWaiting}} 笔 · 发送中 {{.Queues.CallbackInFlight}} 笔 · 最早待确认已等待 {{.Queues.OldestCallbackSeconds}} 秒</p>
       <p>历史补扫：待处理 {{.Queues.HistoricalPending}} 项 · 剩余窗口 {{.Queues.HistoricalRemainingSeconds}} 秒 · 最早窗口距今 {{.Queues.OldestHistoricalSeconds}} 秒</p>
@@ -47,7 +48,7 @@
     <h2>最近订单</h2>
     <section class="card">
       <div class="table-wrap" tabindex="0" role="region" aria-label="最近订单">
-        <table style="--label-1:'商户订单号';--label-2:'付款方式';--label-3:'应付金额';--label-4:'状态';--label-5:'创建时间'">
+        <table class="dashboard-columns" >
           <thead>
             <tr>
               <th>商户订单号</th>
@@ -78,7 +79,7 @@
     <h2>未归属到账记录</h2>
     <section class="card">
       <div class="table-wrap" tabindex="0" role="region" aria-label="未归属到账记录">
-        <table style="--label-1:'平台 / 原始资金事件';--label-2:'查询参考号';--label-3:'币种 / 到账金额';--label-4:'状态与原因'">
+        <table class="evidence-columns" >
           <thead>
             <tr>
               <th>平台 / 原始资金事件</th>

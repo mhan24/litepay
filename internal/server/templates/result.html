@@ -7,7 +7,7 @@
 <title>{{.Title}} · LitePay</title>
 {{template "theme_head" .}}
 {{template "theme_css" .}}
-<style>
+<style nonce="{{.Nonce}}">
   body{display:flex;align-items:center;justify-content:center;padding:24px}
   .card{width:100%;max-width:560px;padding:32px 26px;border:1px solid var(--line);border-radius:var(--radius-xl);
     background:var(--surface);box-shadow:none;text-align:left}
@@ -30,6 +30,7 @@
   .btn:hover{opacity:.92;transform:translateY(-1px)}
   .btn:active{transform:translateY(1px)}
 </style>
+{{template "layout_css" .}}
 </head>
 <body>
   <main class="card">
@@ -40,7 +41,7 @@
     <div class="icon ok"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></div>
     <h1>支付成功</h1>
     <p>款项已确认到账，请返回商户页面查看交付进度。</p>
-    {{if .MerchantReview}}<p style="margin-top:12px">款项在付款时间结束后确认到账，需商户核对订单是否可以交付。请联系商户确认，请勿重复付款。</p>{{else if ne .NotifyStatus "SUCCESS"}}<p style="margin-top:12px">付款已确认，商户尚未确认收到通知。请稍后返回商户页面查看；若长时间未更新，请联系商户客服，请勿重复付款。</p>{{end}}
+    {{if .MerchantReview}}<p class="mt-12" >款项在付款时间结束后确认到账，需商户核对订单是否可以交付。请联系商户确认，请勿重复付款。</p>{{else if ne .NotifyStatus "SUCCESS"}}<p class="mt-12" >付款已确认，商户尚未确认收到通知。请稍后返回商户页面查看；若长时间未更新，请联系商户客服，请勿重复付款。</p>{{end}}
     {{else if eq .Status "CANCELED"}}
     <div class="icon canceled"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg></div>
     <h1>订单已取消</h1>
@@ -65,7 +66,7 @@
     {{with externalURL .ReturnURL}}<a class="btn" href="{{.}}">返回商户查看订单</a>{{end}}
   </main>
 {{template "theme_script" .}}
-{{if .SettlementPending}}{{template "status_poll_script" .}}<script>
+{{if .SettlementPending}}{{template "status_poll_script" .}}<script nonce="{{.Nonce}}">
 var phaseChanged=false;
 window.pollOrderStatus({{.TradeNo}},function(d){if(d.payment_phase!=='settling'){phaseChanged=true;location.reload()}},function(){return phaseChanged});
 </script>{{end}}

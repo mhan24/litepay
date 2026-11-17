@@ -1,4 +1,4 @@
-{{define "status_poll_script"}}<script>
+{{define "status_poll_script"}}<script nonce="{{.Nonce}}">
 window.pollOrderStatus=function(no,receive,stopped){
   var runs=0,failures=0,timer,running=false;
   function poll(){

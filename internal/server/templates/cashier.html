@@ -7,7 +7,7 @@
 <title>{{.Title}} · {{.OriginMoney}} USD</title>
 {{template "theme_head" .}}
 {{template "theme_css" .}}
-<style>
+<style nonce="{{.Nonce}}">
 body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
 .page{width:100%;max-width:1000px;margin:0 auto}.checkout-brand{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}.wordmark{display:flex;align-items:center;gap:10px}.mark{width:28px;height:28px}.wordmark strong{font-size:16px;font-weight:600;letter-spacing:-.3px}.wordmark-copy{display:flex;flex-direction:column}.wordmark-copy span{font-size:12px;color:var(--muted)}
 /* 1000px = 352px receipt + 648px payment. Both columns share a 32px inset. */
@@ -28,11 +28,12 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
 @media(max-width:640px){body{padding:20px 16px 32px}.checkout-brand{margin-bottom:20px}.card{grid-template-columns:1fr}.receipt-aside{padding:24px;border-right:0;border-bottom:1px solid var(--line)}.receipt-aside h1{font-size:24px}.receipt-aside>p{display:none}.stage-transfer .order-total{display:none}.order-meta{gap:12px}.order-meta .row{flex-direction:row;justify-content:space-between;gap:20px}.order-meta .v{text-align:right;max-width:70%}.order-total{margin:20px 0 0;padding:16px 0 0;border-bottom:0;display:flex;justify-content:space-between;align-items:center}.order-total strong{font-size:22px;letter-spacing:-.5px}.order-total small{font-size:12px}.order-total span{font-size:13px}.receipt-help{display:none}.payment-panel{padding:24px}.amount-box{padding:20px}.amount-row{gap:8px}.amount-token{width:24px;height:24px}.amount{font-size:36px}.copy{min-height:44px}.amount-row .copy{margin-left:auto}.amount-label{flex-wrap:wrap;gap:4px}.pay-focus{gap:12px}.pay-focus .uid{font-size:20px}.channel-state{display:none}.page-tip{line-height:1.7}.provider-btn,.currency-btn{padding:18px 14px}}
 @media(max-width:360px){.payment-panel,.receipt-aside{padding:20px}.amount{font-size:32px}.amount-row .copy{margin-left:0}}
 </style>
+{{template "layout_css" .}}
 </head>
 <body class="{{if eq .Provider "binance"}}brand-binance{{else if eq .Provider "okx"}}brand-okx{{else}}brand-neutral{{end}}">
 <div class="page {{if not .NeedsProvider}}{{if not .NeedsCurrency}}stage-transfer{{end}}{{end}}">
   <header class="checkout-brand">
-    <a class="wordmark" href="/" style="text-decoration:none"><span class="mark">{{template "brand_mark" .}}</span><strong>LitePay</strong></a>
+    <a class="brand-link wordmark" href="/" ><span class="mark">{{template "brand_mark" .}}</span><strong>LitePay</strong></a>
     {{template "theme_toggle" .}}
   </header>
   <section class="card" aria-label="订单付款">
@@ -110,7 +111,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
         <span class="amount" id="amount">{{.Amount}}</span>
         <button class="copy" type="button" data-copy="{{.Amount}}" id="copy-amount">复制金额</button>
       </div>
-      <div class="pay-focus" style="margin-top:13px">
+      <div class="cashier-amount-note pay-focus" >
         <div>
           <span class="label">收款币种</span>
           <div class="value">
@@ -118,7 +119,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
             <span class="currency">{{.Currency}}</span>
           </div>
         </div>
-        <span class="badge" style="margin:0">{{if eq .Provider "ton"}}TON 主网{{else}}站内转账{{end}}</span>
+        <span class="m-0 badge" >{{if eq .Provider "ton"}}TON 主网{{else}}站内转账{{end}}</span>
       </div>
       <div class="amount-sub">订单金额 ${{.OriginMoney}} USD · 1 {{.Currency}} = {{if eq .Provider "ton"}}{{.RateUSD}}{{else}}1{{end}} USD{{if eq .Provider "ton"}} · 已锁定本单应付数量{{end}}</div>
     </div>
@@ -195,12 +196,12 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     </svg>
     <h2 id="ov-title">支付成功</h2>
     <p id="ov-desc">正在跳转回商户页面…</p>
-    <a id="ov-review" href="/pay/{{.TradeNo}}" hidden style="display:none;margin-top:20px;font-size:14px;text-underline-offset:4px">查看订单状态</a>
+    <a class="review-link" id="ov-review" href="/pay/{{.TradeNo}}" hidden >查看订单状态</a>
   </div>
 </dialog>
 
 {{template "status_poll_script" .}}
-<script>
+<script nonce="{{.Nonce}}">
 (function () {
   var TRADE_NO = "{{.TradeNo}}";
   var RETURN_URL = {{externalURL .ReturnURL}};

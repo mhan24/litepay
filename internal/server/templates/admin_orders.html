@@ -7,6 +7,7 @@
   <title>{{.Base.Title}} · LitePay</title>
   {{template "theme_head" .}}
   {{template "admin_css" .}}
+{{template "layout_css" .}}
 </head>
 <body>
   {{template "admin_nav" .}}
@@ -25,7 +26,7 @@
 
     <section class="card">
       <div class="table-wrap" tabindex="0" role="region" aria-label="订单列表">
-        <table style="--label-1:'商户订单号';--label-2:'付款方式';--label-3:'应付金额';--label-4:'状态';--label-5:'创建时间';--label-6:'操作'">
+        <table class="orders-columns" >
           <thead>
             <tr>
               <th>商户订单号</th>

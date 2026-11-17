@@ -62,6 +62,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		return nil, err
 	}
 	r.Use(gin.Recovery())
+	r.Use(contentSecurityPolicy)
 	r.Use(func(c *gin.Context) {
 		c.Header("Referrer-Policy", "no-referrer")
 		c.Header("X-Content-Type-Options", "nosniff")

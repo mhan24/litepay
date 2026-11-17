@@ -7,6 +7,7 @@
   <title>{{.Base.Title}} · LitePay</title>
   {{template "theme_head" .}}
   {{template "admin_css" .}}
+{{template "layout_css" .}}
 </head>
 <body>
   {{template "admin_nav" .}}
@@ -26,12 +27,12 @@
         <span class="k">建单接口</span>
         <code>{{.BaseURL}}/api/v1/order/create-order</code>
         <span class="k">API Token</span>
-        <div class="v" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="inline-actions v" >
           {{if .Token}}
           <code>{{.Token}}</code>
           {{else}}
           <code>{{.TokenMask}}</code>
-          <form method="post" action="{{adminPath}}/integration" style="margin:0">
+          <form class="m-0" method="post" action="{{adminPath}}/integration" >
             <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
             <div class="field"><label for="reveal-current-password">当前密码</label><input id="reveal-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required></div>
             <button type="submit" class="btn btn-ghost btn-sm">显示完整 Token</button>
@@ -44,10 +45,10 @@
     <p class="section-desc">支持 USD 计价订单：USDT 与 USDC 走交易所站内免手续费转账，GRAM 走 TON 主网链上转账。GRAM 订单的支付成功回调中，amount 为原始 USD 订单金额，actual_amount 为实收 GRAM 数量。系统仅发送 status=2 的支付成功回调，不发送超时过期通知；商户端须验证签名、按订单号幂等交付，并在处理成功后返回 success 或 ok。</p>
 
     <p class="hint">{{if not .CanRotateToken}}生产环境已暂停 Token 轮换，需先完成商城端历史密钥验签兼容性验收并开启配置。{{end}}当前待确认通知 {{.PendingNotifyCount}} 笔。轮换后新订单使用新 Token，历史订单回调继续使用原密钥版本；轮换前请确认商城端支持旧版本密钥验签。</p>
-    <form method="post" action="{{adminPath}}/settings/token">
+    <form method="post" action="{{adminPath}}/settings/token" data-confirm="轮换后新订单将使用新 Token，历史通知仍使用原密钥版本。确认商城端已兼容旧版本密钥并立即轮换？">
       <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
 <div class="field"><label for="rotate-current-password">当前密码</label><input id="rotate-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required></div>
-      <button class="btn btn-danger" {{if not .CanRotateToken}}disabled{{end}} onclick="return confirm('轮换后新订单将使用新 Token，历史通知仍使用原密钥版本。确认商城端已兼容旧版本密钥并立即轮换？')">轮换 API Token</button>
+      <button class="btn btn-danger" {{if not .CanRotateToken}}disabled{{end}}>轮换 API Token</button>
     </form>
   </main>
   {{template "theme_script" .}}
