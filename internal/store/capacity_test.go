@@ -49,6 +49,11 @@ func TestReselectionAbuseCannotGrowPool(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	o := readyOrder(t, s, "abuse")
+	// Keep the entire burst inside the throttle window even on slow race runners.
+	// allowSelectionFixture below explicitly advances the permitted-change phase.
+	if err := s.DB().Model(&model.Order{}).Where("id = ?", o.ID).Update("last_selection_at", time.Now().Add(time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
 	for range 1000 {
 		if _, err := s.Select(ctx, o.TradeNo, "binance", "USDC", "receiver", 2, 10000, 10000, 99, 120); !errors.Is(err, ErrSelectionThrottled) {
 			t.Fatal(err)
