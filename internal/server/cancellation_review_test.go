@@ -56,8 +56,11 @@ func TestCancellationRefundReviewRequiresAdminCSRFAndFreshSignedStatus(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	post := func(cookie, csrf string) *httptest.ResponseRecorder {
-		v := url.Values{"csrf": {csrf}, "provider": {"binance"}, "event_id": {"canceled-funds"}, "reference": {"external-refund-proof"}, "reason": {"verified original funds and actual refund"}}
+	post := func(cookie, csrf string, passwords ...string) *httptest.ResponseRecorder {
+		v := url.Values{"current_password": {cfg.Admin.Password}, "csrf": {csrf}, "provider": {"binance"}, "event_id": {"canceled-funds"}, "reference": {"external-refund-proof"}, "reason": {"verified original funds and actual refund"}}
+		if len(passwords) > 0 {
+			v.Set("current_password", passwords[0])
+		}
 		r := httptest.NewRequest("POST", "/admin/orders/refund-test/refund-record", strings.NewReader(v.Encode()))
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		if cookie != "" {
@@ -79,6 +82,17 @@ func TestCancellationRefundReviewRequiresAdminCSRFAndFreshSignedStatus(t *testin
 	if w := getRequest(engine, "/pay/refund-test"); w.Code != 200 || !strings.Contains(w.Body.String(), "商城已取消，到账核对中") {
 		t.Fatal(w.Code, w.Body.String())
 	}
+	for _, password := range []string{"", "wrong"} {
+		if w := post(cookie, csrf, password); w.Code != http.StatusForbidden {
+			t.Fatal("refund accepted without password", w.Code)
+		}
+		var audits int64
+		st.DB().Model(&model.CancellationReviewAudit{}).Count(&audits)
+		if reviewed, err := st.CancellationRefundReviewed(ctx, o.TradeNo, o.OutTradeNo); err != nil || reviewed || audits != 0 {
+			t.Fatal("rejected refund changed audit state", err)
+		}
+	}
+
 	if w := post(cookie, csrf); w.Code != 303 || strings.Contains(w.Header().Get("Location"), "t=err") {
 		t.Fatal(w.Code, w.Header().Get("Location"))
 	}

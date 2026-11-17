@@ -643,6 +643,16 @@ func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 		return
 	}
 
+	// Deployment controls (notify_hosts, base_url, production) are startup-only;
+	// parseSettingsForm never exposes them as editable settings.
+	cfg := h.C()
+	sensitive := p.BinanceAPIKey != nil || p.BinanceAPISecret != nil || p.OKXAPIKey != nil || p.OKXAPISecret != nil || p.OKXPassphrase != nil || p.TONAPIKey != nil ||
+		(p.BinanceUID != nil && *p.BinanceUID != cfg.Checkout.Binance.UID) || (p.OKXUID != nil && *p.OKXUID != cfg.Checkout.OKX.UID) || (p.TONAddress != nil && *p.TONAddress != cfg.TON.Address)
+	if sensitive && !h.reauthenticate(c) {
+		c.Redirect(http.StatusSeeOther, destination+url.QueryEscape("当前密码错误或验证过于频繁，请重新登录后重试")+"&t=err")
+		return
+	}
+
 	operator := c.GetString("admin_user")
 	checks, err := h.cfg.UpdateWithVerification(c.Request.Context(), p, operator)
 	if err != nil {
@@ -755,6 +765,11 @@ func (h *Handlers) AdminSiteSave(c *gin.Context) {
 // AdminRotateToken POST /admin/settings/token —— 服务端生成新 Token，
 // 新值只在本次跳转的接入页展示，不在设置表单中回填。
 func (h *Handlers) AdminRotateToken(c *gin.Context) {
+	if !h.reauthenticate(c) {
+		c.String(http.StatusForbidden, "当前密码错误或验证过于频繁，请重新登录后重试")
+		return
+	}
+
 	_, err := h.cfg.RotateAPIToken(c.Request.Context(), c.GetString("admin_user"))
 	if err != nil {
 		c.Redirect(http.StatusSeeOther,
@@ -1077,6 +1092,11 @@ func (h *Handlers) AdminIntegration(c *gin.Context) {
 }
 
 func (h *Handlers) AdminIntegrationReveal(c *gin.Context) {
+	if !h.reauthenticate(c) {
+		c.String(http.StatusForbidden, "当前密码错误或验证过于频繁，请重新登录后重试")
+		return
+	}
+
 	operator := c.GetString("admin_user")
 	if h.log != nil {
 		h.log.Warn("管理员查看完整 BEpusdt API Token", "operator", operator, "ip", c.ClientIP())
@@ -1113,6 +1133,11 @@ func (h *Handlers) pendingNotifyCount(c *gin.Context) int64 {
 }
 
 func (h *Handlers) AdminReconcilePayment(c *gin.Context) {
+	if !h.reauthenticate(c) {
+		c.String(http.StatusForbidden, "当前密码错误或验证过于频繁，请重新登录后重试")
+		return
+	}
+
 	no := c.Param("trade_no")
 	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
 	err := h.st.ReconcilePayment(c.Request.Context(), no, c.PostForm("provider"), strings.TrimSpace(c.PostForm("event_id")), c.GetString("admin_user"), c.PostForm("reason"))
@@ -1141,6 +1166,11 @@ type pendingCallbackView struct {
 }
 
 func (h *Handlers) AdminRecordRefund(c *gin.Context) {
+	if !h.reauthenticate(c) {
+		c.String(http.StatusForbidden, "当前密码错误或验证过于频繁，请重新登录后重试")
+		return
+	}
+
 	no := c.Param("trade_no")
 	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
 	err := h.st.RecordCancellationRefund(c.Request.Context(), no, c.PostForm("provider"), c.PostForm("event_id"), c.GetString("admin_user"), c.PostForm("reference"), c.PostForm("reason"))

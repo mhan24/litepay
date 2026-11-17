@@ -51,8 +51,11 @@ func TestManualPaymentRecoveryAndHistoricalScanAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	post := func(action, cookie, csrf, eventID string) *httptest.ResponseRecorder {
-		values := url.Values{"csrf": {csrf}, "provider": {"binance"}, "event_id": {eventID}, "reason": {"核对平台流水，商城确认尚未交付"}}
+	post := func(action, cookie, csrf, eventID string, passwords ...string) *httptest.ResponseRecorder {
+		values := url.Values{"current_password": {cfg.Admin.Password}, "csrf": {csrf}, "provider": {"binance"}, "event_id": {eventID}, "reason": {"核对平台流水，商城确认尚未交付"}}
+		if len(passwords) > 0 {
+			values.Set("current_password", passwords[0])
+		}
 		req := httptest.NewRequest("POST", "/admin/orders/late-recovery/"+action, strings.NewReader(values.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		if cookie != "" {
@@ -73,6 +76,19 @@ func TestManualPaymentRecoveryAndHistoricalScanAuthorization(t *testing.T) {
 	if w := post("rescan", token, csrf, ""); w.Code != 303 || strings.Contains(w.Header().Get("Location"), "t=err") {
 		t.Fatal(w.Code, w.Header())
 	}
+	for _, password := range []string{"", "wrong"} {
+		if w := post("reconcile", token, csrf, event.EventID, password); w.Code != http.StatusForbidden {
+			t.Fatal("reconcile accepted without password", w.Code)
+		}
+		var audits, callbacks int64
+		st.DB().Model(&model.PaymentRecovery{}).Count(&audits)
+		st.DB().Model(&model.Callback{}).Count(&callbacks)
+		fresh, err := st.GetByTradeNo(ctx, o.TradeNo)
+		if err != nil || fresh.Status != model.Expired || audits != 0 || callbacks != 0 {
+			t.Fatal("rejected reconciliation had side effects", err)
+		}
+	}
+
 	if w := post("reconcile", token, csrf, "invented"); !strings.Contains(w.Header().Get("Location"), "t=err") {
 		t.Fatal("invented evidence accepted")
 	}

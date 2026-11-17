@@ -33,6 +33,7 @@
           <code>{{.TokenMask}}</code>
           <form method="post" action="{{adminPath}}/integration" style="margin:0">
             <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+            <div class="field"><label for="reveal-current-password">当前密码</label><input id="reveal-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required></div>
             <button type="submit" class="btn btn-ghost btn-sm">显示完整 Token</button>
           </form>
           {{end}}
@@ -45,6 +46,7 @@
     <p class="hint">{{if not .CanRotateToken}}生产环境已暂停 Token 轮换，需先完成商城端历史密钥验签兼容性验收并开启配置。{{end}}当前待确认通知 {{.PendingNotifyCount}} 笔。轮换后新订单使用新 Token，历史订单回调继续使用原密钥版本；轮换前请确认商城端支持旧版本密钥验签。</p>
     <form method="post" action="{{adminPath}}/settings/token">
       <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+<div class="field"><label for="rotate-current-password">当前密码</label><input id="rotate-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required></div>
       <button class="btn btn-danger" {{if not .CanRotateToken}}disabled{{end}} onclick="return confirm('轮换后新订单将使用新 Token，历史通知仍使用原密钥版本。确认商城端已兼容旧版本密钥并立即轮换？')">轮换 API Token</button>
     </form>
   </main>

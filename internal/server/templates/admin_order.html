@@ -50,7 +50,7 @@
       <form method="post" action="{{adminPath}}/orders/{{$.Order.TradeNo}}/refund-record">
         <input type="hidden" name="csrf" value="{{$.Base.CSRF}}"><input type="hidden" name="provider" value="{{.Provider}}"><input type="hidden" name="event_id" value="{{.EventID}}">
         <div class="form-grid">
-          <div class="field full"><label for="refund-reference-{{.ID}}">外部退款凭证编号</label><input id="refund-reference-{{.ID}}" class="input" name="reference" required maxlength="200" value="{{.RefundReference}}"></div>
+          <div class="field"><label for="refund-current-password-{{.ID}}">当前密码</label><input id="refund-current-password-{{.ID}}" class="input" type="password" name="current_password" autocomplete="current-password" required></div><div class="field full"><label for="refund-reference-{{.ID}}">外部退款凭证编号</label><input id="refund-reference-{{.ID}}" class="input" name="reference" required maxlength="200" value="{{.RefundReference}}"></div>
           <div class="field full"><label for="refund-reason-{{.ID}}">取消、交付与退款核对说明</label><input id="refund-reason-{{.ID}}" class="input" name="reason" required maxlength="300"></div>
         </div>
         <p class="hint">数据库恢复后仅需重新核对已有凭证，请勿据此重复转账退款。</p>
@@ -70,7 +70,7 @@
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
         <div class="form-grid"><div class="field"><label>收款平台</label><select class="input" name="provider"><option value="binance">Binance</option><option value="okx">OKX</option><option value="ton">TON</option></select></div>
         <div class="field"><label>原始资金事件编号</label><input class="input" name="event_id" required></div>
-        <div class="field full"><label>核对结果与补单原因</label><input class="input" name="reason" required maxlength="300"></div></div>
+        <div class="field"><label for="reconcile-current-password">当前密码</label><input id="reconcile-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required></div><div class="field full"><label>核对结果与补单原因</label><input class="input" name="reason" required maxlength="300"></div></div>
         <button class="btn btn-ghost" type="submit" style="margin-top:12px">确认证据并补单</button>
       </form></div></section>{{end}}
     {{range .PaymentRecoveries}}<p>补单审计 · {{.CreatedAt}} · {{.Operator}} · {{.Provider}} / {{.EventID}} · {{.Reason}}</p>{{end}}

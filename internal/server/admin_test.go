@@ -240,7 +240,7 @@ func TestAdminIntegrationMasksTokenByDefaultAndAuditsReveal(t *testing.T) {
 	}
 
 	// 3. POST /admin/integration with valid CSRF reveals the full token and writes an audit log.
-	postReveal := httptest.NewRequest(http.MethodPost, "/admin/integration", strings.NewReader(url.Values{"csrf": {csrf}}.Encode()))
+	postReveal := httptest.NewRequest(http.MethodPost, "/admin/integration", strings.NewReader(url.Values{"csrf": {csrf}, "current_password": {cfg.Admin.Password}}.Encode()))
 	postReveal.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	postReveal.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
 	w = httptest.NewRecorder()
