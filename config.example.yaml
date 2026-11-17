@@ -22,6 +22,8 @@ server:
   trusted_proxies: []
   # 敏感凭据 AES-256-GCM 加密主密钥只读文件路径（32 字节或 64 位 hex）；也可通过环境变量 LITEPAY_MASTER_KEY_FILE / LITEPAY_MASTER_KEY 提供
   master_key_file: ""
+  # /readyz 与 /readyz/providers/:provider 返回详细平台状态与原因所需的只读探针令牌；留空则仅已登录管理员可见详情
+  readiness_token: ""
   # production 为 true 时必须填写；商户回调仅允许匹配此精确主机名列表且强制使用 HTTPS
   notify_hosts: []
 

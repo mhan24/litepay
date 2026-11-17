@@ -126,6 +126,7 @@ func TestCanceledMerchantLateSuccessCallbackCreatesAuditedFundsConflict(t *testi
 import importlib.util,json,sys,time,pathlib
 spec=importlib.util.spec_from_file_location('sync',sys.argv[1]);s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
 gateway=sys.argv[2];root=pathlib.Path(sys.argv[3]);action=sys.argv[4];state=s.journal(root/'journal.db')
+base={'scan':-15,'unproved':-10,'review':-5}[action];seq=iter(range(base,10));original=time.time;s.time.time=lambda:original()+next(seq)
 s.check_generation(root/'merchant.db',state,gateway)
 if action=='scan':
  s.sync_once(root/'merchant.db',state,gateway)
@@ -144,7 +145,6 @@ else:
  assert state.execute('SELECT count(*) FROM conflict_reviews').fetchone()[0]==1
  assert s.sync_once(root/'merchant.db',state,gateway)==0
  assert s.queue_status(state,gateway)['replay_complete']
- original=time.time;s.time.time=lambda:original()+2
  s.report_health(root/'merchant.db',state,gateway,True)
 `, script, gateway.URL, root, action)
 		if output, e := cmd.CombinedOutput(); e != nil {

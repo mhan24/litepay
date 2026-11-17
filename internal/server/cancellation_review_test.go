@@ -117,7 +117,7 @@ func TestCancellationRefundReviewRequiresAdminCSRFAndFreshSignedStatus(t *testin
 	if err = st.BeginRecovery(ctx, "recovered snapshot"); err != nil {
 		t.Fatal(err)
 	}
-	if w := send(true, time.Now().Unix()); !strings.Contains(w.Body.String(), `"refund_recorded":false`) {
+	if w := send(true, time.Now().Unix()+1); !strings.Contains(w.Body.String(), `"refund_recorded":false`) {
 		t.Fatal("old-generation refund review accepted", w.Body.String())
 	}
 }
@@ -152,8 +152,10 @@ func TestPaidCancellationStatusTracksEachRefundAndRecoveryGeneration(t *testing.
 			t.Fatal(err)
 		}
 	}
+	var checkSeq int64
 	assertStatus := func(want string, current bool) {
 		t.Helper()
+		checkSeq++
 		w := getRequest(engine, "/api/order/status?order_id="+o.TradeNo)
 		var response struct {
 			Data struct {
@@ -173,7 +175,7 @@ func TestPaidCancellationStatusTracksEachRefundAndRecoveryGeneration(t *testing.
 		if strings.Contains(w.Body.String(), "private-refund") || strings.Contains(w.Body.String(), "review_generation\"") {
 			t.Fatal("public status leaked private data", w.Body.String())
 		}
-		query := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "timestamp": fmt.Sprint(time.Now().Unix())}
+		query := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "timestamp": fmt.Sprint(time.Now().Unix() - 20 + checkSeq)}
 		query["signature"] = sign.BEpusdtSignGeneric(query, mgr.Get().BEpusdt.APIToken)
 		raw, _ := json.Marshal(query)
 		signed := httptest.NewRecorder()

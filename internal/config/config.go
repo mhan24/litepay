@@ -84,8 +84,18 @@ type ServerConfig struct {
 	StoreURL            string   `yaml:"store_url"`       // 根地址跳转目标；留空返回 404。
 	TrustedProxies      []string `yaml:"trusted_proxies"` // Only explicit reverse proxies may supply client IP headers.
 	MasterKeyFile       string   `yaml:"master_key_file"` // 敏感凭据加密主密钥只读文件路径（也可通过 LITEPAY_MASTER_KEY_FILE 指定）
+	ReadinessToken      string   `yaml:"readiness_token"` // /readyz 详细状态只读探针令牌
+	ProbeToken          string   `yaml:"probe_token"`     // readiness_token 的兼容别名
 	Addr                string   `yaml:"addr"`            // 监听地址，如 0.0.0.0:8080
 	BaseURL             string   `yaml:"base_url"`        // 网关对外访问地址
+}
+
+// ProbeTokenValue 返回配置的只读健康检查探针令牌。
+func (s ServerConfig) ProbeTokenValue() string {
+	if v := strings.TrimSpace(s.ReadinessToken); v != "" {
+		return v
+	}
+	return strings.TrimSpace(s.ProbeToken)
 }
 
 // DatabaseConfig SQLite 配置。
@@ -351,6 +361,8 @@ func (c *Config) normalize() error {
 		}
 	}
 	c.Server.MasterKeyFile = strings.TrimSpace(c.Server.MasterKeyFile)
+	c.Server.ReadinessToken = strings.TrimSpace(c.Server.ReadinessToken)
+	c.Server.ProbeToken = strings.TrimSpace(c.Server.ProbeToken)
 	if c.Server.Production && len(c.Server.TrustedProxies) == 0 {
 		fmt.Fprintln(os.Stderr, "[WARN] production 模式下 server.trusted_proxies 为空，若部署在反向代理后客户端 IP 将共用代理地址")
 	}

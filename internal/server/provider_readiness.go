@@ -1,10 +1,46 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"litepay/internal/config"
 	"litepay/internal/model"
 )
+
+func (h *Handlers) canReadReadinessDetails(c *gin.Context) bool {
+	cfg := h.C()
+	if cfg.AdminEnabled() && h.hasValidAdminSession(c) {
+		return true
+	}
+	want := cfg.Server.ProbeTokenValue()
+	if want == "" {
+		return false
+	}
+	got := strings.TrimSpace(c.GetHeader("X-Readiness-Token"))
+	if got == "" {
+		got = strings.TrimSpace(c.GetHeader("X-Probe-Token"))
+	}
+	if got == "" {
+		auth := strings.TrimSpace(c.GetHeader("Authorization"))
+		if len(auth) >= 7 && strings.EqualFold(auth[:7], "bearer ") {
+			got = strings.TrimSpace(auth[7:])
+		} else {
+			got = auth
+		}
+	}
+	if got == "" {
+		got = strings.TrimSpace(c.Query("token"))
+	}
+	if got == "" {
+		return false
+	}
+	gotHash := sha256.Sum256([]byte(got))
+	wantHash := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(gotHash[:], wantHash[:]) == 1
+}
 
 func (h *Handlers) providerAccepting(c *gin.Context, cfg *config.Config, provider string) bool {
 	return h.providerState(c, cfg, provider).Ready
@@ -65,15 +101,24 @@ func (h *Handlers) providerHealths(c *gin.Context) []providerHealth {
 	return out
 }
 func (h *Handlers) ProviderReady(c *gin.Context) {
+	detailed := h.canReadReadinessDetails(c)
 	for _, state := range h.providerHealths(c) {
 		if state.Provider == c.Param("provider") {
 			status := 200
 			if !state.Ready {
 				status = 503
 			}
+			if !detailed {
+				c.JSON(status, gin.H{"ready": state.Ready})
+				return
+			}
 			c.JSON(status, state)
 			return
 		}
+	}
+	if !detailed {
+		c.JSON(503, gin.H{"ready": false})
+		return
 	}
 	c.JSON(404, gin.H{"error": "unknown provider"})
 }

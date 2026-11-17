@@ -11,6 +11,8 @@ import (
 	"litepay/internal/settings"
 	"litepay/internal/sign"
 	"litepay/internal/store"
+	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -54,6 +56,7 @@ func TestRequiredCancellationHeartbeatControlsReadiness(t *testing.T) {
 	cfg := config.Default()
 	cfg.Server.Production = false
 	cfg.Server.CancelSyncRequired = true
+	cfg.Server.ReadinessToken = "test-probe-token"
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -67,7 +70,7 @@ func TestRequiredCancellationHeartbeatControlsReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.ScanResult(ctx, "binance", time.Now(), nil)
-	if w := getRequest(engine, "/readyz"); w.Code != 503 || !strings.Contains(w.Body.String(), "取消同步") {
+	if w := getProbeRequest(engine, "/readyz", "test-probe-token"); w.Code != 503 || !strings.Contains(w.Body.String(), "取消同步") {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	recovery, _ := st.Recovery(ctx)
@@ -161,6 +164,7 @@ func TestMissingGatewayPreventsHealthyReadinessEvenWhenSignedHealthy(t *testing.
 	cfg := config.Default()
 	cfg.Server.Production = false
 	cfg.Server.CancelSyncRequired = true
+	cfg.Server.ReadinessToken = "test-probe-token"
 	mgr := settings.New(cfg, st)
 	if err = mgr.Load(ctx); err != nil {
 		t.Fatal(err)
@@ -179,7 +183,7 @@ func TestMissingGatewayPreventsHealthyReadinessEvenWhenSignedHealthy(t *testing.
 	if current.Acknowledged {
 		t.Fatal("missing exception acknowledged recovery")
 	}
-	if w := getRequest(engine, "/readyz"); w.Code != 503 || !strings.Contains(w.Body.String(), "取消同步") {
+	if w := getProbeRequest(engine, "/readyz", "test-probe-token"); w.Code != 503 || !strings.Contains(w.Body.String(), "取消同步") {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
@@ -285,5 +289,94 @@ func TestSignedHeartbeatCannotHideUndiscoveredSourceWork(t *testing.T) {
 	r, _ = st.Recovery(ctx)
 	if r.Acknowledged {
 		t.Fatal("empty local queue hid unread source backlog")
+	}
+}
+
+func TestOrderSignedAPIRateLimitReplayAndLogThrottle(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Server.TrustedProxies = []string{"127.0.0.1"}
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Replay protection on timestamped endpoints: first signed request succeeds, replay within window fails.
+	genPayload := map[string]any{"timestamp": fmt.Sprint(time.Now().Unix())}
+	genPayload["signature"] = sign.BEpusdtSignGeneric(genPayload, mgr.Get().BEpusdt.APIToken)
+	genRaw, _ := json.Marshal(genPayload)
+	sendGen := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/order/cancel-sync-generation", bytes.NewReader(genRaw))
+		req.RemoteAddr = "127.0.0.1:1000"
+		req.Header.Set("X-Forwarded-For", "198.51.100.1")
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		return w
+	}
+	if w := sendGen(); !strings.Contains(w.Body.String(), `"status_code":200`) {
+		t.Fatalf("first generation request failed: %s", w.Body.String())
+	}
+	if w := sendGen(); !strings.Contains(w.Body.String(), "replayed") {
+		t.Fatalf("expected replayed generation request to be rejected, got: %s", w.Body.String())
+	}
+
+	// 2. Signature failure rate limit (per IP) and log throttling (at most 1 Warn log per minute per IP with reason).
+	logBuf.Reset()
+	for i := range 15 {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/order/create-order", strings.NewReader(`{"order_id":"o1","amount":10,"signature":"bad-sig"}`))
+		req.RemoteAddr = "127.0.0.1:1000"
+		req.Header.Set("X-Forwarded-For", "203.0.113.77")
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		if i < bepusdtSigFailLimit-1 && w.Code != http.StatusOK {
+			t.Fatalf("attempt %d expected 200 with status_code 400, got HTTP %d", i, w.Code)
+		}
+		if i >= bepusdtSigFailLimit && (w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "") {
+			t.Fatalf("attempt %d expected 429 Too Many Requests with Retry-After, got HTTP %d", i, w.Code)
+		}
+	}
+	logLines := 0
+	for _, line := range strings.Split(strings.TrimSpace(logBuf.String()), "\n") {
+		if strings.Contains(line, "BEpusdt API 签名校验被拒") {
+			logLines++
+			if !strings.Contains(line, "reason=invalid_signature") {
+				t.Fatalf("expected signature failure log to include reason, got: %s", line)
+			}
+		}
+	}
+	if logLines != 1 {
+		t.Fatalf("expected at most 1 signature failure log per minute for same IP, got %d:\n%s", logLines, logBuf.String())
+	}
+
+	// Another IP is unaffected by 203.0.113.77's signature failure lockout.
+	freshGen := map[string]any{"timestamp": fmt.Sprint(time.Now().Unix() + 1)}
+	freshGen["signature"] = sign.BEpusdtSignGeneric(freshGen, mgr.Get().BEpusdt.APIToken)
+	freshRaw, _ := json.Marshal(freshGen)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/order/cancel-sync-generation", bytes.NewReader(freshRaw))
+	req.RemoteAddr = "127.0.0.1:1000"
+	req.Header.Set("X-Forwarded-For", "198.51.100.2")
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), `"status_code":200`) {
+		t.Fatalf("expected clean IP to succeed, got: %s", w.Body.String())
 	}
 }

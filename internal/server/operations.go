@@ -11,6 +11,9 @@ import (
 )
 
 func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
+	if !h.checkOrderSigRateLimit(c) {
+		return
+	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
 	if err != nil {
 		h.bepusdtFail(c, "invalid health report")
@@ -18,12 +21,13 @@ func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
 	}
 	body, err := decodeBEpusdtJSON(raw)
 	if err != nil || !sign.BEpusdtVerifyGeneric(body, h.C().BEpusdt.APIToken) {
-		h.bepusdtFail(c, "signature verification failed")
+		h.bepusdtSigFail(c, "invalid_signature", "signature verification failed")
 		return
 	}
 	text := func(key string) string { v, _ := body[key].(string); return v }
+	now := time.Now()
 	stamp, err := strconv.ParseInt(text("timestamp"), 10, 64)
-	if err != nil || stamp < time.Now().Unix()-60 || stamp > time.Now().Unix()+10 {
+	if err != nil || stamp < now.Unix()-60 || stamp > now.Unix()+10 {
 		h.bepusdtFail(c, "stale health report")
 		return
 	}
@@ -45,6 +49,10 @@ func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
 			return
 		}
 	}
+	if h.replays != nil && !h.replays.accept("cancel-sync-status", body, now) {
+		h.bepusdtFail(c, "replayed health report")
+		return
+	}
 	generation := text("generation")
 	report := model.IntegrationHealth{DiscoveryPending: counts[4], DiscoveryLagSeconds: counts[5], Generation: generation, Missing: counts[3], Name: "dujiao_cancel_sync", Source: source, ReportedAt: stamp, Healthy: text("healthy") == "true", Pending: counts[0], Failures: counts[1], Conflicts: counts[2]}
 	if err = h.st.AcknowledgeRecovery(c.Request.Context(), generation, text("replay_complete") == "true", report); err != nil {
@@ -64,6 +72,9 @@ func (h *Handlers) AdminOperations(c *gin.Context) {
 }
 
 func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
+	if !h.checkOrderSigRateLimit(c) {
+		return
+	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
 	if err != nil {
 		h.bepusdtFail(c, "invalid generation request")
@@ -71,13 +82,18 @@ func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
 	}
 	body, err := decodeBEpusdtJSON(raw)
 	if err != nil || !sign.BEpusdtVerifyGeneric(body, h.C().BEpusdt.APIToken) {
-		h.bepusdtFail(c, "signature verification failed")
+		h.bepusdtSigFail(c, "invalid_signature", "signature verification failed")
 		return
 	}
+	now := time.Now()
 	stamp, _ := body["timestamp"].(string)
 	at, err := strconv.ParseInt(stamp, 10, 64)
-	if err != nil || at < time.Now().Unix()-60 || at > time.Now().Unix()+10 {
+	if err != nil || at < now.Unix()-60 || at > now.Unix()+10 {
 		h.bepusdtFail(c, "stale generation request")
+		return
+	}
+	if h.replays != nil && !h.replays.accept("cancel-sync-generation", body, now) {
+		h.bepusdtFail(c, "replayed generation request")
 		return
 	}
 	r, err := h.st.Recovery(c.Request.Context())
@@ -96,6 +112,9 @@ func (h *Handlers) paymentOperationsBlocked(c *gin.Context) bool {
 }
 
 func (h *Handlers) CancellationReviewStatus(c *gin.Context) {
+	if !h.checkOrderSigRateLimit(c) {
+		return
+	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
 	if err != nil {
 		h.bepusdtFail(c, "invalid review request")
@@ -103,13 +122,18 @@ func (h *Handlers) CancellationReviewStatus(c *gin.Context) {
 	}
 	body, err := decodeBEpusdtJSON(raw)
 	if err != nil || !sign.BEpusdtVerifyGeneric(body, h.C().BEpusdt.APIToken) {
-		h.bepusdtFail(c, "signature verification failed")
+		h.bepusdtSigFail(c, "invalid_signature", "signature verification failed")
 		return
 	}
+	now := time.Now()
 	text := func(k string) string { v, _ := body[k].(string); return v }
 	at, err := strconv.ParseInt(text("timestamp"), 10, 64)
-	if err != nil || at < time.Now().Unix()-60 || at > time.Now().Unix()+10 || text("trade_id") == "" || text("order_id") == "" || len(text("trade_id")) > 128 || len(text("order_id")) > 128 {
+	if err != nil || at < now.Unix()-60 || at > now.Unix()+10 || text("trade_id") == "" || text("order_id") == "" || len(text("trade_id")) > 128 || len(text("order_id")) > 128 {
 		h.bepusdtFail(c, "invalid review request")
+		return
+	}
+	if h.replays != nil && !h.replays.accept("cancellation-review", body, now) {
+		h.bepusdtFail(c, "replayed review request")
 		return
 	}
 	review, err := h.st.CancellationReviewByReference(c.Request.Context(), text("trade_id"), text("order_id"))

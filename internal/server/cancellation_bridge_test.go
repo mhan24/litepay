@@ -103,8 +103,9 @@ s.report_health(path,state,gateway,True)
 		t.Fatal(err)
 	}
 	cmd = exec.CommandContext(ctx, python, "-c", `
-import importlib.util,json,sys,pathlib
+import importlib.util,json,sys,time,pathlib
 spec=importlib.util.spec_from_file_location('sync',sys.argv[1]);s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
+original=time.time;s.time.time=lambda:original()+1
 gateway=sys.argv[2];json.load(sys.stdin);root=pathlib.Path(sys.argv[3]);state=s.journal(root/'journal.db')
 s.review_conflict(root/'commerce.db',state,gateway,'bridge-paid','Actual external refund recorded and independently checked')
 assert state.execute("SELECT outcome FROM cancellations WHERE trade_id='bridge-paid'").fetchone()[0]=='reviewed_conflict'

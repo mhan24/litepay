@@ -7,6 +7,7 @@ server:
   notify_hosts: []
   trusted_proxies: []
   master_key_file: ""
+  readiness_token: ""
   callback_workers: 8
   merchant_key_versions: false
   # Dujiao Next production requires the signed cancellation sync service.

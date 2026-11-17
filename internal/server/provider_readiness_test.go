@@ -51,6 +51,7 @@ func TestProviderAdmissionRequiresCurrentAccountAndScanAndRecovers(t *testing.T)
 	defer st.Close()
 	cfg := config.Default()
 	cfg.Server.Production = false
+	cfg.Server.ReadinessToken = "test-probe-token"
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "receiver"
@@ -107,7 +108,7 @@ func TestProviderAdmissionRequiresCurrentAccountAndScanAndRecovers(t *testing.T)
 	if err = p.Scan(ctx, "binance"); err != nil {
 		t.Fatal(err)
 	}
-	if w := getRequest(engine, "/readyz"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
+	if w := getProbeRequest(engine, "/readyz", "test-probe-token"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
 		t.Fatal("one failed provider removed healthy service", w.Code, w.Body.String())
 	}
 	if w := getRequest(engine, "/readyz/providers/binance"); w.Code != 200 {
@@ -116,7 +117,7 @@ func TestProviderAdmissionRequiresCurrentAccountAndScanAndRecovers(t *testing.T)
 	if w := getRequest(engine, "/readyz/providers/okx"); w.Code != 503 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if w := getRequest(engine, "/readyz/providers/unknown"); w.Code != 404 {
+	if w := getProbeRequest(engine, "/readyz/providers/unknown", "test-probe-token"); w.Code != 404 {
 		t.Fatal(w.Code)
 	}
 	no := createOrderViaBEpusdt(t, engine, mgr.Get().BEpusdt.APIToken, "https://shop.example")
@@ -205,6 +206,7 @@ func TestTONPriceFailureBlocksNewInstructionsButKeepsHistoricalCollection(t *tes
 	defer st.Close()
 	cfg := config.Default()
 	cfg.Server.Production = false
+	cfg.Server.ReadinessToken = "test-probe-token"
 	cfg.TON.Address = gram.DefaultAddress
 	cfg.Binance.APIKey = "fixture-key"
 	cfg.Binance.APISecret = "fixture-secret"
@@ -229,7 +231,7 @@ func TestTONPriceFailureBlocksNewInstructionsButKeepsHistoricalCollection(t *tes
 	}
 	assertBlocked := func(no string) {
 		t.Helper()
-		if w := getRequest(engine, "/readyz/providers/ton"); w.Code != 503 || !strings.Contains(w.Body.String(), "行情") {
+		if w := getProbeRequest(engine, "/readyz/providers/ton", "test-probe-token"); w.Code != 503 || !strings.Contains(w.Body.String(), "行情") {
 			t.Fatal(w.Code, w.Body.String())
 		}
 		if w := getRequest(engine, "/readyz"); w.Code != 503 {
@@ -300,7 +302,7 @@ func TestTONPriceFailureBlocksNewInstructionsButKeepsHistoricalCollection(t *tes
 	if err = p.Scan(ctx, "binance"); err != nil {
 		t.Fatal(err)
 	}
-	if w := getRequest(engine, "/readyz"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
+	if w := getProbeRequest(engine, "/readyz", "test-probe-token"); w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":true`) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if w := create("gram-down-binance-up"); !strings.Contains(w.Body.String(), `"status_code":400`) {
@@ -315,5 +317,90 @@ func TestTONPriceFailureBlocksNewInstructionsButKeepsHistoricalCollection(t *tes
 	}
 	if w := create("price-recovered"); !strings.Contains(w.Body.String(), `"status_code":200`) {
 		t.Fatal(w.Body.String())
+	}
+}
+
+func getProbeRequest(engine http.Handler, path, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if token != "" {
+		req.Header.Set("X-Readiness-Token", token)
+	}
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	return w
+}
+
+func TestReadinessAuthThreeCallers(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Server.ReadinessToken = "readonly-probe-secret"
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "admin-password-12345"
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	cfg.OKX.APIKey = "okx-key"
+	cfg.OKX.APISecret = "okx-secret"
+	cfg.OKX.Passphrase = "phrase"
+	cfg.Checkout.OKX.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p := worker.NewPoller(mgr, st)
+	p.UseTestSource("binance", &outageSource{uid: "receiver"})
+	p.UseTestSource("okx", &outageSource{uid: "receiver", identityErr: errors.New("401")})
+	if err := p.Scan(ctx, "binance"); err != nil {
+		t.Fatal(err)
+	}
+	_ = p.Scan(ctx, "okx")
+
+	engine, err := New(mgr, st, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Unauthenticated caller (and invalid probe token caller) only receives {"ready":bool}.
+	for _, token := range []string{"", "wrong-token", "readonly-probe-secret-extra"} {
+		w := getProbeRequest(engine, "/readyz", token)
+		if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != `{"ready":true}` {
+			t.Fatalf("unauthenticated /readyz leaked internal state (token=%q): code=%d body=%s", token, w.Code, w.Body.String())
+		}
+		w = getProbeRequest(engine, "/readyz/providers/okx", token)
+		if w.Code != http.StatusServiceUnavailable || strings.TrimSpace(w.Body.String()) != `{"ready":false}` {
+			t.Fatalf("unauthenticated /readyz/providers/okx leaked internal state (token=%q): code=%d body=%s", token, w.Code, w.Body.String())
+		}
+	}
+
+	// 2. Read-only probe token caller receives full providers, degraded flag, and failure reasons.
+	w := getProbeRequest(engine, "/readyz", "readonly-probe-secret")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"degraded":true`) || !strings.Contains(w.Body.String(), `"providers"`) {
+		t.Fatalf("probe token caller missing details on /readyz: %s", w.Body.String())
+	}
+	w = getProbeRequest(engine, "/readyz/providers/okx", "readonly-probe-secret")
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"reason"`) || !strings.Contains(w.Body.String(), `"configured":true`) {
+		t.Fatalf("probe token caller missing details on /readyz/providers/okx: %s", w.Body.String())
+	}
+
+	// 3. Logged-in admin session caller receives full providers, degraded flag, and failure reasons.
+	adminToken, _, err := newAdminAuth(mgr.Get()).issue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/readyz", "/readyz/providers/okx"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(&http.Cookie{Name: adminCookieName, Value: adminToken})
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), `"reason"`) {
+			t.Fatalf("logged-in admin missing details on %s: %s", path, rec.Body.String())
+		}
 	}
 }

@@ -30,6 +30,7 @@ import (
 type Handlers struct {
 	readLimit      *selectionLimiter
 	selectionLimit *selectionLimiter
+	replays        *replayCache
 	cfg            *settings.Manager
 	st             *store.Store
 	log            *slog.Logger
@@ -436,16 +437,30 @@ func (h *Handlers) Health(c *gin.Context) {
 }
 
 // Ready uses the same provider admission policy as new payment instructions.
+// Detailed providers, degraded flag and failure reasons are restricted to authenticated
+// administrators or callers presenting the read-only readiness probe token.
 func (h *Handlers) Ready(c *gin.Context) {
 	ctx := c.Request.Context()
 	cfg := h.C()
+	detailed := h.canReadReadinessDetails(c)
+	respondUnready := func(reason string, providers []providerHealth) {
+		if !detailed {
+			c.JSON(503, gin.H{"ready": false})
+			return
+		}
+		body := gin.H{"ready": false, "reason": reason}
+		if providers != nil {
+			body["providers"] = providers
+		}
+		c.JSON(503, body)
+	}
 	if cfg.Server.CancelSyncRequired {
 		if h.paymentOperationsBlocked(c) {
-			c.JSON(503, gin.H{"ready": false, "reason": "商城取消同步异常或心跳过期"})
+			respondUnready("商城取消同步异常或心跳过期", nil)
 			return
 		}
 	} else if health, err := h.st.IntegrationHealth(ctx); err == nil && health.Conflicts > 0 {
-		c.JSON(503, gin.H{"ready": false, "reason": "商城取消同步存在未解决的已支付冲突"})
+		respondUnready("商城取消同步存在未解决的已支付冲突", nil)
 		return
 	}
 
@@ -459,11 +474,15 @@ func (h *Handlers) Ready(c *gin.Context) {
 		}
 	}
 	if available == 0 {
-		c.JSON(503, gin.H{"ready": false, "reason": "无可用收款平台", "providers": states})
+		respondUnready("无可用收款平台", states)
 		return
 	}
 	if err := h.st.Ping(ctx); err != nil {
-		c.JSON(503, gin.H{"ready": false, "reason": "数据库暂不可用"})
+		respondUnready("数据库暂不可用", nil)
+		return
+	}
+	if !detailed {
+		c.JSON(200, gin.H{"ready": true})
 		return
 	}
 	c.JSON(200, gin.H{"ok": true, "ready": true, "degraded": failed > 0, "providers": states})

@@ -126,7 +126,8 @@ assert s.execute('SELECT outcome FROM cancellations').fetchone()[0]=='closed'
 	if did, e := n.Deliver(ctx); did || e != nil {
 		t.Fatal("notifications escaped recovery hold", did, e)
 	}
-	call(common + `s=b.journal(r/'bridge.db')
+	call(common + `import time;original=time.time;b.time.time=lambda:original()+1
+s=b.journal(r/'bridge.db')
 assert s.execute('SELECT outcome FROM cancellations').fetchone()[0]=='closed'
 assert b.run_cycle(r/'merchant.db',s,gateway,True)
 assert s.execute('SELECT count(*) FROM epoch_receipts').fetchone()[0]==2

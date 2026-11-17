@@ -48,6 +48,15 @@ func (l *selectionLimiter) allow(key string, limit int, now time.Time) (bool, in
 	l.entries[key] = v
 	return true, 0
 }
+func (l *selectionLimiter) blocked(key string, limit int, now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	v, exists := l.entries[key]
+	if !exists || !now.Before(v.until) || v.count < limit {
+		return false, 0
+	}
+	return true, max(1, int(v.until.Sub(now).Seconds())+1)
+}
 func (h *Handlers) LimitPaymentSelection(c *gin.Context) {
 	reject := func(seconds int) {
 		c.Header("Retry-After", strconv.Itoa(seconds))

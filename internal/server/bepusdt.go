@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +20,52 @@ import (
 	"litepay/internal/model"
 	"litepay/internal/sign"
 )
+
+const (
+	bepusdtSigFailLimit   = 10
+	replayCacheMaxEntries = 20000
+	replayCacheWindow     = 75 * time.Second
+)
+
+type replayCache struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+	cleanup time.Time
+}
+
+func newReplayCache() *replayCache {
+	return &replayCache{entries: make(map[string]time.Time)}
+}
+
+func (r *replayCache) accept(endpoint string, body map[string]interface{}, now time.Time) bool {
+	sig, _ := body["signature"].(string)
+	nonce, _ := body["nonce"].(string)
+	sig = strings.ToLower(strings.TrimSpace(sig))
+	nonce = strings.TrimSpace(nonce)
+	if sig == "" {
+		return false
+	}
+	key := endpoint + "\x00" + sig + "\x00" + nonce
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !now.Before(r.cleanup) || len(r.entries) >= replayCacheMaxEntries {
+		for k, until := range r.entries {
+			if !now.Before(until) {
+				delete(r.entries, k)
+			}
+		}
+		r.cleanup = now.Add(time.Minute)
+	}
+	if until, exists := r.entries[key]; exists && now.Before(until) {
+		return false
+	}
+	if len(r.entries) >= replayCacheMaxEntries {
+		return false
+	}
+	r.entries[key] = now.Add(replayCacheWindow)
+	return true
+}
 
 type bepusdtCreateRequest struct {
 	OrderID     string      `json:"order_id"`
@@ -45,6 +94,9 @@ type bepusdtResponse struct {
 }
 
 // BEpusdtCreateOrder 实现 BEpusdt 收银台模式。
+// 注意：由于上游 BEpusdt 协议（及独角数卡 BEpusdt 适配器）建单请求固定字段不包含 timestamp / nonce，
+// 为保持协议对外 JSON 字段与签名算法完全兼容，create-order 不强制要求时间戳，
+// 而是依靠 store.Create 按商户订单号（out_trade_no / order_id）的严格幂等约束，以及按 IP 的签名失败限流来防护重放与暴力猜解。
 func (h *Handlers) BEpusdtCreateOrder(c *gin.Context) {
 	h.createBEpusdtOrder(c)
 }
@@ -52,6 +104,9 @@ func (h *Handlers) BEpusdtCreateOrder(c *gin.Context) {
 // BEpusdtCancelOrder 实现 /api/v1/order/cancel-transaction。
 // 取消后停止认领付款；原金额档位继续保留到冷却期结束。
 func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
+	if !h.checkOrderSigRateLimit(c) {
+		return
+	}
 	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 	if err != nil {
 		h.bepusdtFail(c, "request error")
@@ -63,7 +118,7 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 		return
 	}
 	if !sign.BEpusdtVerifyGeneric(generic, h.C().BEpusdt.APIToken) {
-		h.bepusdtFail(c, "signature verification failed")
+		h.bepusdtSigFail(c, "invalid_signature", "signature verification failed")
 		return
 	}
 	var req bepusdtCancelRequest
@@ -94,6 +149,9 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 }
 
 func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
+	if !h.checkOrderSigRateLimit(c) {
+		return
+	}
 	if h.paymentOperationsBlocked(c) {
 		h.bepusdtFail(c, "商城取消同步异常或核对未完成，暂停接单")
 		return
@@ -114,7 +172,7 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		return
 	}
 	if !sign.BEpusdtVerifyGeneric(generic, cfg.BEpusdt.APIToken) {
-		h.bepusdtFail(c, "signature verification failed")
+		h.bepusdtSigFail(c, "invalid_signature", "signature verification failed")
 		return
 	}
 	amount, err := jsonNumberString(generic["amount"])
@@ -305,6 +363,42 @@ func orderStatusNumber(order *model.Order) int {
 	default:
 		return 1
 	}
+}
+
+func (h *Handlers) checkOrderSigRateLimit(c *gin.Context) bool {
+	if h.selectionLimit == nil {
+		return true
+	}
+	now := time.Now()
+	if blocked, retry := h.selectionLimit.blocked("order-sig-fail:"+c.ClientIP(), bepusdtSigFailLimit, now); blocked {
+		h.logOrderSigFail(c, "signature_rate_limited", "signature verification rate limit exceeded", now)
+		c.Header("Retry-After", strconv.Itoa(retry))
+		c.JSON(http.StatusTooManyRequests, bepusdtResponse{StatusCode: http.StatusTooManyRequests, Message: "signature verification rate limit exceeded", RequestID: ""})
+		return false
+	}
+	return true
+}
+
+func (h *Handlers) bepusdtSigFail(c *gin.Context, reason, message string) {
+	now := time.Now()
+	h.logOrderSigFail(c, reason, message, now)
+	if h.selectionLimit != nil {
+		if ok, retry := h.selectionLimit.allow("order-sig-fail:"+c.ClientIP(), bepusdtSigFailLimit, now); !ok {
+			c.Header("Retry-After", strconv.Itoa(retry))
+			c.JSON(http.StatusTooManyRequests, bepusdtResponse{StatusCode: http.StatusTooManyRequests, Message: message, RequestID: ""})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, bepusdtResponse{StatusCode: 400, Message: message, RequestID: ""})
+}
+
+func (h *Handlers) logOrderSigFail(c *gin.Context, reason, message string, now time.Time) {
+	if h.selectionLimit != nil {
+		if ok, _ := h.selectionLimit.allow("order-sig-log:"+c.ClientIP(), 1, now); !ok {
+			return
+		}
+	}
+	slog.Warn("BEpusdt API 签名校验被拒", "ip", c.ClientIP(), "path", c.Request.URL.Path, "reason", reason, "message", message)
 }
 
 func (h *Handlers) bepusdtFail(c *gin.Context, message string) {

@@ -101,7 +101,9 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		st:             st,
 		log:            slog.Default(),
 		poller:         poller,
-		selectionLimit: newSelectionLimiter(), readLimit: newSelectionLimiter(),
+		selectionLimit: newSelectionLimiter(),
+		readLimit:      newSelectionLimiter(),
+		replays:        newReplayCache(),
 	}
 	if cfg.Server.Production && len(cfg.Server.TrustedProxies) == 0 {
 		slog.Warn("production 模式下 server.trusted_proxies 为空，反向代理场景下将共用客户端 IP")
