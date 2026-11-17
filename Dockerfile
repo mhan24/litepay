@@ -1,12 +1,12 @@
 # 多阶段构建：纯 Go SQLite 驱动，无需 cgo
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26-alpine@sha256:c2a1f7b2095d046ae14b286b18413a05bb82c9bca9b25fe7ff5efef0f0826166 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /out/litepay .
 
-FROM alpine:3.22
+FROM alpine:3.22@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S -g 10001 litepay \
     && adduser -S -D -H -u 10001 -G litepay litepay \

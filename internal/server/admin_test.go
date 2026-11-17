@@ -253,3 +253,26 @@ func urlQueryErr(t *testing.T, loc string) string {
 	}
 	return u.Query().Get("err")
 }
+
+func TestCheckCredentialsConstantTimeSHA256Comparison(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Username = "administrator"
+	cfg.Admin.Password = "long-plaintext-secret-12345"
+	auth := newAdminAuth(cfg)
+
+	if !auth.checkCredentials("administrator", "long-plaintext-secret-12345") {
+		t.Fatal("expected exact credentials to match")
+	}
+	for _, tc := range [][2]string{
+		{"a", "long-plaintext-secret-12345"},
+		{"administrator-extra", "long-plaintext-secret-12345"},
+		{"administrator", "short"},
+		{"administrator", "long-plaintext-secret-12345-extra"},
+		{"", ""},
+	} {
+		if auth.checkCredentials(tc[0], tc[1]) {
+			t.Fatalf("expected mismatched credentials %v to fail", tc)
+		}
+	}
+}

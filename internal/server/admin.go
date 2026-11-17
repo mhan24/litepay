@@ -197,10 +197,16 @@ func (a *adminAuth) parse(token string) (*adminSession, bool) {
 	return &s, true
 }
 
-// checkCredentials 校验账号密码（常量时间比较）。
+func constantTimeEqualSHA256(a, b string) bool {
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
+}
+
+// checkCredentials 校验账号密码（先做 SHA-256 再常量时间比较，避免因长度不同提前返回）。
 func (a *adminAuth) checkCredentials(user, pass string) bool {
-	uOK := subtle.ConstantTimeCompare([]byte(user), []byte(a.user)) == 1
-	pOK := subtle.ConstantTimeCompare([]byte(pass), []byte(a.pass)) == 1
+	uOK := constantTimeEqualSHA256(user, a.user)
+	pOK := constantTimeEqualSHA256(pass, a.pass)
 	if config.IsBcryptHash(a.pass) {
 		pOK = bcrypt.CompareHashAndPassword([]byte(a.pass), []byte(pass)) == nil
 	}

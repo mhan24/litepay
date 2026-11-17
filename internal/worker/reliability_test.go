@@ -1,13 +1,16 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,5 +319,74 @@ func TestFirstVisibleDepositBehindIncrementalCursorIsFoundByWindowRescan(t *test
 	fresh, _ := st.GetByTradeNo(ctx, o.TradeNo)
 	if fresh.Status != model.Paid {
 		t.Fatal("previously invisible deposit lost", fresh.Status)
+	}
+}
+
+func TestNotifierRetryDelayLowerBoundAndRunErrorLogging(t *testing.T) {
+	delays := []int{5, 15, 30}
+	if got := retryDelaySeconds(delays, -1); got != 5 {
+		t.Fatalf("expected lower bound delay 5 for attempts=-1, got %d", got)
+	}
+	if got := retryDelaySeconds(delays, 0); got != 5 {
+		t.Fatalf("expected lower bound delay 5 for attempts=0, got %d", got)
+	}
+	if got := retryDelaySeconds(delays, 2); got != 15 {
+		t.Fatalf("expected delay 15 for attempts=2, got %d", got)
+	}
+	if got := retryDelaySeconds(delays, 99); got != 30 {
+		t.Fatalf("expected upper bound delay 30 for attempts=99, got %d", got)
+	}
+
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Server.CallbackWorkers = 1
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a PAID order and callback without a corresponding transaction row so deliver() returns an error with trade_id.
+	order := model.Order{
+		SigningKeyID: mgr.Get().BEpusdt.TokenVersion,
+		TradeNo:      "trade-err-log-1",
+		OutTradeNo:   "mall-err-log-1",
+		OriginUnits:  1000000,
+		PayUnits:     1000000,
+		Status:       model.Paid,
+		ExpiresAt:    time.Now().Add(time.Hour),
+		NotifyURL:    "http://127.0.0.1:9999/notify",
+	}
+	if err := st.DB().Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	cb := model.Callback{
+		OrderID:      order.ID,
+		SigningKeyID: order.SigningKeyID,
+		State:        "queued",
+		NextAt:       time.Now().Add(-time.Second),
+	}
+	if err := st.DB().Create(&cb).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	runCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	n := NewNotifier(mgr, st)
+	n.Run(runCtx)
+
+	output := logBuf.String()
+	if !strings.Contains(output, "回调任务处理失败") || !strings.Contains(output, "trade_id=trade-err-log-1") || !strings.Contains(output, "error=") {
+		t.Fatalf("expected Run error log to contain trade_id and error, got: %s", output)
 	}
 }

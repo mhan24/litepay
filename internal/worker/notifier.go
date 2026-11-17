@@ -35,34 +35,48 @@ func NewNotifier(cfg *settings.Manager, st *store.Store) *Notifier {
 func (n *Notifier) UseTestTransport() {
 	n.http = httpx.NewClient(15*time.Second, true)
 }
+func retryDelaySeconds(delays []int, attempts int) int {
+	if len(delays) == 0 {
+		return 5
+	}
+	idx := min(max(attempts-1, 0), len(delays)-1)
+	return delays[idx]
+}
+
 func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
+	did, _, err := n.deliver(ctx)
+	return did, err
+}
+
+func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 	cfg := n.cfg.Get()
 	if cfg.Server.CancelSyncRequired {
 		ready, err := n.st.PaymentOperationsReady(ctx)
 		if err != nil || !ready {
-			return false, err
+			return false, "", err
 		}
 	}
 	task, o, err := n.st.ReserveCallback(ctx, cfg.Notify.MaxAttempts, cfg.Notify.TimeoutSeconds)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
+		return false, "", nil
 	}
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
+	tradeID := o.TradeNo
 	var tx model.Transaction
 	if err = n.st.DB().WithContext(ctx).First(&tx, "order_id = ?", o.ID).Error; err != nil {
-		return false, n.releaseCallback(ctx, *task, err)
+		return false, tradeID, n.releaseCallback(ctx, *task, err)
 	}
 	payload := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "amount": json.Number(o.Original()), "actual_amount": json.Number(amount.String(o.PayUnits)), "token": o.Receiver, "block_transaction_id": tx.EventID, "status": 2}
 	key, err := n.st.CallbackKey(ctx, *task)
 	if err != nil {
-		return false, n.releaseCallback(ctx, *task, err)
+		return false, tradeID, n.releaseCallback(ctx, *task, err)
 	}
 	payload["signature"] = sign.BEpusdtSignGeneric(payload, key)
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return false, n.releaseCallback(ctx, *task, err)
+		return false, tradeID, n.releaseCallback(ctx, *task, err)
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Notify.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -83,14 +97,14 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 			if guardErr != nil || !ready {
 				save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 				defer done()
-				return false, n.st.ReleaseCallback(save, *task)
+				return false, tradeID, n.st.ReleaseCallback(save, *task)
 			}
 		}
 		allowed, guardErr := n.st.CallbackCanSend(ctx, *task)
 		if guardErr != nil || !allowed {
 			save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			defer done()
-			return false, n.st.ReleaseCallback(save, *task)
+			return false, tradeID, n.st.ReleaseCallback(save, *task)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		var response []byte
@@ -104,14 +118,14 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	if ok {
 		message = ""
 	}
-	delay := cfg.Notify.RetryDelays[min(task.Attempts-1, len(cfg.Notify.RetryDelays)-1)]
+	delay := retryDelaySeconds(cfg.Notify.RetryDelays, task.Attempts)
 	save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer done()
 	err = n.st.FinishCallback(save, *task, status, ok, message, time.Duration(delay)*time.Second)
 	if err == nil && !ok && task.Attempts >= task.AttemptLimit {
 		slog.Error("商户通知重试已耗尽，需核对商城后重新通知", "trade_id", o.TradeNo)
 	}
-	return true, err
+	return true, tradeID, err
 }
 
 // releaseCallback 归还一次未发出的预约，避免白白消耗商户重试额度；原始 cause 原样返回供上层记录日志。
@@ -134,7 +148,7 @@ func (n *Notifier) Run(ctx context.Context) {
 	for range workers {
 		group.Go(func() {
 			for ctx.Err() == nil {
-				did, err := n.Deliver(ctx)
+				did, tradeID, err := n.deliver(ctx)
 				if did && err == nil {
 					continue
 				}
@@ -142,7 +156,7 @@ func (n *Notifier) Run(ctx context.Context) {
 				if err != nil {
 					delay = time.Second
 					if ctx.Err() == nil {
-						slog.Error("回调任务处理失败")
+						slog.Error("回调任务处理失败", "trade_id", tradeID, "error", err)
 					}
 				}
 				timer := time.NewTimer(delay)

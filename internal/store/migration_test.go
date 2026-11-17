@@ -2,9 +2,13 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 
 	"litepay/internal/model"
 )
@@ -408,5 +412,62 @@ func TestSchema16BackfillsAdditionalCancellationReceiptAndPreservesRefundAudit(t
 			t.Fatal(version)
 		}
 		s.Close()
+	}
+}
+
+func TestFutureSchemaVersionRejectedAndTransactionalStepRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "future.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().Exec("PRAGMA user_version=99").Error; err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "高于当前程序支持的最大版本") {
+		t.Fatalf("expected future schema version rejection, got: %v", err)
+	}
+
+	// Verify table-driven migration executes each step in a transaction and rolls back on failure.
+	txPath := filepath.Join(t.TempDir(), "tx-step.db")
+	s, err = Open(txPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.DB().Exec("PRAGMA user_version=15").Error; err != nil {
+		t.Fatal(err)
+	}
+	steps := []schemaMigration{
+		{
+			version: 16,
+			apply: func(db *gorm.DB) error {
+				return db.Create(&model.Credential{Name: "step16_ok", Value: "1"}).Error
+			},
+		},
+		{
+			version: 17,
+			apply: func(db *gorm.DB) error {
+				if err := db.Create(&model.Credential{Name: "step17_rolled_back", Value: "1"}).Error; err != nil {
+					return err
+				}
+				return errors.New("simulated step 17 failure")
+			},
+		},
+	}
+	if err := runSchemaMigrations(s.DB(), 15, 1, steps); err == nil {
+		t.Fatal("expected failing step 17 to return error")
+	}
+	var version int
+	s.DB().Raw("PRAGMA user_version").Scan(&version)
+	if version != 16 {
+		t.Fatalf("expected user_version to remain at committed step 16 after step 17 rollback, got %d", version)
+	}
+	var rolledBackCount int64
+	s.DB().Model(&model.Credential{}).Where("name = ?", "step17_rolled_back").Count(&rolledBackCount)
+	if rolledBackCount != 0 {
+		t.Fatal("failed migration step was not rolled back")
 	}
 }

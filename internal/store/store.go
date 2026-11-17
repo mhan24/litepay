@@ -93,49 +93,7 @@ func Open(path string) (*Store, error) {
 	if err = db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables).Error; err != nil {
 		return fail(err)
 	}
-	if version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13 && version != 14 && version != 15 && version != 16 && version != 17 && tables > 0 {
-		return fail(errors.New("旧数据库不兼容，请配置一个新的空数据库"))
-	}
-	if err = db.AutoMigrate(&model.Order{}, &model.Slot{}, &model.Transaction{}, &model.Callback{}, &model.NotifyLog{}, &model.ScanCursor{}, &model.Setting{}, &model.Credential{}, &model.ConfirmationTask{}, &model.TONScanCheckpoint{}, &model.CallbackRecovery{}, &model.PaymentAttempt{}, &model.SigningKey{}, &model.PaymentRecovery{}, &model.HistoricalScan{}, &model.IntegrationHealth{}, &model.HistoryCoverage{}, &model.GatewayRecovery{}, &model.CancellationIntent{}, &model.CancellationReview{}, &model.CancellationReviewAudit{}); err != nil {
-		return fail(err)
-	}
-	if err = migratePaymentAttempts(db); err != nil {
-		return fail(err)
-	}
-	if err = initializeExpiryAndSelection(db); err != nil {
-		return fail(err)
-	}
-	if err = backfillConfirmationTasks(db); err != nil {
-		return fail(err)
-	}
-	if version < 12 {
-		if err = db.Model(&model.HistoricalScan{}).Where("automatic = ? AND state = ?", false, "pending").Update("priority", 1).Error; err != nil {
-			return fail(err)
-		}
-		if err = db.Model(&model.HistoricalScan{}).Where("automatic = ? AND state = ?", true, "pending").Updates(map[string]any{"state": "superseded", "last_error": "已由付款窗口分组复核替代"}).Error; err != nil {
-			return fail(err)
-		}
-	}
-	if err = initializeRecovery(db); err != nil {
-		return fail(err)
-	}
-	if version < 15 {
-		// Earlier heartbeats did not prove the source discovery cursor was caught up.
-		if err = db.Model(&model.IntegrationHealth{}).Where("name = ?", "dujiao_cancel_sync").Update("healthy", false).Error; err != nil {
-			return fail(err)
-		}
-	}
-	if version < 16 {
-		if err = backfillCancellationReviews(db); err != nil {
-			return fail(err)
-		}
-	}
-	if version < 17 {
-		if err = backfillAdditionalCancellationReviews(db); err != nil {
-			return fail(err)
-		}
-	}
-	if err = db.Exec("PRAGMA user_version=17").Error; err != nil {
+	if err = runSchemaMigrations(db, version, tables, schemaMigrations); err != nil {
 		return fail(err)
 	}
 	if path != ":memory:" {
@@ -145,6 +103,100 @@ func Open(path string) (*Store, error) {
 	}
 	success = true
 	return &Store{db: db, lock: lock}, nil
+}
+
+const (
+	minSchemaVersion     = 8
+	currentSchemaVersion = 17
+)
+
+type schemaMigration struct {
+	version int
+	apply   func(db *gorm.DB) error
+}
+
+func autoMigrateSchema(db *gorm.DB) error {
+	return db.AutoMigrate(
+		&model.Order{},
+		&model.Slot{},
+		&model.Transaction{},
+		&model.Callback{},
+		&model.NotifyLog{},
+		&model.ScanCursor{},
+		&model.Setting{},
+		&model.Credential{},
+		&model.ConfirmationTask{},
+		&model.TONScanCheckpoint{},
+		&model.CallbackRecovery{},
+		&model.PaymentAttempt{},
+		&model.SigningKey{},
+		&model.PaymentRecovery{},
+		&model.HistoricalScan{},
+		&model.IntegrationHealth{},
+		&model.HistoryCoverage{},
+		&model.GatewayRecovery{},
+		&model.CancellationIntent{},
+		&model.CancellationReview{},
+		&model.CancellationReviewAudit{},
+	)
+}
+
+var schemaMigrations = []schemaMigration{
+	{version: 9, apply: backfillConfirmationTasks},
+	{version: 10, apply: migratePaymentAttempts},
+	{version: 11, apply: initializeExpiryAndSelection},
+	{
+		version: 12,
+		apply: func(db *gorm.DB) error {
+			if err := db.Model(&model.HistoricalScan{}).Where("automatic = ? AND state = ?", false, "pending").Update("priority", 1).Error; err != nil {
+				return err
+			}
+			return db.Model(&model.HistoricalScan{}).Where("automatic = ? AND state = ?", true, "pending").Updates(map[string]any{"state": "superseded", "last_error": "已由付款窗口分组复核替代"}).Error
+		},
+	},
+	{version: 13, apply: nil},
+	{version: 14, apply: initializeRecovery},
+	{
+		version: 15,
+		apply: func(db *gorm.DB) error {
+			// Earlier heartbeats did not prove the source discovery cursor was caught up.
+			return db.Model(&model.IntegrationHealth{}).Where("name = ?", "dujiao_cancel_sync").Update("healthy", false).Error
+		},
+	},
+	{version: 16, apply: backfillCancellationReviews},
+	{version: 17, apply: backfillAdditionalCancellationReviews},
+}
+
+func runSchemaMigrations(db *gorm.DB, version int, tables int64, steps []schemaMigration) error {
+	if version > currentSchemaVersion {
+		return fmt.Errorf("数据库版本 %d 高于当前程序支持的最大版本 %d，请升级程序后再启动", version, currentSchemaVersion)
+	}
+	if tables > 0 && version < minSchemaVersion {
+		return errors.New("旧数据库不兼容，请配置一个新的空数据库")
+	}
+	for _, step := range steps {
+		if version >= step.version {
+			continue
+		}
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if err := autoMigrateSchema(tx); err != nil {
+				return err
+			}
+			if step.apply != nil {
+				if err := step.apply(tx); err != nil {
+					return err
+				}
+			}
+			return tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", step.version)).Error
+		}); err != nil {
+			return err
+		}
+		version = step.version
+	}
+	if err := autoMigrateSchema(db); err != nil {
+		return err
+	}
+	return initializeRecovery(db)
 }
 func (s *Store) DB() *gorm.DB { return s.db }
 func (s *Store) Close() error {
