@@ -145,3 +145,34 @@ func TestFiniteAmountEnvelopeFailsWithoutPartialReservation(t *testing.T) {
 		t.Fatal(slots, attempts, o, err)
 	}
 }
+
+// 不同 (provider, currency) 的金额档位必须相互隔离：Slot 复合主键含 provider/currency，
+// A 平台占用的金额不得顶高 B 平台、B 币种同额订单的应付金额。
+func TestAllocationIsolatesProviderAndCurrency(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	base := int64(10 * amount.Scale) // 10.00
+	step := int64(10000)             // 0.01
+
+	createOrder(t, s, "iso-binance-usdt", base)
+	first, err := s.Select(ctx, "iso-binance-usdt", "binance", "USDT", "receiver", 2, step, step, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createOrder(t, s, "iso-okx-usdt", base)
+	second, err := s.Select(ctx, "iso-okx-usdt", "okx", "USDT", "receiver", 2, step, step, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.PayUnits != first.PayUnits {
+		t.Fatalf("跨平台档位污染：okx/USDT 分配到 %d，应为 %d", second.PayUnits, first.PayUnits)
+	}
+	createOrder(t, s, "iso-binance-usdc", base)
+	third, err := s.Select(ctx, "iso-binance-usdc", "binance", "USDC", "receiver", 2, step, step, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.PayUnits != first.PayUnits {
+		t.Fatalf("跨币种档位污染：binance/USDC 分配到 %d，应为 %d", third.PayUnits, first.PayUnits)
+	}
+}

@@ -85,3 +85,19 @@ func TestHmacSHA256Hex(t *testing.T) {
 		t.Fatal("不同密钥应产生不同签名")
 	}
 }
+
+// 官方 BEpusdt 对数组/对象跳过签名；嵌套结构不得进入签名（否则 Go map 遍历顺序
+// 会让同一载荷产生不稳定签名）。
+func TestBEpusdtSignSkipsNestedStructures(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	flat := BEpusdtSignGeneric(map[string]interface{}{"order_id": "A-1"}, token)
+	for _, nested := range []interface{}{
+		map[string]interface{}{"x": "y"},
+		[]interface{}{"a", "b"},
+	} {
+		with := BEpusdtSignGeneric(map[string]interface{}{"order_id": "A-1", "nested": nested}, token)
+		if with != flat {
+			t.Fatalf("嵌套结构不应参与签名：got %s, want %s", with, flat)
+		}
+	}
+}

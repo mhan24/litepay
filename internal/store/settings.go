@@ -182,7 +182,9 @@ func encryptSettingPayload(key []byte, payload string, allowEncrypted bool) (str
 		return payload, false, nil
 	}
 	var m map[string]any
-	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.UseNumber()
+	if err := dec.Decode(&m); err != nil {
 		return "", false, err
 	}
 	changed := false
@@ -225,7 +227,9 @@ func decryptSettingPayload(key []byte, payload string) (string, error) {
 		return payload, nil
 	}
 	var m map[string]any
-	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.UseNumber()
+	if err := dec.Decode(&m); err != nil {
 		return "", err
 	}
 	changed := false

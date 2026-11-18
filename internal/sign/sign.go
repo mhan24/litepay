@@ -68,7 +68,9 @@ func genericValue(v interface{}) string {
 	case json.Number:
 		return value.String()
 	case map[string]interface{}, []interface{}:
-		return fmt.Sprint(value)
+		// 官方 BEpusdt 对数组/对象直接跳过（is_array → continue），不参与签名。
+		// 保持同等价类签名，避免 Go map 遍历顺序使嵌套结构的签名变得不稳定。
+		return ""
 	default:
 		return fmt.Sprint(value)
 	}
