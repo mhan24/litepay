@@ -1,13 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"litepay/internal/config"
 	"litepay/internal/model"
@@ -162,5 +165,110 @@ func TestDisplaySettingsDoNotRequirePasswordAndCannotEditDeployment(t *testing.T
 		if w.Code != 200 || !strings.Contains(w.Body.String(), `name="current_password"`) || !strings.Contains(w.Body.String(), `autocomplete="current-password"`) {
 			t.Fatal("missing reauthentication form", page, w.Code)
 		}
+	}
+}
+
+func TestAdminAccountRejectsWhitespacePasswordAndNormalizesRefundAndLogsAudits(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "initial-admin-password-123"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, csrf, err := newAdminAuth(mgr.Get()).issue()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. All-whitespace new_password must be rejected.
+	spaces := strings.Repeat(" ", 12)
+	form := url.Values{
+		"csrf":             {csrf},
+		"current_password": {cfg.Admin.Password},
+		"admin_username":   {"admin"},
+		"new_password":     {spaces},
+		"confirm_password": {spaces},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/settings/account", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther || !strings.Contains(w.Header().Get("Location"), "t=err") {
+		t.Fatalf("expected all-whitespace password to be rejected, got code=%d loc=%s", w.Code, w.Header().Get("Location"))
+	}
+	if mgr.Get().Admin.Password != cfg.Admin.Password {
+		t.Fatal("whitespace password mutated admin password")
+	}
+
+	// 2. AdminRecordRefund normalizes provider casing and whitespace around event_id.
+	_, err = st.Create(ctx, model.Order{TradeNo: "ws-refund", OutTradeNo: "ws-merchant", OriginUnits: 10000000, ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Select(ctx, "ws-refund", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Cancel(ctx, o.TradeNo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Process(ctx, model.Transaction{Provider: "binance", EventID: "ws-ev-1", Receiver: "receiver", Currency: "USDT", Units: o.PayUnits, OccurredAt: time.Now(), State: model.Confirmed}, ""); err != nil {
+		t.Fatal(err)
+	}
+	refundForm := url.Values{
+		"csrf":             {csrf},
+		"current_password": {cfg.Admin.Password},
+		"provider":         {" BINANCE "},
+		"event_id":         {" ws-ev-1 "},
+		"reference":        {"ref-ws-1"},
+		"reason":           {"verified refund"},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/admin/orders/ws-refund/refund-record", strings.NewReader(refundForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+	w = httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther || strings.Contains(w.Header().Get("Location"), "t=err") {
+		t.Fatalf("expected normalized refund record to succeed, got code=%d loc=%s", w.Code, w.Header().Get("Location"))
+	}
+
+	// 3. Account/site/token updates emit audit logs.
+	siteForm := url.Values{
+		"csrf":             {csrf},
+		"current_password": {cfg.Admin.Password},
+		"admin_path":       {"/panel-v2"},
+		"store_url":        {"https://shop.example"},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/admin/settings/site", strings.NewReader(siteForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+	w = httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther || strings.Contains(w.Header().Get("Location"), "t=err") {
+		t.Fatalf("site update failed: code=%d loc=%s", w.Code, w.Header().Get("Location"))
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "管理员登记取消到账的外部退款凭证") || !strings.Contains(logs, "后台访问入口或跳转地址已更新") {
+		t.Fatalf("missing expected audit logs, got:\n%s", logs)
 	}
 }

@@ -25,6 +25,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"litepay/internal/amount"
 	"litepay/internal/config"
@@ -756,7 +757,7 @@ func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 		return
 	}
 
-	slog.Info("后台配置已更新", "operator", operator)
+	h.logger().Info("后台配置已更新", "operator", operator, "scope", scope, "sensitive", sensitive, "ip", c.ClientIP())
 	if p.VerifyAccounts {
 		message, partial := verificationMessage(checks)
 		suffix := ""
@@ -807,8 +808,8 @@ func (h *Handlers) AdminAccountSave(c *gin.Context) {
 	}
 	p := settings.Patch{AdminUsername: &user}
 	if pass != "" {
-		if utf8.RuneCountInString(pass) < 12 || len(pass) > 72 {
-			fail("新密码需至少 12 个字符且不超过 72 字节，请重新输入")
+		if strings.TrimSpace(pass) == "" || utf8.RuneCountInString(pass) < 12 || len(pass) > 72 {
+			fail("新密码需至少 12 个字符（不能全为空白）且不超过 72 字节，请重新输入")
 			return
 		}
 		if pass != c.PostForm("confirm_password") {
@@ -823,10 +824,12 @@ func (h *Handlers) AdminAccountSave(c *gin.Context) {
 		value := string(hash)
 		p.AdminPasswordHash = &value
 	}
-	if err := h.cfg.Update(c.Request.Context(), p, c.GetString("admin_user")); err != nil {
+	operator := c.GetString("admin_user")
+	if err := h.cfg.Update(c.Request.Context(), p, operator); err != nil {
 		fail(err.Error())
 		return
 	}
+	h.logger().Warn("管理员账号或密码已更新", "operator", operator, "new_username", user, "password_changed", pass != "", "ip", c.ClientIP())
 	h.logoutAdmin(c, "")
 }
 
@@ -847,10 +850,12 @@ func (h *Handlers) AdminSiteSave(c *gin.Context) {
 		return
 	}
 	oldRoot := h.C().AdminPath()
-	if err := h.cfg.Update(c.Request.Context(), settings.Patch{AdminPath: &root, StoreURL: &storeURL}, c.GetString("admin_user")); err != nil {
+	operator := c.GetString("admin_user")
+	if err := h.cfg.Update(c.Request.Context(), settings.Patch{AdminPath: &root, StoreURL: &storeURL}, operator); err != nil {
 		fail(err.Error())
 		return
 	}
+	h.logger().Warn("后台访问入口或跳转地址已更新", "operator", operator, "old_admin_path", oldRoot, "new_admin_path", root, "ip", c.ClientIP())
 	h.logoutAdmin(c, oldRoot)
 }
 
@@ -862,13 +867,14 @@ func (h *Handlers) AdminRotateToken(c *gin.Context) {
 		return
 	}
 
-	_, err := h.cfg.RotateAPIToken(c.Request.Context(), c.GetString("admin_user"))
+	operator := c.GetString("admin_user")
+	_, err := h.cfg.RotateAPIToken(c.Request.Context(), operator)
 	if err != nil {
 		c.Redirect(http.StatusSeeOther,
 			h.adminURL("/admin/integration?msg=")+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	slog.Info("BEpusdt API Token 已轮换", "operator", c.GetString("admin_user"))
+	h.logger().Warn("BEpusdt API Token 已轮换", "operator", operator, "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther,
 		h.adminURL("/admin/integration?msg=")+url.QueryEscape("API Token 已轮换。新订单将使用新 Token，历史订单回调仍使用原密钥版本，请在商城后台同步更新 Token")+
 			"&token_rotated=1")
@@ -1097,6 +1103,10 @@ func (h *Handlers) AdminDashboard(c *gin.Context) {
 		return
 	}
 	cancelHealth, cancelErr := h.st.IntegrationHealth(c.Request.Context())
+	if cancelErr != nil && !errors.Is(cancelErr, gorm.ErrRecordNotFound) {
+		h.renderAdminError(c, cancelErr)
+		return
+	}
 	cancelWarning := cancelHealth.Conflicts > 0 || cancelHealth.DiscoveryPending > 0 || h.C().Server.CancelSyncRequired && (cancelErr != nil || h.paymentOperationsBlocked(c))
 
 	var exhausted, review, merchantReview int64
@@ -1164,7 +1174,7 @@ func (h *Handlers) AdminCloseOrder(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Info("管理员关闭订单", "trade_id", no, "operator", c.GetString("admin_user"))
+	h.logger().Info("管理员关闭订单", "trade_id", no, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("订单已关闭"))
 }
 
@@ -1256,13 +1266,14 @@ func (h *Handlers) AdminRetryNotify(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Warn("管理员重新通知商城", "trade_id", no, "operator", c.GetString("admin_user"))
+	h.logger().Warn("管理员重新通知商城", "trade_id", no, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("商户通知已重新入队，将按原订单号发送"))
 }
 
 func (h *Handlers) pendingNotifyCount(c *gin.Context) int64 {
 	var n int64
 	if err := h.st.DB().WithContext(c.Request.Context()).Model(&model.Callback{}).Where("delivered_at IS NULL").Count(&n).Error; err != nil {
+		h.logger().Warn("查询待确认通知数量失败", "err", err)
 		return -1
 	}
 	return n
@@ -1276,12 +1287,18 @@ func (h *Handlers) AdminReconcilePayment(c *gin.Context) {
 
 	no := c.Param("trade_no")
 	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
-	err := h.st.ReconcilePayment(c.Request.Context(), no, c.PostForm("provider"), strings.TrimSpace(c.PostForm("event_id")), c.GetString("admin_user"), c.PostForm("reason"))
+	provider := strings.ToLower(strings.TrimSpace(c.PostForm("provider")))
+	eventID := strings.TrimSpace(c.PostForm("event_id"))
+	if provider == "" || eventID == "" {
+		c.Redirect(http.StatusSeeOther, target+url.QueryEscape("请选择收款平台并填写原始资金事件编号")+"&t=err")
+		return
+	}
+	err := h.st.ReconcilePayment(c.Request.Context(), no, provider, eventID, c.GetString("admin_user"), c.PostForm("reason"))
 	if err != nil {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Warn("管理员按已验证到账证据补单", "trade_id", no, "operator", c.GetString("admin_user"))
+	h.logger().Warn("管理员按已验证到账证据补单", "trade_id", no, "provider", provider, "event_id", eventID, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("补单核销已完成，并已创建商户通知任务"))
 }
 
@@ -1292,6 +1309,7 @@ func (h *Handlers) AdminHistoricalScan(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
+	h.logger().Info("管理员提交历史到账补扫", "trade_id", no, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("历史到账补扫任务已加入队列。待补扫完成后请核对下方到账证据；已取消订单仅记录证据，不会自动补单"))
 }
 
@@ -1309,12 +1327,18 @@ func (h *Handlers) AdminRecordRefund(c *gin.Context) {
 
 	no := c.Param("trade_no")
 	target := h.adminURL("/admin/orders/") + url.PathEscape(no) + "?msg="
-	err := h.st.RecordCancellationRefund(c.Request.Context(), no, c.PostForm("provider"), c.PostForm("event_id"), c.GetString("admin_user"), c.PostForm("reference"), c.PostForm("reason"))
+	provider := strings.ToLower(strings.TrimSpace(c.PostForm("provider")))
+	eventID := strings.TrimSpace(c.PostForm("event_id"))
+	if provider == "" || eventID == "" {
+		c.Redirect(http.StatusSeeOther, target+url.QueryEscape("缺少到账平台或资金事件编号")+"&t=err")
+		return
+	}
+	err := h.st.RecordCancellationRefund(c.Request.Context(), no, provider, eventID, c.GetString("admin_user"), c.PostForm("reference"), c.PostForm("reason"))
 	if err != nil {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Warn("管理员登记取消到账的外部退款凭证", "trade_id", no, "operator", c.GetString("admin_user"))
+	h.logger().Warn("管理员登记取消到账的外部退款凭证", "trade_id", no, "provider", provider, "event_id", eventID, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("退款凭证已保存，请确认原付款账户已收到退款"))
 }
 
@@ -1334,7 +1358,11 @@ func trustedProxyPeer(remote string, proxies []string) bool {
 		return false
 	}
 	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
 	for _, raw := range proxies {
+		raw = strings.TrimSpace(raw)
 		if peer := net.ParseIP(raw); peer != nil && peer.Equal(ip) {
 			return true
 		}

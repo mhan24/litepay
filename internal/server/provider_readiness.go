@@ -56,15 +56,18 @@ func (h *Handlers) orderProviderAccepting(c *gin.Context, cfg *config.Config, o 
 	if o.Provider == "" {
 		return h.anyProviderAccepting(c, cfg, o)
 	}
-	receiver := cfg.Checkout.Binance.UID
-	if o.Provider == config.ProviderOKX {
+	var receiver string
+	switch o.Provider {
+	case config.ProviderBinance:
+		receiver = cfg.Checkout.Binance.UID
+	case config.ProviderOKX:
 		receiver = cfg.Checkout.OKX.UID
-	}
-	if o.Provider == config.ProviderBybit {
+	case config.ProviderBybit:
 		receiver = cfg.Checkout.Bybit.UID
-	}
-	if o.Provider == config.ProviderBitget {
+	case config.ProviderBitget:
 		receiver = cfg.Checkout.Bitget.UID
+	default:
+		return false
 	}
 	return receiver == o.Receiver && h.providerAccepting(c, cfg, o.Provider)
 }

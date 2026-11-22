@@ -1,7 +1,9 @@
 package server
 
 import (
+	"errors"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 	"io"
 	"litepay/internal/model"
 	"litepay/internal/sign"
@@ -75,7 +77,11 @@ func (h *Handlers) AdminOperations(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "recovery state unavailable"})
 		return
 	}
-	health, _ := h.st.IntegrationHealth(ctx)
+	health, healthErr := h.st.IntegrationHealth(ctx)
+	if healthErr != nil && !errors.Is(healthErr, gorm.ErrRecordNotFound) {
+		c.JSON(503, gin.H{"error": "integration health unavailable"})
+		return
+	}
 	var binanceUsage any
 	if h.poller != nil {
 		binanceUsage = h.poller.BinanceUsage()

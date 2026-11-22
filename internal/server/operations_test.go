@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 	"litepay/internal/config"
 	"litepay/internal/model"
 	"litepay/internal/settings"
@@ -433,5 +435,56 @@ func TestOrderSignedAPIRateLimitReplayAndLogThrottle(t *testing.T) {
 	engine.ServeHTTP(w, req)
 	if !strings.Contains(w.Body.String(), `"status_code":200`) {
 		t.Fatalf("expected clean IP to succeed, got: %s", w.Body.String())
+	}
+}
+
+func TestAdminOperationsAndDashboardFailClosedOnIntegrationHealthDBError(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Password = "ops-db-error-password"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := newAdminAuth(mgr.Get()).issue()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const cbName = "test:fail_integration_health_query"
+	if err := st.DB().Callback().Query().Before("gorm:query").Register(cbName, func(db *gorm.DB) {
+		if db.Statement.Table == "integration_healths" {
+			db.AddError(errors.New("simulated integration health storage failure"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer st.DB().Callback().Query().Remove(cbName)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/operations", nil)
+	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected /admin/operations to return 503 on DB error, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
+	w = httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), "操作未能完成") {
+		t.Fatalf("expected /admin dashboard to render error page on IntegrationHealth DB error, got code=%d body=%s", w.Code, w.Body.String())
 	}
 }
