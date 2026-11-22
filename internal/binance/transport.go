@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -73,7 +74,7 @@ func budgeted(ctx context.Context, n int) context.Context {
 }
 
 func (c *Client) signedGet(ctx context.Context, path string, q url.Values) ([]byte, error) {
-	if c.apiKey == "" || c.apiSecret == "" {
+	if strings.TrimSpace(c.apiKey) == "" || strings.TrimSpace(c.apiSecret) == "" {
 		return nil, fmt.Errorf("未配置币安 API Key/Secret")
 	}
 	ctx = budgeted(ctx, 3)

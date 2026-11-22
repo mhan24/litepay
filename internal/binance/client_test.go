@@ -157,4 +157,11 @@ func TestRequestBudgetCannotOverflowOrBecomeNegative(t *testing.T) {
 	if _, err := unconfigured.History(context.Background(), time.UnixMilli(90000), time.UnixMilli(110000)); err == nil {
 		t.Fatal("expected History to reject missing API key/secret")
 	}
+	whitespace := New("   ", "\t", "http://127.0.0.1:1", 0, 0)
+	if _, err := whitespace.AccountUID(context.Background()); err == nil {
+		t.Fatal("expected AccountUID to reject whitespace-only API key/secret")
+	}
+	if _, err := whitespace.History(context.Background(), time.UnixMilli(90000), time.UnixMilli(110000)); err == nil {
+		t.Fatal("expected History to reject whitespace-only API key/secret")
+	}
 }

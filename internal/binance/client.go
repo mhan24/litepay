@@ -64,7 +64,7 @@ func (c *Client) UseTestTransport() {
 }
 
 func (c *Client) AccountUID(ctx context.Context) (string, error) {
-	if c.apiKey == "" || c.apiSecret == "" {
+	if strings.TrimSpace(c.apiKey) == "" || strings.TrimSpace(c.apiSecret) == "" {
 		return "", fmt.Errorf("未配置币安 API Key/Secret")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
