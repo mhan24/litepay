@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -50,5 +51,49 @@ func TestSelectionEndpointRateLimitAndBoundedMemory(t *testing.T) {
 	}
 	if ok, _ := l2.allow("fresh-key", 1, now); !ok {
 		t.Fatal("expired entries blocked new key before cleanup interval")
+	}
+}
+
+func TestSelectionLimiterNormalizesTradeNoWhitespaceAndNilGuards(t *testing.T) {
+	h := &Handlers{selectionLimit: newSelectionLimiter()}
+	r := gin.New()
+	r.POST("/api/order/payment", h.LimitPaymentSelection, func(c *gin.Context) { c.JSON(200, gin.H{"code": 0}) })
+
+	variants := []string{"ws-order", " ws-order", "ws-order ", " ws-order ", "\tws-order\n"}
+	accepted := 0
+	for i := range 30 {
+		no := variants[i%len(variants)]
+		req := httptest.NewRequest(http.MethodPost, "/api/order/payment", strings.NewReader(url.Values{"trade_no": {no}, "provider": {"binance"}, "currency": {"USDT"}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "198.51.100." + string(rune('1'+i%9)) + ":1234"
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code == http.StatusOK {
+			accepted++
+		} else if w.Code != http.StatusTooManyRequests {
+			t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+		}
+	}
+	if accepted != 20 {
+		t.Fatalf("whitespace variants bypassed per-order rate limit: accepted=%d", accepted)
+	}
+
+	// Nil limiters and nil request body must not panic.
+	nilH := &Handlers{}
+	rNil := gin.New()
+	rNil.GET("/api/order/status", nilH.LimitPublicRead, func(c *gin.Context) { c.JSON(200, gin.H{"code": 0}) })
+	rNil.POST("/api/order/payment", nilH.LimitPaymentSelection, func(c *gin.Context) { c.JSON(200, gin.H{"code": 0}) })
+
+	w := httptest.NewRecorder()
+	rNil.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/order/status?order_id=abc", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with nil readLimit, got %d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/order/payment", nil)
+	req.Body = nil
+	rNil.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 with nil selectionLimit and nil body, got %d", w.Code)
 	}
 }

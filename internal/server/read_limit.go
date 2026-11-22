@@ -15,6 +15,10 @@ func (h *Handlers) LimitPublicRead(c *gin.Context) {
 		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "订单号格式无效，请返回商户页面核对"})
 		return
 	}
+	if h.readLimit == nil {
+		c.Next()
+		return
+	}
 	ip := c.ClientIP()
 	now := time.Now()
 	for _, rule := range []struct {

@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,23 +70,29 @@ func (h *Handlers) LimitPaymentSelection(c *gin.Context) {
 		c.Header("Retry-After", strconv.Itoa(seconds))
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"code": 1, "msg": "付款方式请求过于频繁，请稍后重试"})
 	}
-	if ok, retry := h.selectionLimit.allow("ip:"+c.ClientIP(), 120, time.Now()); !ok {
-		reject(retry)
-		return
+	if h.selectionLimit != nil {
+		if ok, retry := h.selectionLimit.allow("ip:"+c.ClientIP(), 120, time.Now()); !ok {
+			reject(retry)
+			return
+		}
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
+	if c.Request.Body != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
+	}
 	if err := c.Request.ParseForm(); err != nil {
 		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "付款方式请求格式无效，请刷新页面后重试"})
 		return
 	}
-	no := c.PostForm("trade_no")
+	no := strings.TrimSpace(c.PostForm("trade_no"))
 	if len(no) > 128 {
 		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "订单号格式无效，请返回商户页面核对"})
 		return
 	}
-	if ok, retry := h.selectionLimit.allow("order:"+no, 20, time.Now()); !ok {
-		reject(retry)
-		return
+	if h.selectionLimit != nil {
+		if ok, retry := h.selectionLimit.allow("order:"+no, 20, time.Now()); !ok {
+			reject(retry)
+			return
+		}
 	}
 	c.Next()
 }
