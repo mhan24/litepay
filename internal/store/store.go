@@ -248,17 +248,18 @@ func runSchemaMigrations(db *gorm.DB, version int, tables int64, steps []schemaM
 }
 func (s *Store) DB() *gorm.DB { return s.db }
 func (s *Store) Close() error {
-	var lockErr error
+	var dbErr, lockErr error
+	if d, e := s.db.DB(); e != nil {
+		dbErr = e
+	} else {
+		dbErr = d.Close()
+	}
 	if s.lock != nil {
 		if err := s.lock.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 			lockErr = err
 		}
 	}
-	d, e := s.db.DB()
-	if e != nil {
-		return errors.Join(e, lockErr)
-	}
-	return errors.Join(d.Close(), lockErr)
+	return errors.Join(dbErr, lockErr)
 }
 func (s *Store) Ping(ctx context.Context) error {
 	d, e := s.db.DB()
