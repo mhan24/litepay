@@ -95,7 +95,7 @@
         {{else}}
         付款确认后创建通知任务
         {{end}}
-        {{if and (eq .Order.Status "PAID") (not .CancellationReviews)}}{{range .Callbacks}}{{if not .DeliveredAt}}
+        {{if and (eq .Order.Status "PAID") (not .CancellationReviews) (not .UncoveredCancellationReceipts)}}{{range .Callbacks}}{{if not .DeliveredAt}}
         <form class="notify-actions" method="post" action="{{adminPath}}/orders/{{urlEscape $.Order.TradeNo}}/retry-notify" >
           <input type="hidden" name="csrf" value="{{$.Base.CSRF}}">
           <label for="retry-reason">核对商城状态后的重试原因</label>

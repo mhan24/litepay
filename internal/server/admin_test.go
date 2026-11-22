@@ -776,6 +776,9 @@ func TestNilPollerAndNilLoggerDefensiveHandling(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 on %s with nil poller, got %d", path, w.Code)
 		}
+		if path == "/admin" && strings.Contains(w.Body.String(), "当前客户端累计请求  次") {
+			t.Fatal("dashboard rendered empty BinanceUsage counters with nil poller")
+		}
 	}
 }
 
