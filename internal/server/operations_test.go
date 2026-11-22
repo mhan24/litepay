@@ -488,3 +488,23 @@ func TestAdminOperationsAndDashboardFailClosedOnIntegrationHealthDBError(t *test
 		t.Fatalf("expected /admin dashboard to render error page on IntegrationHealth DB error, got code=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestSignedOperationalEndpointsRejectNilBodyWithoutPanic(t *testing.T) {
+	h := &Handlers{}
+	for name, fn := range map[string]func(*gin.Context){
+		"CancelSyncHeartbeat":      h.CancelSyncHeartbeat,
+		"CancelSyncGeneration":     h.CancelSyncGeneration,
+		"CancellationReviewStatus": h.CancellationReviewStatus,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			c.Request.Body = nil
+			fn(c)
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status_code":400`) {
+				t.Fatalf("%s: expected JSON status_code 400 without panic, got %d %s", name, w.Code, w.Body.String())
+			}
+		})
+	}
+}

@@ -4,17 +4,15 @@ import (
 	"errors"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
-	"io"
 	"litepay/internal/model"
 	"litepay/internal/sign"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
 
 func (h *Handlers) CancelSyncHeartbeat(c *gin.Context) {
-	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
+	raw, err := readBoundedBody(c, 4096)
 	if err != nil {
 		h.bepusdtFail(c, "invalid health report")
 		return
@@ -90,7 +88,7 @@ func (h *Handlers) AdminOperations(c *gin.Context) {
 }
 
 func (h *Handlers) CancelSyncGeneration(c *gin.Context) {
-	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
+	raw, err := readBoundedBody(c, 4096)
 	if err != nil {
 		h.bepusdtFail(c, "invalid generation request")
 		return
@@ -127,7 +125,7 @@ func (h *Handlers) paymentOperationsBlocked(c *gin.Context) bool {
 }
 
 func (h *Handlers) CancellationReviewStatus(c *gin.Context) {
-	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
+	raw, err := readBoundedBody(c, 4096)
 	if err != nil {
 		h.bepusdtFail(c, "invalid review request")
 		return
