@@ -123,3 +123,68 @@ func TestOverlappingDayWindowsReuseRealCoverageAcrossCohorts(t *testing.T) {
 	}
 	t.Log("48 overlapping 24-hour windows: 72 mock API calls; coverage timestamps preserved; all final reviews complete")
 }
+
+type unfilteredHistory struct {
+	rows []model.Transaction
+}
+
+func (u *unfilteredHistory) AccountUID(context.Context) (string, error) { return "receiver", nil }
+func (u *unfilteredHistory) History(_ context.Context, _, _ time.Time) ([]model.Transaction, error) {
+	return append([]model.Transaction(nil), u.rows...), nil
+}
+
+func TestHistoricalScanIgnoresOutgoingAndOutOfRangeRows(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.Create(ctx, model.Order{TradeNo: "hist-filter", OutTradeNo: "hist-filter", OriginUnits: 1000000, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Select(ctx, "hist-filter", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := time.Now().Add(-3 * time.Hour)
+	expires := selected.Add(10 * time.Minute)
+	st.DB().Model(o).Updates(map[string]any{"selected_at": selected, "expires_at": expires})
+	st.DB().Model(&model.PaymentAttempt{}).Where("order_id=?", o.ID).Updates(map[string]any{"selected_at": selected, "expires_at": expires, "settle_until": expires.Add(store.LateVisibilityWindow)})
+	if err = st.RequestHistoricalScan(ctx, o.TradeNo, "operator", "verify scan with outgoing transfer in window"); err != nil {
+		t.Fatal(err)
+	}
+	valid := model.Transaction{Provider: "binance", EventID: "valid-in", Reference: "ref-in", Receiver: "receiver", Currency: "USDT", Units: o.PayUnits, OccurredAt: selected.Add(2 * time.Minute), State: model.Confirmed}
+	outgoing := model.Transaction{Provider: "binance", EventID: "outgoing-other-uid", Reference: "ref-in", Receiver: "other-user-uid", Currency: "USDT", Units: 5000000, OccurredAt: selected.Add(3 * time.Minute), State: model.Rejected, Reason: "not_incoming_payment"}
+	outOfWindow := model.Transaction{Provider: "binance", EventID: "before-window", Reference: "ref-old", Receiver: "receiver", Currency: "USDT", Units: 5000000, OccurredAt: selected.Add(-5 * time.Minute), State: model.Confirmed}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: &unfilteredHistory{rows: []model.Transaction{outgoing, outOfWindow, valid}}, uid: "receiver"}
+
+	if err = p.scanHistorical(ctx, mgr.Get(), "binance"); err != nil {
+		t.Fatalf("historical scan failed on outgoing/out-of-window rows: %v", err)
+	}
+	var job model.HistoricalScan
+	if err = st.DB().First(&job, "order_id = ?", o.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if job.State != "completed" {
+		t.Fatalf("expected historical scan completed, got %s (%s)", job.State, job.LastError)
+	}
+	var stored model.Transaction
+	if err = st.DB().First(&stored, "event_id = ?", valid.EventID).Error; err != nil {
+		t.Fatalf("expected valid transaction saved: %v", err)
+	}
+	if stored.State != model.Confirmed {
+		t.Fatalf("expected valid transaction to remain confirmed (not tainted by outgoing ref), got %s (%s)", stored.State, stored.Reason)
+	}
+}

@@ -84,9 +84,16 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 		}
 		return err
 	}
-	markAmbiguous(rows)
+	filtered := make([]model.Transaction, 0, len(rows))
+	for _, row := range rows {
+		if row.Provider != job.Provider || row.Receiver != job.Receiver || row.OccurredAt.Before(job.From) || row.OccurredAt.After(job.To) {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	markAmbiguous(filtered)
 	if !after.Cursor.Before(job.To) {
 		after.State = "completed"
 	}
-	return p.st.SaveHistoricalScan(save, job, after, rows)
+	return p.st.SaveHistoricalScan(save, job, after, filtered)
 }
