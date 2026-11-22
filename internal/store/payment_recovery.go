@@ -31,8 +31,8 @@ func (s *Store) ReconcilePayment(ctx context.Context, tradeNo, provider, eventID
 		if err := db.Where("provider = ? AND event_id = ?", provider, eventID).First(&t).Error; err != nil {
 			return err
 		}
-		validCurrency := (t.Provider == "ton" && t.Currency == "GRAM") || ((t.Provider == "binance" || t.Provider == "okx" || t.Provider == "bybit" || t.Provider == "bitget") && (t.Currency == "USDT" || t.Currency == "USDC"))
-		if t.State != model.Confirmed || t.OrderID != nil || t.Units <= 0 || t.Receiver == "" || !validCurrency || (t.Provider == "ton" && t.MasterchainSeqno <= 0) {
+		validCurrency := (t.Provider == "binance" || t.Provider == "okx" || t.Provider == "bybit" || t.Provider == "bitget") && (t.Currency == "USDT" || t.Currency == "USDC")
+		if t.State != model.Confirmed || t.OrderID != nil || t.Units <= 0 || t.Receiver == "" || !validCurrency {
 			return errors.New("必须选择未认领、已确认且满足最终性的到账证据")
 		}
 		var candidates []model.PaymentAttempt

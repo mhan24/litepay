@@ -2,7 +2,6 @@ package server
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,17 +9,14 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/skip2/go-qrcode"
 
 	"litepay/internal/amount"
 	"litepay/internal/config"
-	"litepay/internal/gram"
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/store"
@@ -107,7 +103,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 	reselectRequested := cfg.BEpusdt.Reselect && c.Query("reselect") == "1" && o.Reselect &&
 		(o.Status == model.Pending || o.Status == model.Ready)
 	selectedProvider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
-	if selectedProvider != config.ProviderBinance && selectedProvider != config.ProviderOKX && selectedProvider != config.ProviderBybit && selectedProvider != config.ProviderBitget && selectedProvider != config.ProviderTON {
+	if selectedProvider != config.ProviderBinance && selectedProvider != config.ProviderOKX && selectedProvider != config.ProviderBybit && selectedProvider != config.ProviderBitget {
 		selectedProvider = ""
 	}
 	// 第一步选择收款平台是纯前端过渡页，不写数据库；只有第二步选择币种
@@ -157,9 +153,6 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		providerName = "Bitget 站内转账"
 		uid = o.Receiver
 	}
-	if provider == config.ProviderTON {
-		providerName = "TON 主网 · GRAM"
-	}
 	providerSubtitle := "先选择收款平台，再选择币种"
 	if needsCurrency && provider == config.ProviderBinance {
 		providerSubtitle = "选择 Binance 收款币种"
@@ -177,9 +170,6 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
 	} else if provider == config.ProviderBitget {
 		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
-	}
-	if provider == config.ProviderTON {
-		providerSubtitle = "TON 主网链上转账 · 按精确金额自动确认"
 	}
 	hasPayee := uid != ""
 	canReselect := cfg.BEpusdt.Reselect && o.Reselect &&
@@ -201,20 +191,8 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		}
 	}
 
-	transferURL := ""
-	var paymentQR template.URL
-	if provider == config.ProviderTON && uid != "" && !needsProvider && !needsCurrency {
-		transferURL = "ton://transfer/" + uid + "?amount=" + strconv.FormatInt(o.PayUnits*1000, 10)
-		png, err := qrcode.Encode(transferURL, qrcode.Medium, 480)
-		if err != nil {
-			h.renderError(c, http.StatusInternalServerError, "暂时无法生成收款二维码", "二维码生成失败，请刷新订单页面后重试。")
-			return
-		}
-		// Only locally encoded PNG bytes enter this trusted data URL.
-		paymentQR = template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png)) // #nosec G203 -- The fixed image/png data URL contains only locally encoded PNG bytes in Base64.
-	}
 	data := CashierData{
-		RateUSD: strings.TrimRight(strings.TrimRight(o.RateUSD, "0"), "."), TransferURL: transferURL, PaymentQR: paymentQR,
+		RateUSD:          strings.TrimRight(strings.TrimRight(o.RateUSD, "0"), "."),
 		Title:            providerName,
 		Provider:         provider,
 		ProviderName:     providerName,
@@ -299,12 +277,6 @@ func providerOptions(cfg *config.Config, o *model.Order) []providerOption {
 			Selected:    strings.EqualFold(o.Provider, config.ProviderBitget),
 			RegisterURL: externalURL(cfg.Checkout.Bitget.RegisterURL),
 		},
-		config.ProviderTON: {
-			Key: config.ProviderTON, Name: "TON / GRAM", Logo: "/assets/brand/gram.svg",
-			Subtitle: "TON 主网转账 · GRAM · 实时 USD 报价",
-			Enabled:  cfg.TONEnabled() && orderCurrencyAllowed(cfg, o, "GRAM"),
-			Selected: o.Provider == config.ProviderTON,
-		},
 	}
 	ordered := cfg.OrderedProviders()
 	out := make([]providerOption, 0, len(ordered))
@@ -341,8 +313,6 @@ func currencyOptionsFor(cfg *config.Config, o *model.Order, provider string) []c
 
 func currencyIcon(currency string) string {
 	switch strings.ToUpper(strings.TrimSpace(currency)) {
-	case "GRAM":
-		return "/assets/brand/gram.svg"
 	case "USDT":
 		return "/assets/brand/usdt.svg"
 	case "USDC":
@@ -443,16 +413,7 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 			c.JSON(500, gin.H{"code": 1, "msg": "系统金额配置无效，请联系管理员检查订单规则设置"})
 			return
 		}
-		if provider == config.ProviderTON {
-			if h.poller == nil {
-				c.JSON(503, gin.H{"code": 1, "msg": "GRAM 行情检测器尚未启动，请稍后重试"})
-				return
-			}
-			receiver = cfg.TON.Address
-			_, err = h.st.SelectGRAM(c.Request.Context(), no, receiver, h.poller.GRAM.Snapshot(), cfg.Order.SlotGraceSeconds)
-		} else {
-			_, err = h.st.Select(c.Request.Context(), no, provider, currency, receiver, cfg.Order.AmountPrecision, step, minimum, cfg.Order.MaxOffset, cfg.Order.SlotGraceSeconds)
-		}
+		_, err = h.st.Select(c.Request.Context(), no, provider, currency, receiver, cfg.Order.AmountPrecision, step, minimum, cfg.Order.MaxOffset, cfg.Order.SlotGraceSeconds)
 		if err != nil {
 			status := 400
 			if errors.Is(err, store.ErrSelectionThrottled) {
@@ -596,21 +557,4 @@ func generateTradeNo() (string, error) {
 		return "", fmt.Errorf("生成订单号失败: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
-}
-
-func (h *Handlers) GRAMStatus(c *gin.Context) {
-	if h.poller == nil {
-		c.JSON(503, gin.H{"code": 1, "msg": "GRAM 状态检测器尚未启动"})
-		return
-	}
-	s := h.poller.GRAM.Snapshot()
-	if s.Address != h.C().TON.Address {
-		s.Balance = ""
-		s.BalanceUSD = ""
-		s.BalanceFresh = false
-		s.BalanceAt = time.Time{}
-		s.BalanceError = "等待检测新地址余额"
-		s.Address = h.C().TON.Address
-	}
-	c.JSON(200, gin.H{"code": 0, "data": s, "price_interval_seconds": int(gram.PriceInterval / time.Second), "balance_interval_seconds": int(gram.BalanceInterval / time.Second)})
 }

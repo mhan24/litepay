@@ -25,9 +25,6 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 	if provider == config.ProviderBitget {
 		receiver = cfg.Checkout.Bitget.UID
 	}
-	if provider == config.ProviderTON {
-		receiver = cfg.TON.Address
-	}
 	if err := p.st.QueueSettlementScan(ctx, provider, receiver, time.Duration(cfg.ProviderLookback(provider))*time.Minute); err != nil {
 		return err
 	}
@@ -65,40 +62,14 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 	cli, err := p.client(ctx, cfg, provider)
 	var rows []model.Transaction
 	if err == nil {
-		if provider == config.ProviderTON {
-			pages, ok := cli.(interface {
-				HistoryPage(context.Context, model.TONScanCheckpoint) ([]model.Transaction, model.TONScanCheckpoint, error)
-			})
-			if !ok {
-				err = errors.New("TON 历史补扫需要可恢复分页")
-			} else {
-				cp := model.TONScanCheckpoint{Receiver: job.Receiver, From: job.Cursor, To: after.ChunkTo, LT: job.LT, Hash: job.Hash, OldestAt: job.OldestAt, Pages: job.Pages, Active: true}
-				var next model.TONScanCheckpoint
-				rows, next, err = pages.HistoryPage(ctx, cp)
-				if err == nil {
-					after.LT = next.LT
-					after.Hash = next.Hash
-					after.OldestAt = next.OldestAt
-					after.Pages = next.Pages
-					if !next.Active {
-						after.Cursor = after.ChunkTo
-						after.ChunkTo = time.Time{}
-						after.LT = ""
-						after.Hash = ""
-						after.OldestAt = time.Time{}
-					}
-				}
-			}
-		} else {
-			if provider == config.ProviderBinance {
-				ctx = binance.WithRequestBudget(ctx, 4)
-			}
-			rows, err = cli.History(ctx, job.Cursor, after.ChunkTo)
-			if err == nil {
-				after.Cursor = after.ChunkTo
-				after.ChunkTo = time.Time{}
-				after.Pages++
-			}
+		if provider == config.ProviderBinance {
+			ctx = binance.WithRequestBudget(ctx, 4)
+		}
+		rows, err = cli.History(ctx, job.Cursor, after.ChunkTo)
+		if err == nil {
+			after.Cursor = after.ChunkTo
+			after.ChunkTo = time.Time{}
+			after.Pages++
 		}
 	}
 	save, done := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)

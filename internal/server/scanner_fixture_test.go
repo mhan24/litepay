@@ -24,7 +24,7 @@ func verifiedPoller(t *testing.T, mgr *settings.Manager, st *store.Store) *worke
 	t.Helper()
 	p := worker.NewPoller(mgr, st)
 	cfg := mgr.Get()
-	for _, provider := range []string{"binance", "okx", "ton"} {
+	for _, provider := range []string{"binance", "okx", "bybit", "bitget"} {
 		if !cfg.ProviderEnabled(provider) {
 			continue
 		}
@@ -32,8 +32,11 @@ func verifiedPoller(t *testing.T, mgr *settings.Manager, st *store.Store) *worke
 		if provider == "okx" {
 			uid = cfg.Checkout.OKX.UID
 		}
-		if provider == "ton" {
-			uid = cfg.TON.Address
+		if provider == "bybit" {
+			uid = cfg.Checkout.Bybit.UID
+		}
+		if provider == "bitget" {
+			uid = cfg.Checkout.Bitget.UID
 		}
 		p.UseTestSource(provider, emptyScanner{uid})
 	}
@@ -46,7 +49,7 @@ func primeScanners(t *testing.T, p *worker.Poller, mgr *settings.Manager) {
 	t.Helper()
 	ctx := context.Background()
 	cfg := mgr.Get()
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderBitget} {
 		if !cfg.ProviderEnabled(provider) {
 			continue
 		}

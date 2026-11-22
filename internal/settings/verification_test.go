@@ -3,13 +3,10 @@ package settings
 import (
 	"context"
 	"errors"
-	"litepay/internal/model"
 	"reflect"
 	"testing"
-	"time"
 
 	"litepay/internal/config"
-	"litepay/internal/gram"
 	"litepay/internal/store"
 )
 
@@ -44,7 +41,7 @@ func TestVerificationReportsOnlyAccountsActuallyChecked(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(called, []string{config.ProviderBinance}) {
 		t.Fatal(called, err)
 	}
-	if len(checks) != 5 || !checks[0].Verified || checks[1].Verified || checks[2].Verified || checks[3].Verified || checks[4].Verified {
+	if len(checks) != 4 || !checks[0].Verified || checks[1].Verified || checks[2].Verified || checks[3].Verified {
 		t.Fatal(checks)
 	}
 	if !reflect.DeepEqual(checks[1].Missing, []string{"API Key", "API Secret", "Passphrase"}) {
@@ -101,8 +98,6 @@ func TestCompleteVerificationChecksEveryEnabledProvider(t *testing.T) {
 	cfg.Bitget.APISecret = "secret"
 	cfg.Bitget.Passphrase = "phrase"
 	cfg.Checkout.Bitget.UID = "bitget-receiver"
-	cfg.TON.Address = gram.DefaultAddress
-	cfg.Checkout.Currencies = append(cfg.Checkout.Currencies, "GRAM")
 	m := verificationManager(t, cfg)
 	var called []string
 	m.verifyAccount = func(_ context.Context, _ *config.Config, provider string) error {
@@ -110,7 +105,7 @@ func TestCompleteVerificationChecksEveryEnabledProvider(t *testing.T) {
 		return nil
 	}
 	checks, err := m.UpdateWithVerification(context.Background(), Patch{VerifyAccounts: true}, "test")
-	if err != nil || !reflect.DeepEqual(called, []string{"binance", "okx", "bybit", "bitget", "ton"}) {
+	if err != nil || !reflect.DeepEqual(called, []string{"binance", "okx", "bybit", "bitget"}) {
 		t.Fatal(called, err)
 	}
 	for _, check := range checks {
@@ -146,7 +141,7 @@ func TestProviderCurrenciesLegacyPersistenceAndScopedVerification(t *testing.T) 
 	ctx := context.Background()
 	cfg := config.Default()
 	cfg.Server.Production = false
-	cfg.Checkout.Currencies = []string{"USDT", "USDC", "GRAM"}
+	cfg.Checkout.Currencies = []string{"USDT", "USDC"}
 	cfg.Binance.APIKey = "key"
 	cfg.Binance.APISecret = "secret"
 	cfg.Checkout.Binance.UID = "binance"
@@ -172,11 +167,11 @@ func TestProviderCurrenciesLegacyPersistenceAndScopedVerification(t *testing.T) 
 		t.Fatal(err)
 	}
 	c := loaded.Get()
-	if !reflect.DeepEqual(c.ProviderCurrencies("binance"), []string{"USDT", "USDC"}) || !reflect.DeepEqual(c.ProviderCurrencies("okx"), usdc) || !reflect.DeepEqual(c.ProviderCurrencies("ton"), []string{"GRAM"}) {
+	if !reflect.DeepEqual(c.ProviderCurrencies("binance"), []string{"USDT", "USDC"}) || !reflect.DeepEqual(c.ProviderCurrencies("okx"), usdc) {
 		t.Fatal(c.Checkout)
 	}
 	empty := []string{}
-	if err = loaded.Update(ctx, Patch{BinanceCurrencies: &empty, OKXCurrencies: &empty, BybitCurrencies: &empty, BitgetCurrencies: &empty, TONCurrencies: &empty}, "test"); err != nil {
+	if err = loaded.Update(ctx, Patch{BinanceCurrencies: &empty, OKXCurrencies: &empty, BybitCurrencies: &empty, BitgetCurrencies: &empty}, "test"); err != nil {
 		t.Fatal(err)
 	}
 	reloaded := New(baseCfg, m.st)
@@ -185,33 +180,6 @@ func TestProviderCurrenciesLegacyPersistenceAndScopedVerification(t *testing.T) 
 	}
 	if reloaded.Get().AnyProviderEnabled() || len(reloaded.Get().Checkout.Currencies) != 0 {
 		t.Fatal("cleared providers resurrected on reload")
-	}
-}
-
-func TestChangingTONAddressArchivesOnlyOldCheckpoint(t *testing.T) {
-	ctx := context.Background()
-	cfg := config.Default()
-	cfg.Server.Production = false
-	cfg.TON.Address = gram.DefaultAddress
-	m := verificationManager(t, cfg)
-	m.verifyAccount = func(context.Context, *config.Config, string) error { return nil }
-	old := model.TONScanCheckpoint{Receiver: cfg.TON.Address, Active: true, From: time.Now().Add(-time.Hour), To: time.Now()}
-	if err := m.st.StartTONCheckpoint(ctx, old); err != nil {
-		t.Fatal(err)
-	}
-	address := "0:0000000000000000000000000000000000000000000000000000000000000000"
-	if err := m.Update(ctx, Patch{TONAddress: &address}, "operator"); err != nil {
-		t.Fatal(err)
-	}
-	archived, err := m.st.TONCheckpoint(ctx, old.Receiver)
-	if err != nil || archived.Active {
-		t.Fatal(archived, err)
-	}
-	m.st.ScanResult(ctx, "ton", time.Now(), nil)
-	// A stray old active row is still excluded by the current receiver filter.
-	m.st.DB().Model(&model.TONScanCheckpoint{}).Where("receiver = ?", old.Receiver).Update("active", true)
-	if due, err := m.st.ScanDue(ctx, "ton", address); err != nil || due {
-		t.Fatal("old address kept current scan due", due, err)
 	}
 }
 
@@ -257,11 +225,6 @@ func TestEnablingProviderViaCurrencyVerifiesAccountAndValidatesTONLookback(t *te
 		t.Fatalf("expected account verification when enabling provider via currencies, calls=%v err=%v", calls, err)
 	}
 
-	invalid := clone(m.Get())
-	invalid.TON.LookbackBuffer = 0
-	if err := Validate(invalid); err == nil {
-		t.Fatal("expected invalid TON lookback buffer to be rejected")
-	}
 	invalidHash := "plaintext-admin-password"
 	p := Patch{AdminPasswordHash: &invalidHash}
 	target := clone(m.Get())

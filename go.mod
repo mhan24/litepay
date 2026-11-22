@@ -5,8 +5,6 @@ go 1.26.11
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/glebarez/sqlite v1.11.0
-	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	github.com/xssnick/tonutils-go v1.19.1
 	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.61.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -37,7 +35,6 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
-	github.com/pierrec/lz4/v4 v4.1.28 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.64.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

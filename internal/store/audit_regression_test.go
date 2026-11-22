@@ -357,14 +357,7 @@ func TestStoreValidationBoundaryGuardsAndForeignTimezones(t *testing.T) {
 		t.Fatalf("foreign timezone deposit failed match: %q err=%v", res, err)
 	}
 
-	// TON checkpoint and HistoricalScan boundary checks.
-	now := time.Now()
-	if err := s.StartTONCheckpoint(ctx, model.TONScanCheckpoint{Receiver: "wallet", From: now, To: now.Add(-time.Minute), Active: true}); err == nil {
-		t.Fatal("accepted inverted TON checkpoint range")
-	}
-	if err := s.StartTONCheckpoint(ctx, model.TONScanCheckpoint{Receiver: "wallet", From: now.Add(-time.Hour), To: now, Pages: 1, Active: true}); err == nil {
-		t.Fatal("accepted active paginated TON checkpoint without LT/Hash")
-	}
+	// HistoricalScan boundary checks.
 	if err := s.HistoricalScanFailure(ctx, model.HistoricalScan{}, false); err == nil {
 		t.Fatal("accepted zero-ID historical scan failure")
 	}

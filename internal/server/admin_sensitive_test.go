@@ -19,7 +19,7 @@ func TestSensitiveAdminActionsRequirePasswordAndRevokeOnLimit(t *testing.T) {
 	cases := []struct{ name, path, scope, field string }{
 		{name: "reveal", path: "/admin/integration"}, {name: "rotate", path: "/admin/settings/token"},
 	}
-	for _, field := range []struct{ scope, field string }{{"binance", "binance_api_key"}, {"binance", "binance_api_secret"}, {"okx", "okx_api_key"}, {"okx", "okx_api_secret"}, {"okx", "okx_passphrase"}, {"ton", "ton_api_key"}} {
+	for _, field := range []struct{ scope, field string }{{"binance", "binance_api_key"}, {"binance", "binance_api_secret"}, {"okx", "okx_api_key"}, {"okx", "okx_api_secret"}, {"okx", "okx_passphrase"}, {"bybit", "bybit_api_key"}, {"bybit", "bybit_api_secret"}, {"bitget", "bitget_api_key"}, {"bitget", "bitget_api_secret"}, {"bitget", "bitget_passphrase"}} {
 		cases = append(cases, struct{ name, path, scope, field string }{field.field, "/admin/settings", field.scope, field.field})
 	}
 	for _, tc := range cases {

@@ -24,7 +24,6 @@ import (
 
 	"litepay/internal/amount"
 	"litepay/internal/config"
-	"litepay/internal/gram"
 	"litepay/internal/store"
 )
 
@@ -43,7 +42,6 @@ type Patch struct {
 	OKXCurrencies      *[]string `json:"okx_currencies,omitempty"`
 	BybitCurrencies    *[]string `json:"bybit_currencies,omitempty"`
 	BitgetCurrencies   *[]string `json:"bitget_currencies,omitempty"`
-	TONCurrencies      *[]string `json:"ton_currencies,omitempty"`
 	CheckoutCurrencies *[]string `json:"checkout_currencies,omitempty"`
 	ProviderOrder      *[]string `json:"provider_order,omitempty"`
 	CheckoutNote       *string   `json:"checkout_note,omitempty"`
@@ -90,11 +88,6 @@ type Patch struct {
 	BitgetPollInterval *int    `json:"bitget_poll_interval,omitempty"`
 	BitgetLookback     *int    `json:"bitget_lookback,omitempty"`
 
-	// TON 主网
-	TONAddress      *string `json:"ton_address,omitempty"`
-	TONAPIKey       *string `json:"ton_api_key,omitempty"`
-	TONPollInterval *int    `json:"ton_poll_interval,omitempty"`
-
 	// 回调
 	NotifyRetryDelays *[]int `json:"notify_retry_delays,omitempty"`
 	NotifyMaxAttempts *int   `json:"notify_max_attempts,omitempty"`
@@ -134,9 +127,6 @@ func (p Patch) Apply(c *config.Config) {
 		if p.BitgetCurrencies == nil {
 			c.Checkout.BitgetCurrencies = nil
 		}
-		if p.TONCurrencies == nil {
-			c.Checkout.TONCurrencies = nil
-		}
 	}
 	if p.BinanceCurrencies != nil {
 		c.Checkout.BinanceCurrencies = append([]string{}, (*p.BinanceCurrencies)...)
@@ -149,9 +139,6 @@ func (p Patch) Apply(c *config.Config) {
 	}
 	if p.BitgetCurrencies != nil {
 		c.Checkout.BitgetCurrencies = append([]string{}, (*p.BitgetCurrencies)...)
-	}
-	if p.TONCurrencies != nil {
-		c.Checkout.TONCurrencies = append([]string{}, (*p.TONCurrencies)...)
 	}
 	if p.CheckoutNote != nil {
 		c.Checkout.Note = strings.TrimSpace(*p.CheckoutNote)
@@ -258,15 +245,6 @@ func (p Patch) Apply(c *config.Config) {
 	if p.BitgetLookback != nil {
 		c.Bitget.LookbackBuffer = *p.BitgetLookback
 	}
-	if p.TONAddress != nil {
-		c.TON.Address = strings.TrimSpace(*p.TONAddress)
-	}
-	if p.TONAPIKey != nil {
-		c.TON.APIKey = strings.TrimSpace(*p.TONAPIKey)
-	}
-	if p.TONPollInterval != nil {
-		c.TON.PollInterval = *p.TONPollInterval
-	}
 	if p.NotifyRetryDelays != nil {
 		c.Notify.RetryDelays = append([]int(nil), (*p.NotifyRetryDelays)...)
 	}
@@ -292,7 +270,7 @@ func Snapshot(c *config.Config) Patch {
 		BEpusdtReselect:    b(c.BEpusdt.Reselect),
 		CheckoutCurrencies: &[]string{},
 		ProviderOrder:      &c.Checkout.ProviderOrder,
-		BinanceCurrencies:  &c.Checkout.BinanceCurrencies, OKXCurrencies: &c.Checkout.OKXCurrencies, BybitCurrencies: &c.Checkout.BybitCurrencies, BitgetCurrencies: &c.Checkout.BitgetCurrencies, TONCurrencies: &c.Checkout.TONCurrencies,
+		BinanceCurrencies:  &c.Checkout.BinanceCurrencies, OKXCurrencies: &c.Checkout.OKXCurrencies, BybitCurrencies: &c.Checkout.BybitCurrencies, BitgetCurrencies: &c.Checkout.BitgetCurrencies,
 		CheckoutNote:       s(c.Checkout.Note),
 		BinanceUID:         s(c.Checkout.Binance.UID),
 		OKXUID:             s(c.Checkout.OKX.UID),
@@ -332,7 +310,6 @@ func Snapshot(c *config.Config) Patch {
 		BitgetPollInterval: i(c.Bitget.PollInterval),
 		BitgetLookback:     i(c.Bitget.LookbackBuffer),
 
-		TONAddress: s(c.TON.Address), TONAPIKey: s(c.TON.APIKey), TONPollInterval: i(c.TON.PollInterval),
 		NotifyRetryDelays: &[]int{},
 		NotifyMaxAttempts: i(c.Notify.MaxAttempts),
 		NotifyTimeout:     i(c.Notify.TimeoutSeconds),
@@ -494,9 +471,9 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 	current := m.cur.Load()
 	// 只有会改变到账归属或付款窗口的字段需要在待付款期间冻结。API 凭据不改变
 	// 归属（换 Key 仍须通过 UID 核验），必须允许在扫描失败时随时修正。
-	sensitive := current.TON.Address != next.TON.Address || current.Checkout.Binance.UID != next.Checkout.Binance.UID || current.Checkout.OKX.UID != next.Checkout.OKX.UID || current.Checkout.Bybit.UID != next.Checkout.Bybit.UID || current.Checkout.Bitget.UID != next.Checkout.Bitget.UID ||
+	sensitive := current.Checkout.Binance.UID != next.Checkout.Binance.UID || current.Checkout.OKX.UID != next.Checkout.OKX.UID || current.Checkout.Bybit.UID != next.Checkout.Bybit.UID || current.Checkout.Bitget.UID != next.Checkout.Bitget.UID ||
 		current.Order.SlotGraceSeconds != next.Order.SlotGraceSeconds || !reflect.DeepEqual(current.Checkout.Currencies, next.Checkout.Currencies) ||
-		!reflect.DeepEqual(current.Checkout.BinanceCurrencies, next.Checkout.BinanceCurrencies) || !reflect.DeepEqual(current.Checkout.OKXCurrencies, next.Checkout.OKXCurrencies) || !reflect.DeepEqual(current.Checkout.BybitCurrencies, next.Checkout.BybitCurrencies) || !reflect.DeepEqual(current.Checkout.BitgetCurrencies, next.Checkout.BitgetCurrencies) || !reflect.DeepEqual(current.Checkout.TONCurrencies, next.Checkout.TONCurrencies)
+		!reflect.DeepEqual(current.Checkout.BinanceCurrencies, next.Checkout.BinanceCurrencies) || !reflect.DeepEqual(current.Checkout.OKXCurrencies, next.Checkout.OKXCurrencies) || !reflect.DeepEqual(current.Checkout.BybitCurrencies, next.Checkout.BybitCurrencies) || !reflect.DeepEqual(current.Checkout.BitgetCurrencies, next.Checkout.BitgetCurrencies)
 	if sensitive {
 		active, err := m.st.HasActivePayments(ctx)
 		if err != nil {
@@ -507,7 +484,7 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 		}
 	}
 
-	if p.VerifyProvider != "" && p.VerifyProvider != config.ProviderBinance && p.VerifyProvider != config.ProviderOKX && p.VerifyProvider != config.ProviderBybit && p.VerifyProvider != config.ProviderBitget && p.VerifyProvider != config.ProviderTON {
+	if p.VerifyProvider != "" && p.VerifyProvider != config.ProviderBinance && p.VerifyProvider != config.ProviderOKX && p.VerifyProvider != config.ProviderBybit && p.VerifyProvider != config.ProviderBitget {
 		return fmt.Errorf("核验平台无效")
 	}
 	if p.VerifyAccounts && p.VerifyProvider != "" && !next.ProviderEnabled(p.VerifyProvider) {
@@ -518,7 +495,7 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 		}
 	}
 	if p.VerifyAccounts && !next.AnyProviderEnabled() {
-		return fmt.Errorf("请先完整填写至少一个平台的 API 凭据和收款 UID，或 GRAM 收款地址")
+		return fmt.Errorf("请先完整填写至少一个平台的 API 凭据和收款 UID")
 	}
 	// Verify changed collection accounts before publishing or persisting credentials.
 	changed := map[string]bool{
@@ -526,7 +503,6 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 		config.ProviderOKX:     !current.OKXEnabled() || current.OKX.APIKey != next.OKX.APIKey || current.OKX.APISecret != next.OKX.APISecret || current.OKX.Passphrase != next.OKX.Passphrase || current.Checkout.OKX.UID != next.Checkout.OKX.UID,
 		config.ProviderBybit:   !current.BybitEnabled() || current.Bybit.APIKey != next.Bybit.APIKey || current.Bybit.APISecret != next.Bybit.APISecret || current.Checkout.Bybit.UID != next.Checkout.Bybit.UID,
 		config.ProviderBitget:  !current.BitgetEnabled() || current.Bitget.APIKey != next.Bitget.APIKey || current.Bitget.APISecret != next.Bitget.APISecret || current.Bitget.Passphrase != next.Bitget.Passphrase || current.Checkout.Bitget.UID != next.Checkout.Bitget.UID,
-		config.ProviderTON:     !current.TONEnabled() || current.TON.Address != next.TON.Address || current.TON.APIKey != next.TON.APIKey,
 	}
 	checks := verificationTargets(next)
 	for i := range checks {
@@ -552,7 +528,7 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 	if err != nil {
 		return err
 	}
-	if err := m.st.SaveSettingAndArchiveTON(ctx, string(payload), operator, next.TON.Address); err != nil {
+	if err := m.st.SaveSettingPayload(ctx, string(payload), operator); err != nil {
 		return fmt.Errorf("保存配置失败: %w", err)
 	}
 	m.cur.Store(next)
@@ -620,7 +596,7 @@ func Validate(c *config.Config) error {
 	}
 	for _, cur := range c.Checkout.Currencies {
 		if !config.IsSupportedCurrency(cur) {
-			return fmt.Errorf("不支持币种 %s，仅支持 USDT / USDC / GRAM", cur)
+			return fmt.Errorf("不支持币种 %s，仅支持 USDT / USDC", cur)
 		}
 	}
 	if c.Order.ExpireMinutes < 1 || c.Order.ExpireMinutes > 1440 {
@@ -670,17 +646,6 @@ func Validate(c *config.Config) error {
 	if c.Bitget.LookbackBuffer < 1 || c.Bitget.LookbackBuffer > 60 {
 		return fmt.Errorf("Bitget 回看缓冲需在 1~60 分钟之间")
 	}
-	if c.TON.Address != "" {
-		if _, err := gram.ParseAddress(c.TON.Address); err != nil {
-			return err
-		}
-	}
-	if c.TON.PollInterval < 2 || c.TON.PollInterval > 60 {
-		return fmt.Errorf("GRAM 到账查询间隔需在 2~60 秒之间")
-	}
-	if c.TON.LookbackBuffer < 1 || c.TON.LookbackBuffer > 60 {
-		return fmt.Errorf("GRAM 回看缓冲需在 1~60 分钟之间")
-	}
 	if len(c.Notify.RetryDelays) == 0 {
 		return fmt.Errorf("结果通知重试序列不能为空")
 	}
@@ -715,9 +680,6 @@ func clone(c *config.Config) *config.Config {
 	}
 	if c.Checkout.BitgetCurrencies != nil {
 		n.Checkout.BitgetCurrencies = append([]string{}, c.Checkout.BitgetCurrencies...)
-	}
-	if c.Checkout.TONCurrencies != nil {
-		n.Checkout.TONCurrencies = append([]string{}, c.Checkout.TONCurrencies...)
 	}
 	n.Notify.RetryDelays = append([]int(nil), c.Notify.RetryDelays...)
 	return &n

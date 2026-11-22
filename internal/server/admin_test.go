@@ -763,16 +763,12 @@ func TestNilPollerAndNilLoggerDefensiveHandling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/admin", "/admin/operations", "/admin/gram/status"} {
+	for _, path := range []string{"/admin", "/admin/operations"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.AddCookie(&http.Cookie{Name: adminCookieName, Value: token})
 		w := httptest.NewRecorder()
 		engine.ServeHTTP(w, req)
-		if path == "/admin/gram/status" {
-			if w.Code != http.StatusServiceUnavailable {
-				t.Fatalf("expected 503 on %s with nil poller, got %d", path, w.Code)
-			}
-		} else if w.Code != http.StatusOK {
+		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 on %s with nil poller, got %d", path, w.Code)
 		}
 	}

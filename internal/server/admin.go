@@ -634,7 +634,6 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 		"OKXCurrencies":      cfg.ProviderCurrencies(config.ProviderOKX),
 		"BybitCurrencies":    cfg.ProviderCurrencies(config.ProviderBybit),
 		"BitgetCurrencies":   cfg.ProviderCurrencies(config.ProviderBitget),
-		"TONCurrencies":      cfg.ProviderCurrencies(config.ProviderTON),
 		"DelaysJoined":       joinInts(cfg.Notify.RetryDelays),
 		"BEpusdtKeyMask":     maskSecret(cfg.BEpusdt.APIToken),
 		"BinanceKey":         maskSecret(cfg.Binance.APIKey),
@@ -646,11 +645,10 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 		"Provider":           "multi",
 		"ProviderOrder":      cfg.OrderedProviders(),
 		"ProviderOrderCSV":   strings.Join(cfg.OrderedProviders(), ","),
-		"ProviderNames":      map[string]string{config.ProviderBinance: "币安 · Binance", config.ProviderOKX: "欧易 · OKX", config.ProviderBybit: "Bybit", config.ProviderBitget: "Bitget", config.ProviderTON: "GRAM · TON 主网"},
+		"ProviderNames":      map[string]string{config.ProviderBinance: "币安 · Binance", config.ProviderOKX: "欧易 · OKX", config.ProviderBybit: "Bybit", config.ProviderBitget: "Bitget"},
 		"OKXKey":             maskSecret(cfg.OKX.APIKey),
 		"BybitKey":           maskSecret(cfg.Bybit.APIKey),
 		"BitgetKey":          maskSecret(cfg.Bitget.APIKey),
-		"TONKey":             maskSecret(cfg.TON.APIKey),
 		"DBPath":             cfg.Database.Path,
 
 		"BaseURL": cfg.Server.BaseURL,
@@ -662,7 +660,7 @@ func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 	p, errs := parseSettingsForm(c)
 	destination := h.adminURL("/admin/settings?msg=")
 	scope := c.PostForm("settings_scope")
-	for _, valid := range []string{"binance", "okx", "bybit", "bitget", "ton", "checkout", "orders", "merchant"} {
+	for _, valid := range []string{"binance", "okx", "bybit", "bitget", "checkout", "orders", "merchant"} {
 		if scope == valid {
 			destination = h.adminURL("/admin/settings?view=" + scope + "&msg=")
 			break
@@ -676,8 +674,8 @@ func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 	// Deployment controls (notify_hosts, base_url, production) are startup-only;
 	// parseSettingsForm never exposes them as editable settings.
 	cfg := h.C()
-	sensitive := p.BinanceAPIKey != nil || p.BinanceAPISecret != nil || p.OKXAPIKey != nil || p.OKXAPISecret != nil || p.OKXPassphrase != nil || p.BybitAPIKey != nil || p.BybitAPISecret != nil || p.BitgetAPIKey != nil || p.BitgetAPISecret != nil || p.BitgetPassphrase != nil || p.TONAPIKey != nil ||
-		(p.BinanceUID != nil && *p.BinanceUID != cfg.Checkout.Binance.UID) || (p.OKXUID != nil && *p.OKXUID != cfg.Checkout.OKX.UID) || (p.BybitUID != nil && *p.BybitUID != cfg.Checkout.Bybit.UID) || (p.BitgetUID != nil && *p.BitgetUID != cfg.Checkout.Bitget.UID) || (p.TONAddress != nil && *p.TONAddress != cfg.TON.Address)
+	sensitive := p.BinanceAPIKey != nil || p.BinanceAPISecret != nil || p.OKXAPIKey != nil || p.OKXAPISecret != nil || p.OKXPassphrase != nil || p.BybitAPIKey != nil || p.BybitAPISecret != nil || p.BitgetAPIKey != nil || p.BitgetAPISecret != nil || p.BitgetPassphrase != nil ||
+		(p.BinanceUID != nil && *p.BinanceUID != cfg.Checkout.Binance.UID) || (p.OKXUID != nil && *p.OKXUID != cfg.Checkout.OKX.UID) || (p.BybitUID != nil && *p.BybitUID != cfg.Checkout.Bybit.UID) || (p.BitgetUID != nil && *p.BitgetUID != cfg.Checkout.Bitget.UID)
 	if sensitive && !h.reauthenticate(c) {
 		c.Redirect(http.StatusSeeOther, destination+url.QueryEscape("当前密码错误或验证过于频繁，请重新登录后重试")+"&t=err")
 		return
@@ -704,7 +702,7 @@ func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 }
 
 func verificationMessage(checks []settings.AccountVerification) (string, bool) {
-	names := map[string]string{config.ProviderBinance: "Binance", config.ProviderOKX: "OKX", config.ProviderBybit: "Bybit", config.ProviderBitget: "Bitget", config.ProviderTON: "GRAM 余额接口"}
+	names := map[string]string{config.ProviderBinance: "Binance", config.ProviderOKX: "OKX", config.ProviderBybit: "Bybit", config.ProviderBitget: "Bitget"}
 	parts := []string{"配置已保存"}
 	partial := false
 	for _, check := range checks {
@@ -935,18 +933,6 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 			p.BitgetLookback = &defaults.Bitget.LookbackBuffer
 			errs = nil
 		}
-	case config.ProviderTON:
-		p.TONAddress = text("ton_address", false)
-		p.TONAPIKey = text("ton_api_key", true)
-		p.TONCurrencies = currencies("ton_currencies")
-		p.TONPollInterval = integer("ton_poll_interval", 2, 60)
-		if clear {
-			p.TONAddress = &empty
-			p.TONAPIKey = &empty
-			p.TONCurrencies = &none
-			p.TONPollInterval = &defaults.TON.PollInterval
-			errs = nil
-		}
 	case "checkout":
 		p.CheckoutNote = text("checkout_note", false)
 		rawOrder := strings.TrimSpace(c.PostForm("provider_order"))
@@ -983,7 +969,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 	default:
 		errs = append(errs, "设置分区无效，请刷新设置页后重试")
 	}
-	if scope == config.ProviderBinance || scope == config.ProviderOKX || scope == config.ProviderBybit || scope == config.ProviderBitget || scope == config.ProviderTON {
+	if scope == config.ProviderBinance || scope == config.ProviderOKX || scope == config.ProviderBybit || scope == config.ProviderBitget {
 		p.VerifyProvider = scope
 		p.VerifyAccounts = !clear && c.PostForm("verify_accounts") == "on"
 	}

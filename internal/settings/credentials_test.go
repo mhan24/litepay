@@ -82,7 +82,8 @@ func TestMasterKeyStartupPolicyAndIdempotentMigration(t *testing.T) {
 	okxSecret := "plain-okx-secret"
 	okxPass := "plain-okx-pass"
 	okxUID := "654321"
-	tonKey := "plain-ton-key"
+	bybitKey := "plain-bybit-key"
+	bybitSecret := "plain-bybit-secret"
 	if err := devMgr.Update(ctx, Patch{
 		BinanceAPIKey:    &bKey,
 		BinanceAPISecret: &bSecret,
@@ -91,7 +92,8 @@ func TestMasterKeyStartupPolicyAndIdempotentMigration(t *testing.T) {
 		OKXAPISecret:     &okxSecret,
 		OKXPassphrase:    &okxPass,
 		OKXUID:           &okxUID,
-		TONAPIKey:        &tonKey,
+		BybitAPIKey:      &bybitKey,
+		BybitAPISecret:   &bybitSecret,
 	}, "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +125,7 @@ func TestMasterKeyStartupPolicyAndIdempotentMigration(t *testing.T) {
 	if err := st.DB().First(&rawSetting, "id = 1").Error; err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{bKey, bSecret, okxKey, okxSecret, okxPass, tonKey} {
+	for _, secret := range []string{bKey, bSecret, okxKey, okxSecret, okxPass, bybitKey, bybitSecret} {
 		if strings.Contains(rawSetting.Payload, secret) {
 			t.Fatalf("plaintext secret %q still present in settings table after migration", secret)
 		}
@@ -151,7 +153,7 @@ func TestMasterKeyStartupPolicyAndIdempotentMigration(t *testing.T) {
 	got := migratedMgr.Get()
 	if got.Binance.APIKey != bKey || got.Binance.APISecret != bSecret ||
 		got.OKX.APIKey != okxKey || got.OKX.APISecret != okxSecret || got.OKX.Passphrase != okxPass ||
-		got.TON.APIKey != tonKey || got.BEpusdt.APIToken != origToken {
+		got.Bybit.APIKey != bybitKey || got.Bybit.APISecret != bybitSecret || got.BEpusdt.APIToken != origToken {
 		t.Fatalf("decrypted config mismatch: %+v", got)
 	}
 

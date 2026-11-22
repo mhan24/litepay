@@ -20,7 +20,6 @@ import (
 	"gorm.io/gorm/logger"
 
 	"litepay/internal/amount"
-	"litepay/internal/gram"
 	"litepay/internal/model"
 )
 
@@ -332,19 +331,8 @@ func (s *Store) Create(ctx context.Context, o model.Order) (*model.Order, error)
 
 // Select reserves integer slots and preserves every previously issued payment instruction.
 func (s *Store) Select(ctx context.Context, no, provider, currency, receiver string, precision int, step, minUnits int64, maxOffset, grace int) (*model.Order, error) {
-	return s.selectPayment(ctx, no, provider, currency, receiver, precision, step, minUnits, maxOffset, grace, 0, gram.Snapshot{})
-}
-
-func (s *Store) SelectGRAM(ctx context.Context, no, receiver string, quote gram.Snapshot, grace int) (*model.Order, error) {
-	return s.selectPayment(ctx, no, "ton", "GRAM", receiver, 6, 1, 1, 99, grace, 1, quote)
-}
-
-func (s *Store) selectPayment(ctx context.Context, no, provider, currency, receiver string, precision int, step, minUnits int64, maxOffset, grace int, quoted int, quote gram.Snapshot) (*model.Order, error) {
 	var o model.Order
-	if provider == "ton" && (currency != "GRAM" || quoted == 0) {
-		return nil, errors.New("GRAM 付款必须使用有效 USD 报价")
-	}
-	if provider != "ton" && ((provider != "binance" && provider != "okx" && provider != "bybit" && provider != "bitget") || (currency != "USDT" && currency != "USDC")) {
+	if (provider != "binance" && provider != "okx" && provider != "bybit" && provider != "bitget") || (currency != "USDT" && currency != "USDC") {
 		return nil, errors.New("收款平台与币种不匹配")
 	}
 	if strings.TrimSpace(receiver) == "" {
@@ -406,36 +394,17 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 
 		q := amount.Quantum(precision)
 		base := max(o.OriginUnits, minUnits)
-		var quoteLimit int64
-		if quoted != 0 {
-			var err error
-			base, err = gram.Quote(o.OriginUnits, quote)
-			if err != nil {
-				return err
-			}
-			quoteLimit, err = gram.MaxQuoteUnits(o.OriginUnits, quote)
-			if err != nil {
-				return err
-			}
-		} else if base >= amount.MaxMall {
+		if base >= amount.MaxMall {
 			return errors.New("应付金额超出可核销范围")
 		}
 		base = ((base + q - 1) / q) * q
 		ceiling := base + step*int64(maxOffset)
-		if quoted != 0 {
-			ceiling = quoteLimit
-		}
 		units, actualPrecision, err := allocateSlot(db, o, provider, currency, base, ceiling, step, precision, grace, now)
 		if err != nil {
 			return err
 		}
 		o.RateUSD = ""
 		o.RateAt = nil
-		if quoted != 0 {
-			o.RateUSD = quote.USD
-			at := normalizeTime(quote.PriceAt)
-			o.RateAt = &at
-		}
 		o.Provider = provider
 		o.Currency = currency
 		o.Receiver = receiver
@@ -550,10 +519,7 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 	default:
 		return "invalid_evidence", errors.New("交易状态无效")
 	}
-	if t.Provider == "ton" && t.State == model.Confirmed && t.MasterchainSeqno <= 0 {
-		return "unfinalized", errors.New("TON 到账缺少主链最终性确认")
-	}
-	if t.EventID == "" || (t.Provider != "binance" && t.Provider != "okx" && t.Provider != "bybit" && t.Provider != "bitget" && t.Provider != "ton") || t.OccurredAt.IsZero() {
+	if t.EventID == "" || (t.Provider != "binance" && t.Provider != "okx" && t.Provider != "bybit" && t.Provider != "bitget") || t.OccurredAt.IsZero() {
 		return "invalid_evidence", errors.New("交易缺少可靠身份或时间")
 	}
 	t.OccurredAt = normalizeTime(t.OccurredAt)
@@ -628,7 +594,7 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			result = t.State
 			return nil
 		}
-		if t.Units <= 0 || t.Receiver == "" || ((t.Provider == "ton" && t.Currency != "GRAM") || (t.Provider != "ton" && t.Currency != "USDT" && t.Currency != "USDC")) {
+		if t.Units <= 0 || t.Receiver == "" || (t.Currency != "USDT" && t.Currency != "USDC") {
 			return finish("invalid_payment")
 		}
 		attempt, o, reason, err := matchAttempt(db, t, false)
@@ -700,14 +666,6 @@ func (s *Store) ScanDue(ctx context.Context, provider, receiver string) (bool, e
 	db := s.db.WithContext(ctx)
 	if err = db.Table("payment_attempts a").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ?", model.Ready, provider).Count(&n).Error; err != nil || n > 0 {
 		return n > 0, err
-	}
-	if provider == "ton" {
-		if err = db.Model(&model.TONScanCheckpoint{}).Where("active = ? AND receiver = ?", true, receiver).Count(&n).Error; err != nil {
-			return false, err
-		}
-		if n > 0 {
-			return true, nil
-		}
 	}
 	err = db.Model(&model.ConfirmationTask{}).Where("provider = ? AND state = ? AND deadline > ?", provider, "pending", time.Now()).Count(&n).Error
 	return n > 0, err

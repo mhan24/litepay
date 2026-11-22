@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,7 +13,6 @@ import (
 
 	"golang.org/x/net/html"
 	"litepay/internal/config"
-	"litepay/internal/gram"
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/store"
@@ -30,23 +28,15 @@ func TestCSPNoncesCoverCashierAdminAndErrorPages(t *testing.T) {
 	cfg := config.Default()
 	cfg.Server.Production = false
 	cfg.Admin.Password = "csp-test-admin-password"
-	cfg.TON.Address = gram.DefaultAddress
-	cfg.Checkout.Currencies = []string{"USDT", "USDC", "GRAM"}
+	cfg.Binance.APIKey = "k"
+	cfg.Binance.APISecret = "s"
+	cfg.Checkout.Binance.UID = "binance-uid"
+	cfg.Checkout.Currencies = []string{"USDT", "USDC"}
 	mgr := settings.New(cfg, st)
 	if err := mgr.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
 	poller := verifiedPoller(t, mgr, st)
-	price := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"error":[],"result":{"TONUSD":{"a":["1.11"],"b":["1.11"]}}}`)
-	}))
-	defer price.Close()
-	if err := poller.GRAM.UseTestPriceSource(price.URL + "?fixture=1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := poller.GRAM.CheckPrice(ctx); err != nil {
-		t.Fatal(err)
-	}
 	engine, err := New(mgr, st, poller)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +47,7 @@ func TestCSPNoncesCoverCashierAdminAndErrorPages(t *testing.T) {
 			t.Fatal(err)
 		}
 		if state != "pending" {
-			if _, err := st.SelectGRAM(ctx, no, gram.DefaultAddress, gram.Snapshot{Fresh: true, USD: "1.11", PriceAt: time.Now()}, 120); err != nil {
+			if _, err := st.Select(ctx, no, "binance", "USDT", "binance-uid", 2, 10000, 10000, 99, 120); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -82,9 +72,6 @@ func TestCSPNoncesCoverCashierAdminAndErrorPages(t *testing.T) {
 			w := httptest.NewRecorder()
 			engine.ServeHTTP(w, req)
 			assertPageCSP(t, w, seen)
-			if path == "/pay/csp-ready" && (!strings.Contains(w.Body.String(), "data:image/png;base64,") || !strings.Contains(w.Body.String(), "ton://transfer/")) {
-				t.Fatal("CSP changed QR/wallet navigation")
-			}
 		})
 	}
 	req := httptest.NewRequest(http.MethodPost, "/admin/integration", strings.NewReader(url.Values{"csrf": {csrf}, "current_password": {cfg.Admin.Password}}.Encode()))

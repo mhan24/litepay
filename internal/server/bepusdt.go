@@ -16,7 +16,6 @@ import (
 
 	money "litepay/internal/amount"
 	"litepay/internal/config"
-	"litepay/internal/gram"
 	"litepay/internal/model"
 	"litepay/internal/sign"
 )
@@ -273,7 +272,7 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 func bepusdtCurrency(cfg *config.Config, req bepusdtCreateRequest) error {
 	for _, currency := range cfg.Checkout.Currencies {
 		if config.IsSupportedCurrency(currency) && currencyAllowedByLimit(req.Currencies, currency) {
-			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderBitget, config.ProviderTON} {
+			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderBitget} {
 				if cfg.ProviderEnabled(provider) && cfg.ProviderCurrency(provider, currency) {
 					return nil
 				}
@@ -293,17 +292,13 @@ func bepusdtReselect(cfg *config.Config, requested *bool) bool {
 }
 
 func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *model.Order, reselect bool) {
-	var quotes []gram.Snapshot
-	if h.poller != nil {
-		quotes = append(quotes, h.poller.GRAM.Snapshot())
-	}
 	data := gin.H{
 		"fiat": "USD", "trade_id": order.TradeNo, "order_id": order.OutTradeNo,
 		"name": order.Name, "status": orderStatusNumber(order), "amount": order.Original(),
 		"expiration_time": max(0, int(time.Until(order.ExpiresAt).Seconds())),
 		"payment_url":     cfg.Server.BaseURL + "/pay/" + order.TradeNo,
 		"reselect":        reselect && order.Reselect && order.Status != model.Paid,
-		"network":         bepusdtPaymentMethods(cfg, order, quotes...),
+		"network":         bepusdtPaymentMethods(cfg, order),
 	}
 	c.JSON(http.StatusOK, bepusdtResponse{StatusCode: 200, Message: "success", Data: data, RequestID: ""})
 }
@@ -311,7 +306,7 @@ func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *mod
 // bepusdtPaymentMethods mirrors the cashier method list returned by upstream
 // BEpusdt. Dujiao Next currently ignores this field, but returning the complete
 // contract keeps the cashier response interoperable with other clients.
-func bepusdtPaymentMethods(cfg *config.Config, order *model.Order, quotes ...gram.Snapshot) []gin.H {
+func bepusdtPaymentMethods(cfg *config.Config, order *model.Order) []gin.H {
 	out := make([]gin.H, 0, 8)
 	for _, provider := range cfg.OrderedProviders() {
 		if !cfg.ProviderEnabled(provider) {
@@ -327,31 +322,12 @@ func bepusdtPaymentMethods(cfg *config.Config, order *model.Order, quotes ...gra
 		if provider == config.ProviderBitget {
 			network = "Bitget"
 		}
-		if provider == config.ProviderTON {
-			network = "TON"
-		}
 		for _, currency := range cfg.Checkout.Currencies {
 			if !cfg.ProviderCurrency(provider, currency) ||
 				!currencyAllowedByLimit(order.CurrencyLimit, currency) {
 				continue
 			}
 			actual, rate := order.Original(), "1"
-			if provider == config.ProviderTON {
-				if order.Provider == provider && order.RateUSD != "" {
-					actual = order.PayAmount()
-					rate = order.RateUSD
-				} else {
-					if len(quotes) == 0 {
-						continue
-					}
-					units, err := gram.Quote(order.OriginUnits, quotes[0])
-					if err != nil {
-						continue
-					}
-					actual = money.String(units)
-					rate = quotes[0].USD
-				}
-			}
 			out = append(out, gin.H{
 				"amount":            order.Original(),
 				"actual_amount":     actual,

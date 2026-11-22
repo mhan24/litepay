@@ -51,7 +51,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if not .NeedsProvider}}
     <div class="channel">
       <span class="channel-icon">
-        {{if eq .Provider "binance"}}<img src="/assets/brand/binance.svg" alt="">{{else if eq .Provider "okx"}}<img src="/assets/brand/okx.svg" alt="">{{else if eq .Provider "bybit"}}<img src="/assets/brand/bybit.svg" alt="">{{else if eq .Provider "bitget"}}<img src="/assets/brand/bitget.svg" alt="">{{else if eq .Provider "ton"}}<img src="/assets/brand/gram.svg" alt="">{{else}}LP{{end}}
+        {{if eq .Provider "binance"}}<img src="/assets/brand/binance.svg" alt="">{{else if eq .Provider "okx"}}<img src="/assets/brand/okx.svg" alt="">{{else if eq .Provider "bybit"}}<img src="/assets/brand/bybit.svg" alt="">{{else if eq .Provider "bitget"}}<img src="/assets/brand/bitget.svg" alt="">{{else}}LP{{end}}
       </span>
       <span class="channel-copy">
         <strong>{{.ProviderName}}</strong>
@@ -64,7 +64,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if .NeedsProvider}}
     <div class="choice-title">
       <h2>选择收款平台</h2>
-      <span>支持交易所站内转账与 TON 链上支付</span>
+      <span>支持交易所站内免手续费转账</span>
     </div>
     <div class="provider-list">
       {{range .Providers}}
@@ -96,7 +96,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
         <span class="choice-body">
           <span class="choice-name">{{.Currency}}</span>
           <span class="choice-sub">
-            {{if eq $.Provider "okx"}}OKX 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "binance"}}Binance 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "bybit"}}Bybit 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "bitget"}}Bitget 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "ton"}}TON 主网链上转账 · 按实时 USD 报价锁定应付数量{{else}}按精确金额自动确认{{end}}
+            {{if eq $.Provider "okx"}}OKX 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "binance"}}Binance 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "bybit"}}Bybit 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "bitget"}}Bitget 站内转账（0 手续费）· 按精确金额自动确认{{else}}按精确金额自动确认{{end}}
             {{if not .Enabled}} · 当前不可用{{end}}
           </span>
         </span>
@@ -111,7 +111,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     <div class="amount-box">
       <div class="amount-label"><span>应付金额</span><span>含订单识别尾数，请按完整小数位转账</span></div>
       <div class="amount-row">
-        {{if eq .Currency "GRAM"}}<img class="amount-token" src="/assets/brand/gram.svg" alt="">{{else if eq .Currency "USDT"}}<img class="amount-token" src="/assets/brand/usdt.svg" alt="">{{else if eq .Currency "USDC"}}<img class="amount-token" src="/assets/brand/usdc.svg" alt="">{{end}}
+        {{if eq .Currency "USDT"}}<img class="amount-token" src="/assets/brand/usdt.svg" alt="">{{else if eq .Currency "USDC"}}<img class="amount-token" src="/assets/brand/usdc.svg" alt="">{{end}}
         <span class="amount" id="amount">{{.Amount}}</span>
         <button class="copy" type="button" data-copy="{{.Amount}}" id="copy-amount">复制金额</button>
       </div>
@@ -123,21 +123,10 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
             <span class="currency">{{.Currency}}</span>
           </div>
         </div>
-        <span class="m-0 badge" >{{if eq .Provider "ton"}}TON 主网{{else}}站内转账{{end}}</span>
+        <span class="m-0 badge" >站内转账</span>
       </div>
-      <div class="amount-sub">订单金额 ${{.OriginMoney}} USD · 1 {{.Currency}} = {{if eq .Provider "ton"}}{{.RateUSD}}{{else}}1{{end}} USD{{if eq .Provider "ton"}} · 已锁定本单应付数量{{end}}</div>
+      <div class="amount-sub">订单金额 ${{.OriginMoney}} USD · 1 {{.Currency}} = 1 USD</div>
     </div>
-
-    {{if .PaymentQR}}
-    <div class="wallet-scan" id="telegram-wallet-scan" aria-labelledby="wallet-scan-title">
-      <img id="gram-payment-qr" src="{{.PaymentQR}}" width="240" height="240" alt="本单 GRAM 收款地址二维码">
-      <div>
-        <h2 id="wallet-scan-title">Telegram 钱包扫码付款</h2>
-        <p>打开 Telegram 钱包，点击右上角「扫一扫」扫描二维码转账。</p>
-        <p class="scan-check">二维码已包含精确金额 {{.Amount}} GRAM。扫码后请核对金额和收款地址；若未自动填入金额，请复制上方应付金额粘贴。</p>
-      </div>
-    </div>
-    {{end}}
 
     <div class="warn">
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -149,17 +138,12 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if .HasPayee}}
     <div class="pay-focus">
       <div>
-        <span class="label">{{if eq .Provider "ton"}}收款地址{{else}}收款 UID{{end}}</span>
-        <div class="value uid{{if eq .Provider "ton"}} address{{end}}">{{.UID}}</div>
+        <span class="label">收款 UID</span>
+        <div class="value uid">{{.UID}}</div>
       </div>
-      <button class="copy" type="button" data-copy="{{.UID}}">复制{{if eq .Provider "ton"}}地址{{else}} UID{{end}}</button>
+      <button class="copy" type="button" data-copy="{{.UID}}">复制 UID</button>
     </div>
-    {{if eq .Provider "ton"}}
-    <div class="pay-note">请使用 TON 主网向此地址转入 <b>{{.Amount}} GRAM</b>（手续费另付），请勿转入 Jetton 代币。</div>
-    <a class="copy primary" id="gram-open-wallet" href="{{tonURL .TransferURL}}">打开钱包付款</a>
-    {{else}}
     <div class="pay-note">请在 <b>{{if eq .Provider "okx"}}OKX{{else if eq .Provider "bybit"}}Bybit{{else if eq .Provider "bitget"}}Bitget{{else}}Binance{{end}}</b> 向此 UID 发起<b>站内转账</b>，币种选择 <b>{{.Currency}}</b>，转账金额填写 <b>{{.Amount}}</b>。</div>
-    {{end}}
     {{else}}
     <div class="pay-note error">收款账户暂未配置，请稍后刷新重试或联系商户处理。</div>
     {{end}}

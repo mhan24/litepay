@@ -26,8 +26,6 @@ func scanScope(cfg *config.Config, provider string) string {
 		account = []any{provider, cfg.Bybit, cfg.Checkout.Bybit.UID}
 	case config.ProviderBitget:
 		account = []any{provider, cfg.Bitget, cfg.Checkout.Bitget.UID}
-	case config.ProviderTON:
-		account = []any{provider, cfg.TON}
 	}
 	raw, _ := json.Marshal(account)
 	hash := sha256.Sum256(raw)

@@ -172,7 +172,6 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		adm.POST("/integration/token", h.AdminIntegrationReveal)
 		adm.POST("/integration/reveal", h.AdminIntegrationReveal)
 		adm.GET("/settings", h.AdminSettings)
-		adm.GET("/gram/status", h.GRAMStatus)
 		adm.POST("/settings", h.AdminSettingsSave)
 		adm.POST("/settings/token", h.AdminRotateToken)
 		adm.POST("/settings/account", h.AdminAccountSave)

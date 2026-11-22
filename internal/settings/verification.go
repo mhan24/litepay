@@ -9,7 +9,6 @@ import (
 	"litepay/internal/bitget"
 	"litepay/internal/bybit"
 	"litepay/internal/config"
-	"litepay/internal/gram"
 	"litepay/internal/okx"
 )
 
@@ -30,19 +29,14 @@ func verificationTargets(c *config.Config) []AccountVerification {
 		}
 		return out
 	}
-	tonMissing := missing("收款地址", c.TON.Address)
-	if !c.ProviderCurrency(config.ProviderTON, "GRAM") {
-		tonMissing = append(tonMissing, "启用 GRAM 币种")
-	}
 	out := []AccountVerification{
 		{Provider: config.ProviderBinance, Missing: missing("API Key", c.Binance.APIKey, "API Secret", c.Binance.APISecret, "收款 UID", c.Checkout.Binance.UID)},
 		{Provider: config.ProviderOKX, Missing: missing("API Key", c.OKX.APIKey, "API Secret", c.OKX.APISecret, "Passphrase", c.OKX.Passphrase, "收款 UID", c.Checkout.OKX.UID)},
 		{Provider: config.ProviderBybit, Missing: missing("API Key", c.Bybit.APIKey, "API Secret", c.Bybit.APISecret, "收款 UID", c.Checkout.Bybit.UID)},
 		{Provider: config.ProviderBitget, Missing: missing("API Key", c.Bitget.APIKey, "API Secret", c.Bitget.APISecret, "Passphrase", c.Bitget.Passphrase, "收款 UID", c.Checkout.Bitget.UID)},
-		{Provider: config.ProviderTON, Missing: tonMissing},
 	}
 	for i := range out {
-		if out[i].Provider != config.ProviderTON && len(c.ProviderCurrencies(out[i].Provider)) == 0 {
+		if len(c.ProviderCurrencies(out[i].Provider)) == 0 {
 			out[i].Missing = append(out[i].Missing, "开放币种")
 		}
 	}
@@ -86,11 +80,6 @@ func verifyCollectionAccount(ctx context.Context, c *config.Config, provider str
 		}
 		if uid != c.Checkout.Bitget.UID {
 			return fmt.Errorf("Bitget API Key 所属账户与收款 UID 不一致")
-		}
-	case config.ProviderTON:
-		cli := gram.New(c.TON.BaseURL, c.TON.APIKey, c.TON.Address)
-		if _, err := cli.Balance(ctx); err != nil {
-			return fmt.Errorf("GRAM 余额接口核验失败: %w，请检查地址、Toncenter API Key 和网络", err)
 		}
 	default:
 		return fmt.Errorf("不支持的收款平台")

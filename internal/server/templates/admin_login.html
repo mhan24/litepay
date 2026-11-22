@@ -16,10 +16,10 @@ body{padding:40px 24px}.login{max-width:920px;margin:40px auto}.brand{display:fl
 <main class="login">
   <div class="brand">
     <div class="mark">{{template "brand_mark" .}}</div>
-    <div class="brand-copy"><h1>{{.SiteName}}</h1><p>Binance / OKX / GRAM 收银台</p></div>
+    <div class="brand-copy"><h1>{{.SiteName}}</h1><p>交易所站内转账收银台</p></div>
     {{template "theme_toggle" .}}
   </div>
-  <div class="login-frame"><section class="login-context"><h2>收款监控与<br>流水对账</h2><p>管理 Binance、OKX 与 TON 收款配置，核对交易流水，跟进商户回调通知。</p><ul><li>查看各平台扫描与就绪状态</li><li>核对订单流水与未归属到账</li><li>处理异常到账与回调重试</li></ul></section>
+  <div class="login-frame"><section class="login-context"><h2>收款监控与<br>流水对账</h2><p>管理 Binance、OKX、Bybit 与 Bitget 收款配置，核对交易流水，跟进商户回调通知。</p><ul><li>查看各平台扫描与就绪状态</li><li>核对订单流水与未归属到账</li><li>处理异常到账与回调重试</li></ul></section>
   <form class="card" method="post" action="{{adminPath}}/login">
     {{if .Error}}<div class="err" role="alert">{{.Error}}</div>{{end}}
     <input type="hidden" name="next" value="{{.Next}}">

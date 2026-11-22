@@ -12,7 +12,6 @@ import (
 	"litepay/internal/bitget"
 	"litepay/internal/bybit"
 	"litepay/internal/config"
-	"litepay/internal/gram"
 	"litepay/internal/model"
 	"litepay/internal/okx"
 	"litepay/internal/settings"
@@ -39,13 +38,12 @@ type Poller struct {
 	scannedScope map[string]string
 	// 每个平台下一轮补查未确认到账的偏移量，用于有界轮转。
 	pendingOffset map[string]int
-	GRAM          *gram.Monitor
 	// testTransports 仅由端到端测试置位：创建的交易所客户端访问本地模拟服务。
 	testTransports bool
 }
 
 func NewPoller(cfg *settings.Manager, st *store.Store) *Poller {
-	return &Poller{GRAM: gram.NewMonitor(), cfg: cfg, st: st, clients: map[string]*connection{}, scannedScope: map[string]string{}, scanLocks: map[string]*sync.Mutex{"binance": {}, "okx": {}, "bybit": {}, "bitget": {}, "ton": {}}, pendingOffset: map[string]int{}}
+	return &Poller{cfg: cfg, st: st, clients: map[string]*connection{}, scannedScope: map[string]string{}, scanLocks: map[string]*sync.Mutex{"binance": {}, "okx": {}, "bybit": {}, "bitget": {}}, pendingOffset: map[string]int{}}
 }
 
 // UseTestTransports 只用于端到端测试：调度器创建的交易所客户端只访问本地模拟服务，
@@ -64,7 +62,7 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 
 	p.mu.Lock()
 	cached := p.clients[provider]
-	if cached == nil || cached.config.TON != cfg.TON || cached.config.Binance != cfg.Binance || cached.config.OKX != cfg.OKX || cached.config.Bybit != cfg.Bybit || cached.config.Bitget != cfg.Bitget || cached.config.Checkout.Binance != cfg.Checkout.Binance || cached.config.Checkout.OKX != cfg.Checkout.OKX || cached.config.Checkout.Bybit != cfg.Checkout.Bybit || cached.config.Checkout.Bitget != cfg.Checkout.Bitget {
+	if cached == nil || cached.config.Binance != cfg.Binance || cached.config.OKX != cfg.OKX || cached.config.Bybit != cfg.Bybit || cached.config.Bitget != cfg.Bitget || cached.config.Checkout.Binance != cfg.Checkout.Binance || cached.config.Checkout.OKX != cfg.Checkout.OKX || cached.config.Checkout.Bybit != cfg.Checkout.Bybit || cached.config.Checkout.Bitget != cfg.Checkout.Bitget {
 		var cli source
 		if provider == config.ProviderBinance {
 			cli = binance.New(cfg.Binance.APIKey, cfg.Binance.APISecret, cfg.Binance.BaseURL, cfg.Binance.RecvWindow, cfg.Binance.Limit)
@@ -72,8 +70,6 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 			cli = bybit.New(cfg.Bybit.APIKey, cfg.Bybit.APISecret, cfg.Bybit.BaseURL, cfg.Bybit.RecvWindow, cfg.Bybit.Limit)
 		} else if provider == config.ProviderBitget {
 			cli = bitget.New(cfg.Bitget.APIKey, cfg.Bitget.APISecret, cfg.Bitget.Passphrase, cfg.Bitget.BaseURL, cfg.Bitget.Limit)
-		} else if provider == config.ProviderTON {
-			cli = gram.New(cfg.TON.BaseURL, cfg.TON.APIKey, cfg.TON.Address)
 		} else {
 			cli = okx.New(cfg.OKX.APIKey, cfg.OKX.APISecret, cfg.OKX.Passphrase, cfg.OKX.BaseURL, cfg.OKX.Limit)
 		}
@@ -94,9 +90,6 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 			return nil, err
 		}
 		want := cfg.Checkout.Binance.UID
-		if provider == config.ProviderTON {
-			want = cfg.TON.Address
-		}
 		if provider == config.ProviderOKX {
 			want = cfg.Checkout.OKX.UID
 		}
@@ -157,7 +150,7 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 		}
 	}()
 	// Active orders and durable confirmation tasks scan frequently; idle accounts still reconcile.
-	due, err := p.st.ScanDue(ctx, provider, cfg.TON.Address)
+	due, err := p.st.ScanDue(ctx, provider, "")
 	if err == nil {
 		ready, readyErr := p.ProviderReady(ctx, cfg, provider)
 		if readyErr != nil {
@@ -176,25 +169,6 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	coveredFrom := end
 	cli, err := p.client(ctx, cfg, provider)
 	if err == nil {
-		if provider == config.ProviderTON {
-			if pages, ok := cli.(interface {
-				HistoryPage(context.Context, model.TONScanCheckpoint) ([]model.Transaction, model.TONScanCheckpoint, error)
-			}); ok {
-				var complete bool
-				complete, err = p.scanTON(ctx, cfg, pages, end)
-				if err == nil && complete {
-					p.recordScanScope(cfg, provider)
-				}
-				if err != nil {
-					save, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-					defer cancel()
-					if e := p.st.ScanResult(save, provider, end, err); e != nil {
-						return e
-					}
-				}
-				return err
-			}
-		}
 		coveredFrom, end, err = p.scanIncremental(ctx, cfg, provider, cli, end)
 	}
 	// 未确认到账按各自原始创建时间单独补查：它只补充事实、不推进游标，因此旧记录既不会
@@ -309,8 +283,7 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 // 自身判断，这里不再重复粗略的“有没有订单”判断。
 func (p *Poller) Run(ctx context.Context) {
 	var workers sync.WaitGroup
-	workers.Go(func() { p.monitorGRAM(ctx) })
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderBitget, config.ProviderTON} {
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderBitget} {
 		workers.Go(func() {
 			for {
 				if ctx.Err() != nil {
@@ -351,49 +324,6 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 }
 
-// Prices and balances keep updating even when no checkout is waiting for payment.
-func (p *Poller) monitorGRAM(ctx context.Context) {
-	var wg sync.WaitGroup
-	for _, balance := range []bool{false, true} {
-		wg.Go(func() {
-			interval := gram.PriceInterval
-			if balance {
-				interval = gram.BalanceInterval
-			}
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			var balanceClient *gram.Client
-			var balanceConfig config.TONConfig
-			for {
-				cfg := p.cfg.Get()
-				if cfg.TONEnabled() {
-					if balance {
-						if balanceClient == nil || balanceConfig != cfg.TON {
-							balanceClient = gram.New(cfg.TON.BaseURL, cfg.TON.APIKey, cfg.TON.Address)
-							p.mu.Lock()
-							test := p.testTransports
-							p.mu.Unlock()
-							if test {
-								balanceClient.UseTestTransport()
-							}
-							balanceConfig = cfg.TON
-						}
-						_ = p.GRAM.CheckBalance(ctx, balanceClient)
-					} else {
-						_ = p.GRAM.CheckPrice(ctx)
-					}
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-				}
-			}
-		})
-	}
-	wg.Wait()
-}
-
 // scanBounds never skips a previously unscanned gap, including time after cancellation.
 func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider string, end time.Time) (time.Time, time.Time, error) {
 	cursor, err := p.st.Cursor(ctx, provider)
@@ -426,33 +356,6 @@ func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider st
 		end = start.Add(time.Hour)
 	}
 	return start, end, nil
-}
-
-func (p *Poller) scanTON(ctx context.Context, cfg *config.Config, cli interface {
-	HistoryPage(context.Context, model.TONScanCheckpoint) ([]model.Transaction, model.TONScanCheckpoint, error)
-}, end time.Time) (bool, error) {
-	cp, err := p.st.TONCheckpoint(ctx, cfg.TON.Address)
-	if err != nil {
-		return false, err
-	}
-	if !cp.Active || cp.From.After(cp.To) {
-		start, stop, err := p.scanBounds(ctx, cfg, config.ProviderTON, end)
-		if err != nil {
-			return false, err
-		}
-		cp = model.TONScanCheckpoint{Receiver: cfg.TON.Address, From: start, To: stop, Active: true}
-		if err = p.st.StartTONCheckpoint(ctx, cp); err != nil {
-			return false, err
-		}
-	}
-	rows, next, err := cli.HistoryPage(ctx, cp)
-	if err != nil {
-		return false, err
-	}
-	save, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-	defer cancel()
-	err = p.st.SaveTONPage(save, cp, next, rows)
-	return !next.Active && err == nil, err
 }
 
 func (p *Poller) BinanceUsage() binance.Usage {
