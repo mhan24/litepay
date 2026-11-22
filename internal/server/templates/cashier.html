@@ -161,14 +161,6 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     <div class="pay-note error">收款账户暂未配置，请稍后刷新重试或联系商户处理。</div>
     {{end}}
 
-    <div class="timer">
-      <div class="timer-head">
-        <span>剩余支付时间</span>
-        <span class="clock" id="clock">--:--</span>
-      </div>
-      <div class="bar"><div class="bar-inner" id="bar"></div></div>
-    </div>
-
     <div class="status" role="status" aria-live="polite">
       <span class="dot"></span>
       <span id="status-text">等待付款到账，确认后将自动更新状态</span>
@@ -178,9 +170,16 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{end}}
     {{end}}{{end}}
 
+    <div class="timer">
+      <div class="timer-head">
+        <span>下单时间 {{.CreatedAt}} · 请在 {{.ExpiredAt}} 前付款</span>
+        <span class="clock" id="clock">--:--</span>
+      </div>
+      <div class="bar"><div class="bar-inner" id="bar"></div></div>
+    </div>
+
     <div class="foot">
       <span>订单编号 <span class="mono">{{.TradeNo}}</span></span>
-      <span>下单时间 {{.CreatedAt}} · 请在 {{.ExpiredAt}} 前付款</span>
     </div>
     </div>
   </section>
@@ -214,12 +213,13 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   var barEl = document.getElementById('bar');
   var statusEl = document.getElementById('status-text');
   var overlay = document.getElementById('overlay');
-  var showPayment = !!clockEl && !!barEl && !!statusEl && !!overlay;
+  var hasTimer = !!clockEl && !!barEl;
+  var showPayment = hasTimer && !!statusEl && !!overlay;
 
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
 
   function renderTimer() {
-    if (!showPayment) return;
+    if (!hasTimer) return;
     if (remain < 0) remain = 0;
     clockEl.textContent = pad(Math.floor(remain / 60)) + ':' + pad(remain % 60);
     var pct = TOTAL > 0 ? Math.max(0, Math.min(100, remain / TOTAL * 100)) : 0;
@@ -231,9 +231,13 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
   }
 
   function tick() {
-    if (finished || !showPayment) return;
+    if (finished || !hasTimer) return;
     renderTimer();
-    if (remain <= 0) { onExpired(); return; }
+    if (remain <= 0) {
+      if (showPayment) { onExpired(); }
+      else { finished = true; window.location.reload(); }
+      return;
+    }
     remain--;
   }
 
@@ -391,9 +395,11 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     if (!overlay.open) overlay.showModal();
   }
 
-  if (!NEEDS_PROVIDER && !NEEDS_CURRENCY) {
+  if (hasTimer) {
     renderTimer();
     setInterval(tick, 1000);
+  }
+  if (!NEEDS_PROVIDER && !NEEDS_CURRENCY) {
     window.pollOrderStatus(TRADE_NO,receiveStatus,function(){return finished});
   }
 })();
