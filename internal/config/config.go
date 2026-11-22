@@ -50,6 +50,36 @@ const (
 	ProviderTON     = "ton"
 )
 
+// DefaultProviderOrder 定义收银台收款平台的默认展示顺序。
+var DefaultProviderOrder = []string{ProviderBinance, ProviderOKX, ProviderBybit, ProviderBitget, ProviderTON}
+
+// NormalizeProviderOrder 规范化平台排序：去重、忽略未知项，并自动补全缺失的默认平台。
+func NormalizeProviderOrder(in []string) []string {
+	valid := map[string]bool{
+		ProviderBinance: true,
+		ProviderOKX:     true,
+		ProviderBybit:   true,
+		ProviderBitget:  true,
+		ProviderTON:     true,
+	}
+	seen := make(map[string]bool, len(DefaultProviderOrder))
+	out := make([]string, 0, len(DefaultProviderOrder))
+	for _, raw := range in {
+		p := strings.ToLower(strings.TrimSpace(raw))
+		if !valid[p] || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	for _, p := range DefaultProviderOrder {
+		if !seen[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // SupportedCurrencies 是收银台和到账确认逻辑允许的币种集合。
 var SupportedCurrencies = []string{"USDT", "USDC", "GRAM"}
 
@@ -185,6 +215,7 @@ type CheckoutConfig struct {
 	BybitCurrencies   []string        `yaml:"-"`
 	BitgetCurrencies  []string        `yaml:"-"`
 	TONCurrencies     []string        `yaml:"-"`
+	ProviderOrder     []string        `yaml:"-"`
 	Currencies        []string        `yaml:"currencies"` // 支持的币种，如 ["USDT","USDC"]
 	Note              string          `yaml:"note"`       // 收银台提示文案
 	Binance           ProviderDisplay `yaml:"binance"`
@@ -195,7 +226,8 @@ type CheckoutConfig struct {
 
 // ProviderDisplay 收款平台展示信息。UID 同时用于展示、转账和到账归属校验。
 type ProviderDisplay struct {
-	UID string `yaml:"uid"`
+	UID         string `yaml:"uid"`
+	RegisterURL string `yaml:"register_url"`
 }
 
 // OrderConfig 订单与浮动金额配置。
@@ -402,9 +434,14 @@ func (c *Config) normalize() error {
 		c.TON.LookbackBuffer = 2
 	}
 	c.Checkout.Binance.UID = strings.TrimSpace(c.Checkout.Binance.UID)
+	c.Checkout.Binance.RegisterURL = strings.TrimSpace(c.Checkout.Binance.RegisterURL)
 	c.Checkout.OKX.UID = strings.TrimSpace(c.Checkout.OKX.UID)
+	c.Checkout.OKX.RegisterURL = strings.TrimSpace(c.Checkout.OKX.RegisterURL)
 	c.Checkout.Bybit.UID = strings.TrimSpace(c.Checkout.Bybit.UID)
+	c.Checkout.Bybit.RegisterURL = strings.TrimSpace(c.Checkout.Bybit.RegisterURL)
 	c.Checkout.Bitget.UID = strings.TrimSpace(c.Checkout.Bitget.UID)
+	c.Checkout.Bitget.RegisterURL = strings.TrimSpace(c.Checkout.Bitget.RegisterURL)
+	c.Checkout.ProviderOrder = NormalizeProviderOrder(c.Checkout.ProviderOrder)
 	c.Checkout.Currencies = NormalizeCurrencies(c.Checkout.Currencies)
 	if c.Order.ExpireMinutes <= 0 {
 		c.Order.ExpireMinutes = 10
@@ -713,6 +750,11 @@ func (c *Config) NormalizePaymentCurrencies() {
 
 func (c *Config) AnyProviderEnabled() bool {
 	return c.BinanceEnabled() || c.OKXEnabled() || c.BybitEnabled() || c.BitgetEnabled() || c.TONEnabled()
+}
+
+// OrderedProviders 返回按后台配置排序后的全部平台键列表。
+func (c *Config) OrderedProviders() []string {
+	return NormalizeProviderOrder(c.Checkout.ProviderOrder)
 }
 
 // ValidateNotifyURL enforces explicit production transport and merchant identity.

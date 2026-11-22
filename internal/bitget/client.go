@@ -106,8 +106,9 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	return uid, nil
 }
 
-// History 通过 /api/v2/spot/wallet/deposit-records 分页读取站内转账入账记录。
-// 仅保留 dest == "internal_transfer" 的站内转账，忽略链上充值（on_chain）。
+// History 优先调用 UTA V3 /api/v3/account/deposit-records 分页读取站内转账入账记录，
+// 若账户为经典模式（404）则回退 /api/v2/spot/wallet/deposit-records。
+// 仅保留站内转账（dest == "internal_transfer"），忽略链上充值（on_chain）。
 func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Transaction, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -124,12 +125,20 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 	}
 	startMs := start.UnixMilli()
 	endMs := end.UnixMilli()
+	useV3 := true
 	out := []model.Transaction{}
 	seen := map[string]bool{}
 	seenCursors := map[string]bool{}
-	idLessThan := ""
+	cursor := ""
 	for page := 0; page < 20; page++ {
-		rows, rawCount, lastID, err := c.page(ctx, startMs, endMs, idLessThan)
+		rows, rawCount, nextCursor, err := c.page(ctx, useV3, startMs, endMs, cursor)
+		if err != nil && useV3 && page == 0 {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && (apiErr.HTTPStatus == http.StatusNotFound || apiErr.Code == "40085") {
+				useV3 = false
+				rows, rawCount, nextCursor, err = c.page(ctx, false, startMs, endMs, "")
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -140,42 +149,73 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 			seen[t.EventID] = true
 			out = append(out, t)
 		}
-		if rawCount < c.limit || lastID == "" {
+		if nextCursor == "" || (!useV3 && rawCount < c.limit) {
 			return out, nil
 		}
-		if seenCursors[lastID] {
+		if seenCursors[nextCursor] {
 			return nil, fmt.Errorf("Bitget repeated pagination cursor")
 		}
-		seenCursors[lastID] = true
-		idLessThan = lastID
+		seenCursors[nextCursor] = true
+		cursor = nextCursor
 	}
 	return nil, fmt.Errorf("Bitget incomplete history: page limit")
 }
 
-func (c *Client) page(ctx context.Context, startMs, endMs int64, idLessThan string) ([]model.Transaction, int, string, error) {
+func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cursor string) ([]model.Transaction, int, string, error) {
+	endpoint := "/api/v3/account/deposit-records"
 	q := url.Values{
 		"startTime": {strconv.FormatInt(startMs, 10)},
 		"endTime":   {strconv.FormatInt(endMs, 10)},
 		"limit":     {strconv.Itoa(c.limit)},
 	}
-	if idLessThan != "" {
-		q.Set("idLessThan", idLessThan)
+	if useV3 {
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+	} else {
+		endpoint = "/api/v2/spot/wallet/deposit-records"
+		if cursor != "" {
+			q.Set("idLessThan", cursor)
+		}
 	}
-	body, err := c.get(ctx, "/api/v2/spot/wallet/deposit-records", q)
+	body, err := c.get(ctx, endpoint, q)
 	if err != nil {
 		return nil, 0, "", err
 	}
-	var rows []struct {
-		OrderID flexString `json:"orderId"`
-		TradeID flexString `json:"tradeId"`
-		Coin    flexString `json:"coin"`
-		Size    flexString `json:"size"`
-		Status  flexString `json:"status"`
-		Dest    flexString `json:"dest"`
-		CTime   flexString `json:"cTime"`
+	type rawRow struct {
+		OrderID     flexString `json:"orderId"`
+		ID          flexString `json:"id"`
+		TradeID     flexString `json:"tradeId"`
+		TxID        flexString `json:"txId"`
+		Coin        flexString `json:"coin"`
+		Size        flexString `json:"size"`
+		Amount      flexString `json:"amount"`
+		Status      flexString `json:"status"`
+		Dest        flexString `json:"dest"`
+		RecordType  flexString `json:"recordType"`
+		CTime       flexString `json:"cTime"`
+		CreatedTime flexString `json:"createdTime"`
+		TS          flexString `json:"ts"`
 	}
-	if json.Unmarshal(body, &rows) != nil || rows == nil {
-		return nil, 0, "", fmt.Errorf("Bitget invalid deposit records response")
+	var rows []rawRow
+	var nextCursor string
+	trimmed := strings.TrimSpace(string(body))
+	if strings.HasPrefix(trimmed, "{") {
+		var container struct {
+			List   *json.RawMessage `json:"list"`
+			Cursor flexString       `json:"cursor"`
+		}
+		if json.Unmarshal(body, &container) != nil || container.List == nil || strings.TrimSpace(string(*container.List)) == "null" {
+			return nil, 0, "", fmt.Errorf("Bitget invalid deposit records response")
+		}
+		if json.Unmarshal(*container.List, &rows) != nil || rows == nil {
+			return nil, 0, "", fmt.Errorf("Bitget invalid deposit records list")
+		}
+		nextCursor = strings.TrimSpace(string(container.Cursor))
+	} else {
+		if json.Unmarshal(body, &rows) != nil || rows == nil {
+			return nil, 0, "", fmt.Errorf("Bitget invalid deposit records response")
+		}
 	}
 	c.clockMu.RLock()
 	receiver := c.receiver
@@ -185,22 +225,42 @@ func (c *Client) page(ctx context.Context, startMs, endMs int64, idLessThan stri
 	lastID := ""
 	for _, r := range rows {
 		id := strings.TrimSpace(string(r.OrderID))
+		if id == "" {
+			id = strings.TrimSpace(string(r.ID))
+		}
 		coin := strings.ToUpper(strings.TrimSpace(string(r.Coin)))
-		ms, e := r.CTime.Millis()
+		tsField := r.CTime
+		if tsField == "" {
+			tsField = r.CreatedTime
+		}
+		if tsField == "" {
+			tsField = r.TS
+		}
+		ms, e := tsField.Millis()
 		if e != nil || id == "" || coin == "" || seen[id] {
 			return nil, 0, "", fmt.Errorf("Bitget invalid deposit evidence")
 		}
 		seen[id] = true
 		lastID = id
 		dest := strings.ToLower(strings.TrimSpace(string(r.Dest)))
-		if dest == "on_chain" {
+		if dest == "" {
+			dest = strings.ToLower(strings.TrimSpace(string(r.RecordType)))
+		}
+		if dest == "on_chain" || dest == "onchain" {
 			continue
 		}
 		if ms < startMs || ms > endMs {
 			continue
 		}
-		n, amountErr := r.Size.SignedUnits()
+		rawAmt := r.Size
+		if rawAmt == "" {
+			rawAmt = r.Amount
+		}
+		n, amountErr := rawAmt.SignedUnits()
 		ref := strings.TrimSpace(string(r.TradeID))
+		if ref == "" {
+			ref = strings.TrimSpace(string(r.TxID))
+		}
 		if ref == "" {
 			ref = id
 		}
@@ -218,12 +278,12 @@ func (c *Client) page(ctx context.Context, startMs, endMs int64, idLessThan stri
 		switch {
 		case amountErr != nil:
 			t.Units, t.State, t.Reason = 0, model.Rejected, "invalid_amount"
-			t.RawAmount = string(r.Size)
+			t.RawAmount = string(rawAmt)
 		case n <= 0:
 			t.State, t.Reason = model.Rejected, "not_internal_deposit"
 		case dest == "":
 			t.State, t.Reason = model.Unconfirmed, "internal_transfer_unverified"
-		case dest != "internal_transfer":
+		case dest != "internal_transfer" && dest != "internal":
 			t.State, t.Reason = model.Rejected, "not_internal_deposit"
 		case status == "fail" || status == "failed":
 			t.State, t.Reason = model.Rejected, "deposit_failed"
@@ -232,7 +292,10 @@ func (c *Client) page(ctx context.Context, startMs, endMs int64, idLessThan stri
 		}
 		out = append(out, t)
 	}
-	return out, len(rows), lastID, nil
+	if !useV3 && nextCursor == "" && len(rows) >= c.limit {
+		nextCursor = lastID
+	}
+	return out, len(rows), nextCursor, nil
 }
 
 func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {

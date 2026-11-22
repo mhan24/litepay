@@ -252,6 +252,7 @@ type providerOption struct {
 	Selected       bool
 	SuccessLabel   string
 	HasSuccessRate bool
+	RegisterURL    string
 }
 
 type currencyOption struct {
@@ -269,33 +270,50 @@ func internalTransferSubtitle(currencies []string) string {
 }
 
 func providerOptions(cfg *config.Config, o *model.Order) []providerOption {
-	return []providerOption{
-		{
+	all := map[string]providerOption{
+		config.ProviderBinance: {
 			Key: config.ProviderBinance, Name: "Binance", Logo: "/assets/brand/binance.svg",
-			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBinance)),
-			Enabled:  cfg.BinanceEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBinance)...),
-			Selected: strings.EqualFold(o.Provider, config.ProviderBinance),
+			Subtitle:    internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBinance)),
+			Enabled:     cfg.BinanceEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBinance)...),
+			Selected:    strings.EqualFold(o.Provider, config.ProviderBinance),
+			RegisterURL: externalURL(cfg.Checkout.Binance.RegisterURL),
 		},
-		{
+		config.ProviderOKX: {
 			Key: config.ProviderOKX, Name: "OKX", Logo: "/assets/brand/okx.svg",
-			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderOKX)),
-			Enabled:  cfg.OKXEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderOKX)...),
-			Selected: strings.EqualFold(o.Provider, config.ProviderOKX),
+			Subtitle:    internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderOKX)),
+			Enabled:     cfg.OKXEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderOKX)...),
+			Selected:    strings.EqualFold(o.Provider, config.ProviderOKX),
+			RegisterURL: externalURL(cfg.Checkout.OKX.RegisterURL),
 		},
-		{
+		config.ProviderBybit: {
 			Key: config.ProviderBybit, Name: "Bybit", Logo: "/assets/brand/bybit.svg",
-			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBybit)),
-			Enabled:  cfg.BybitEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBybit)...),
-			Selected: strings.EqualFold(o.Provider, config.ProviderBybit),
+			Subtitle:    internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBybit)),
+			Enabled:     cfg.BybitEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBybit)...),
+			Selected:    strings.EqualFold(o.Provider, config.ProviderBybit),
+			RegisterURL: externalURL(cfg.Checkout.Bybit.RegisterURL),
 		},
-		{
+		config.ProviderBitget: {
 			Key: config.ProviderBitget, Name: "Bitget", Logo: "/assets/brand/bitget.svg",
-			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBitget)),
-			Enabled:  cfg.BitgetEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBitget)...),
-			Selected: strings.EqualFold(o.Provider, config.ProviderBitget),
+			Subtitle:    internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBitget)),
+			Enabled:     cfg.BitgetEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBitget)...),
+			Selected:    strings.EqualFold(o.Provider, config.ProviderBitget),
+			RegisterURL: externalURL(cfg.Checkout.Bitget.RegisterURL),
 		},
-		{Key: config.ProviderTON, Name: "TON / GRAM", Subtitle: "TON 主网转账 · GRAM · 实时 USD 报价", Logo: "/assets/brand/gram.svg", Enabled: cfg.TONEnabled() && orderCurrencyAllowed(cfg, o, "GRAM"), Selected: o.Provider == config.ProviderTON},
+		config.ProviderTON: {
+			Key: config.ProviderTON, Name: "TON / GRAM", Logo: "/assets/brand/gram.svg",
+			Subtitle: "TON 主网转账 · GRAM · 实时 USD 报价",
+			Enabled:  cfg.TONEnabled() && orderCurrencyAllowed(cfg, o, "GRAM"),
+			Selected: o.Provider == config.ProviderTON,
+		},
 	}
+	ordered := cfg.OrderedProviders()
+	out := make([]providerOption, 0, len(ordered))
+	for _, key := range ordered {
+		if opt, ok := all[key]; ok {
+			out = append(out, opt)
+		}
+	}
+	return out
 }
 
 // providerOptionForQuery 让收银台在选择收款平台的过渡页上先高亮目标平台，

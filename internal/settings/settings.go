@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -44,11 +45,16 @@ type Patch struct {
 	BitgetCurrencies   *[]string `json:"bitget_currencies,omitempty"`
 	TONCurrencies      *[]string `json:"ton_currencies,omitempty"`
 	CheckoutCurrencies *[]string `json:"checkout_currencies,omitempty"`
+	ProviderOrder      *[]string `json:"provider_order,omitempty"`
 	CheckoutNote       *string   `json:"checkout_note,omitempty"`
 	BinanceUID         *string   `json:"binance_uid,omitempty"`
 	OKXUID             *string   `json:"okx_uid,omitempty"`
 	BybitUID           *string   `json:"bybit_uid,omitempty"`
 	BitgetUID          *string   `json:"bitget_uid,omitempty"`
+	BinanceRegisterURL *string   `json:"binance_register_url,omitempty"`
+	OKXRegisterURL     *string   `json:"okx_register_url,omitempty"`
+	BybitRegisterURL   *string   `json:"bybit_register_url,omitempty"`
+	BitgetRegisterURL  *string   `json:"bitget_register_url,omitempty"`
 
 	// 订单
 	OrderExpireMinutes   *int    `json:"order_expire_minutes,omitempty"`
@@ -150,6 +156,9 @@ func (p Patch) Apply(c *config.Config) {
 	if p.CheckoutNote != nil {
 		c.Checkout.Note = strings.TrimSpace(*p.CheckoutNote)
 	}
+	if p.ProviderOrder != nil {
+		c.Checkout.ProviderOrder = config.NormalizeProviderOrder(*p.ProviderOrder)
+	}
 	if p.BinanceUID != nil {
 		c.Checkout.Binance.UID = strings.TrimSpace(*p.BinanceUID)
 	}
@@ -161,6 +170,18 @@ func (p Patch) Apply(c *config.Config) {
 	}
 	if p.BitgetUID != nil {
 		c.Checkout.Bitget.UID = strings.TrimSpace(*p.BitgetUID)
+	}
+	if p.BinanceRegisterURL != nil {
+		c.Checkout.Binance.RegisterURL = strings.TrimSpace(*p.BinanceRegisterURL)
+	}
+	if p.OKXRegisterURL != nil {
+		c.Checkout.OKX.RegisterURL = strings.TrimSpace(*p.OKXRegisterURL)
+	}
+	if p.BybitRegisterURL != nil {
+		c.Checkout.Bybit.RegisterURL = strings.TrimSpace(*p.BybitRegisterURL)
+	}
+	if p.BitgetRegisterURL != nil {
+		c.Checkout.Bitget.RegisterURL = strings.TrimSpace(*p.BitgetRegisterURL)
 	}
 
 	if p.OrderExpireMinutes != nil {
@@ -270,12 +291,17 @@ func Snapshot(c *config.Config) Patch {
 		AdminUsername:      s(c.Admin.Username),
 		BEpusdtReselect:    b(c.BEpusdt.Reselect),
 		CheckoutCurrencies: &[]string{},
+		ProviderOrder:      &c.Checkout.ProviderOrder,
 		BinanceCurrencies:  &c.Checkout.BinanceCurrencies, OKXCurrencies: &c.Checkout.OKXCurrencies, BybitCurrencies: &c.Checkout.BybitCurrencies, BitgetCurrencies: &c.Checkout.BitgetCurrencies, TONCurrencies: &c.Checkout.TONCurrencies,
-		CheckoutNote: s(c.Checkout.Note),
-		BinanceUID:   s(c.Checkout.Binance.UID),
-		OKXUID:       s(c.Checkout.OKX.UID),
-		BybitUID:     s(c.Checkout.Bybit.UID),
-		BitgetUID:    s(c.Checkout.Bitget.UID),
+		CheckoutNote:       s(c.Checkout.Note),
+		BinanceUID:         s(c.Checkout.Binance.UID),
+		OKXUID:             s(c.Checkout.OKX.UID),
+		BybitUID:           s(c.Checkout.Bybit.UID),
+		BitgetUID:          s(c.Checkout.Bitget.UID),
+		BinanceRegisterURL: s(c.Checkout.Binance.RegisterURL),
+		OKXRegisterURL:     s(c.Checkout.OKX.RegisterURL),
+		BybitRegisterURL:   s(c.Checkout.Bybit.RegisterURL),
+		BitgetRegisterURL:  s(c.Checkout.Bitget.RegisterURL),
 
 		OrderExpireMinutes:   i(c.Order.ExpireMinutes),
 		OrderAmountStep:      s(c.Order.AmountStep),
@@ -544,9 +570,25 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 	return nil
 }
 
-// normalize 统一收款币种。
+// normalize 统一收款币种与平台排序。
 func normalize(c *config.Config) {
 	c.NormalizePaymentCurrencies()
+	c.Checkout.ProviderOrder = config.NormalizeProviderOrder(c.Checkout.ProviderOrder)
+}
+
+func validateRegisterURL(name, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > 512 || strings.ContainsAny(raw, "\r\n") {
+		return fmt.Errorf("%s 注册链接长度不能超过 512 个字符", name)
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("%s 注册链接必须是有效的 HTTP(S) 地址", name)
+	}
+	return nil
 }
 
 // Validate 校验配置合法性。
@@ -565,6 +607,16 @@ func Validate(c *config.Config) error {
 		(c.BybitEnabled() && strings.TrimSpace(c.Checkout.Bybit.UID) == "") ||
 		(c.BitgetEnabled() && strings.TrimSpace(c.Checkout.Bitget.UID) == "") {
 		return fmt.Errorf("已配置凭据的收款平台必须填写收款 UID")
+	}
+	for _, item := range []struct{ name, link string }{
+		{"Binance", c.Checkout.Binance.RegisterURL},
+		{"OKX", c.Checkout.OKX.RegisterURL},
+		{"Bybit", c.Checkout.Bybit.RegisterURL},
+		{"Bitget", c.Checkout.Bitget.RegisterURL},
+	} {
+		if err := validateRegisterURL(item.name, item.link); err != nil {
+			return err
+		}
 	}
 	for _, cur := range c.Checkout.Currencies {
 		if !config.IsSupportedCurrency(cur) {
@@ -651,6 +703,7 @@ func clone(c *config.Config) *config.Config {
 	n.Server.NotifyHosts = append([]string(nil), c.Server.NotifyHosts...)
 	n.Server.TrustedProxies = append([]string(nil), c.Server.TrustedProxies...)
 	n.Checkout.Currencies = append([]string(nil), c.Checkout.Currencies...)
+	n.Checkout.ProviderOrder = append([]string(nil), c.Checkout.ProviderOrder...)
 	if c.Checkout.BinanceCurrencies != nil {
 		n.Checkout.BinanceCurrencies = append([]string{}, c.Checkout.BinanceCurrencies...)
 	}

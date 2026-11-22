@@ -644,6 +644,9 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 		"BitgetOn":           cfg.BitgetEnabled(),
 		"CollectionOn":       cfg.AnyProviderEnabled(),
 		"Provider":           "multi",
+		"ProviderOrder":      cfg.OrderedProviders(),
+		"ProviderOrderCSV":   strings.Join(cfg.OrderedProviders(), ","),
+		"ProviderNames":      map[string]string{config.ProviderBinance: "币安 · Binance", config.ProviderOKX: "欧易 · OKX", config.ProviderBybit: "Bybit", config.ProviderBitget: "Bitget", config.ProviderTON: "GRAM · TON 主网"},
 		"OKXKey":             maskSecret(cfg.OKX.APIKey),
 		"BybitKey":           maskSecret(cfg.Bybit.APIKey),
 		"BitgetKey":          maskSecret(cfg.Bitget.APIKey),
@@ -858,6 +861,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 	switch scope {
 	case config.ProviderBinance:
 		p.BinanceUID = text("binance_uid", false)
+		p.BinanceRegisterURL = text("binance_register_url", false)
 		p.BinanceAPIKey = text("binance_api_key", true)
 		p.BinanceAPISecret = text("binance_api_secret", true)
 		p.BinanceCurrencies = currencies("binance_currencies")
@@ -865,6 +869,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		p.BinanceLookback = integer("binance_lookback", 1, 60)
 		if clear {
 			p.BinanceUID = &empty
+			p.BinanceRegisterURL = &empty
 			p.BinanceAPIKey = &empty
 			p.BinanceAPISecret = &empty
 			p.BinanceCurrencies = &none
@@ -874,6 +879,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		}
 	case config.ProviderOKX:
 		p.OKXUID = text("okx_uid", false)
+		p.OKXRegisterURL = text("okx_register_url", false)
 		p.OKXAPIKey = text("okx_api_key", true)
 		p.OKXAPISecret = text("okx_api_secret", true)
 		p.OKXPassphrase = text("okx_passphrase", true)
@@ -882,6 +888,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		p.OKXLookback = integer("okx_lookback", 1, 60)
 		if clear {
 			p.OKXUID = &empty
+			p.OKXRegisterURL = &empty
 			p.OKXAPIKey = &empty
 			p.OKXAPISecret = &empty
 			p.OKXPassphrase = &empty
@@ -892,6 +899,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		}
 	case config.ProviderBybit:
 		p.BybitUID = text("bybit_uid", false)
+		p.BybitRegisterURL = text("bybit_register_url", false)
 		p.BybitAPIKey = text("bybit_api_key", true)
 		p.BybitAPISecret = text("bybit_api_secret", true)
 		p.BybitCurrencies = currencies("bybit_currencies")
@@ -899,6 +907,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		p.BybitLookback = integer("bybit_lookback", 1, 60)
 		if clear {
 			p.BybitUID = &empty
+			p.BybitRegisterURL = &empty
 			p.BybitAPIKey = &empty
 			p.BybitAPISecret = &empty
 			p.BybitCurrencies = &none
@@ -908,6 +917,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		}
 	case config.ProviderBitget:
 		p.BitgetUID = text("bitget_uid", false)
+		p.BitgetRegisterURL = text("bitget_register_url", false)
 		p.BitgetAPIKey = text("bitget_api_key", true)
 		p.BitgetAPISecret = text("bitget_api_secret", true)
 		p.BitgetPassphrase = text("bitget_passphrase", true)
@@ -916,6 +926,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		p.BitgetLookback = integer("bitget_lookback", 1, 60)
 		if clear {
 			p.BitgetUID = &empty
+			p.BitgetRegisterURL = &empty
 			p.BitgetAPIKey = &empty
 			p.BitgetAPISecret = &empty
 			p.BitgetPassphrase = &empty
@@ -938,6 +949,12 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		}
 	case "checkout":
 		p.CheckoutNote = text("checkout_note", false)
+		rawOrder := strings.TrimSpace(c.PostForm("provider_order"))
+		if rawOrder != "" {
+			parts := strings.Split(rawOrder, ",")
+			normalized := config.NormalizeProviderOrder(parts)
+			p.ProviderOrder = &normalized
+		}
 	case "orders":
 		p.OrderExpireMinutes = integer("order_expire_minutes", 1, 1440)
 		p.OrderAmountStep = money("order_amount_step")

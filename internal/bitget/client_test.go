@@ -103,30 +103,32 @@ func TestHistoryPaginationFilteringAndStates(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": "00000", "data": map[string]any{"serverTime": "1700003600000"}})
 		case "/api/v3/account/info":
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": "00000", "data": map[string]any{"userId": "90001"}})
-		case "/api/v2/spot/wallet/deposit-records":
-			less := r.URL.Query().Get("idLessThan")
-			if less == "" {
+		case "/api/v3/account/deposit-records":
+			cursor := r.URL.Query().Get("cursor")
+			if cursor == "" {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"code": "00000",
-					"data": []map[string]any{
-						{"orderId": "204", "tradeId": "tr-204", "coin": "USDT", "size": "15.25", "status": "success", "dest": "internal_transfer", "cTime": "1700000004000"},
-						{"orderId": "203", "tradeId": "tr-203", "coin": "USDT", "size": "99.00", "status": "success", "dest": "on_chain", "cTime": "1700000003000"},
+					"data": map[string]any{
+						"cursor": "page-2",
+						"list": []map[string]any{
+							{"orderId": "204", "tradeId": "tr-204", "coin": "USDT", "amount": "15.25", "status": "success", "dest": "internal_transfer", "ts": "1700000004000"},
+							{"orderId": "203", "tradeId": "tr-203", "coin": "USDT", "amount": "99.00", "status": "success", "dest": "on_chain", "ts": "1700000003000"},
+						},
 					},
 				})
 				return
 			}
-			if less == "203" {
+			if cursor == "page-2" {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"code": "00000",
-					"data": []map[string]any{
-						{"orderId": "202", "tradeId": "tr-202", "coin": "USDC", "size": "3.50", "status": "pending", "dest": "internal_transfer", "cTime": "1700000002000"},
-						{"orderId": "201", "tradeId": "tr-201", "coin": "USDT", "size": "1.12345678", "status": "success", "dest": "internal_transfer", "cTime": "1700000001000"},
+					"data": map[string]any{
+						"cursor": "",
+						"list": []map[string]any{
+							{"orderId": "202", "tradeId": "tr-202", "coin": "USDC", "amount": "3.50", "status": "pending", "dest": "internal_transfer", "ts": "1700000002000"},
+							{"orderId": "201", "tradeId": "tr-201", "coin": "USDT", "amount": "1.12345678", "status": "success", "dest": "internal_transfer", "ts": "1700000001000"},
+						},
 					},
 				})
-				return
-			}
-			if less == "201" {
-				_ = json.NewEncoder(w).Encode(map[string]any{"code": "00000", "data": []map[string]any{}})
 				return
 			}
 			w.WriteHeader(http.StatusBadRequest)

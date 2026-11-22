@@ -313,7 +313,7 @@ func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *mod
 // contract keeps the cashier response interoperable with other clients.
 func bepusdtPaymentMethods(cfg *config.Config, order *model.Order, quotes ...gram.Snapshot) []gin.H {
 	out := make([]gin.H, 0, 8)
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderBitget, config.ProviderTON} {
+	for _, provider := range cfg.OrderedProviders() {
 		if !cfg.ProviderEnabled(provider) {
 			continue
 		}

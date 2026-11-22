@@ -7,7 +7,7 @@
 <title>设置 · LitePay 管理后台</title>
 {{template "theme_head" .}}
 {{template "admin_css" .}}
-<style nonce="{{.Nonce}}">.currency-toggles{display:flex;gap:20px;flex-wrap:wrap}.section-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--line)}.section-actions .actions{margin-left:auto}@media(max-width:640px){.section-actions .actions{width:100%;margin-left:0}.section-actions .btn{flex:1}}</style>
+<style nonce="{{.Nonce}}">.currency-toggles{display:flex;gap:20px;flex-wrap:wrap}.order-list{display:grid;gap:8px;margin-top:8px}.order-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border:1px solid var(--line);border-radius:6px;background:var(--surface-2)}.order-name{font-size:14px;font-weight:500}.order-actions{display:flex;gap:6px}.section-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--line)}.section-actions .actions{margin-left:auto}@media(max-width:640px){.section-actions .actions{width:100%;margin-left:0}.section-actions .btn{flex:1}}</style>
 {{template "layout_css" .}}
 </head>
 <body>
@@ -79,6 +79,7 @@
 <div class="field"><label for="setting-binance_api_secret">API Secret</label><input id="setting-binance_api_secret" class="input" name="binance_api_secret" type="password" value="" placeholder="{{if .Cfg.Binance.APISecret}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"></div>
 <div class="field"><label for="setting-binance_poll_interval">到账查询间隔（秒）</label><input id="setting-binance_poll_interval" class="input" type="number" name="binance_poll_interval" value="{{.Cfg.Binance.PollInterval}}" min="2" max="60"></div>
 <div class="field"><label for="setting-binance_lookback">回看窗口（分钟）</label><input id="setting-binance_lookback" class="input" type="number" name="binance_lookback" value="{{.Cfg.Binance.LookbackBuffer}}" min="1" max="60"></div>
+<div class="field full"><label for="setting-binance_register_url">注册邀请链接（AFF，可选）</label><input id="setting-binance_register_url" class="input" type="url" name="binance_register_url" value="{{.Cfg.Checkout.Binance.RegisterURL}}" placeholder="https://accounts.binance.com/register?ref=..." autocomplete="off"><span class="hint">填写后，收银台平台卡片旁会显示注册入口，方便没有该平台账号的买家注册。</span></div>
 </div></div></div>      <div class="card-b"><div class="field"><label for="binance-current-password">当前密码（修改或清空 API 凭据、收款账户时必填）</label><input id="binance-current-password" class="input" type="password" name="current_password" autocomplete="current-password"></div></div><div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" role="switch" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验币安并保存</button><button class="btn btn-primary" type="submit">保存币安配置</button></div></div></div>
     </section>
   </form>
@@ -94,6 +95,7 @@
 <div class="field"><label for="setting-okx_passphrase">API Passphrase</label><input id="setting-okx_passphrase" class="input" name="okx_passphrase" type="password" value="" placeholder="{{if .Cfg.OKX.Passphrase}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"><span class="hint">创建此 API Key 时设置的口令。</span></div>
 <div class="field"><label for="setting-okx_poll_interval">到账查询间隔（秒）</label><input id="setting-okx_poll_interval" class="input" type="number" name="okx_poll_interval" value="{{.Cfg.OKX.PollInterval}}" min="2" max="60"></div>
 <div class="field"><label for="setting-okx_lookback">回看窗口（分钟）</label><input id="setting-okx_lookback" class="input" type="number" name="okx_lookback" value="{{.Cfg.OKX.LookbackBuffer}}" min="1" max="60"></div>
+<div class="field full"><label for="setting-okx_register_url">注册邀请链接（AFF，可选）</label><input id="setting-okx_register_url" class="input" type="url" name="okx_register_url" value="{{.Cfg.Checkout.OKX.RegisterURL}}" placeholder="https://www.okx.com/join/..." autocomplete="off"><span class="hint">填写后，收银台平台卡片旁会显示注册入口，方便没有该平台账号的买家注册。</span></div>
 </div></div></div>      <div class="card-b"><div class="field"><label for="okx-current-password">当前密码（修改或清空 API 凭据、收款账户时必填）</label><input id="okx-current-password" class="input" type="password" name="current_password" autocomplete="current-password"></div></div><div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" role="switch" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验欧易并保存</button><button class="btn btn-primary" type="submit">保存欧易配置</button></div></div></div>
     </section>
   </form>
@@ -108,6 +110,7 @@
 <div class="field"><label for="setting-bybit_api_secret">API Secret</label><input id="setting-bybit_api_secret" class="input" name="bybit_api_secret" type="password" value="" placeholder="{{if .Cfg.Bybit.APISecret}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"></div>
 <div class="field"><label for="setting-bybit_poll_interval">到账查询间隔（秒）</label><input id="setting-bybit_poll_interval" class="input" type="number" name="bybit_poll_interval" value="{{.Cfg.Bybit.PollInterval}}" min="2" max="60"></div>
 <div class="field"><label for="setting-bybit_lookback">回看窗口（分钟）</label><input id="setting-bybit_lookback" class="input" type="number" name="bybit_lookback" value="{{.Cfg.Bybit.LookbackBuffer}}" min="1" max="60"></div>
+<div class="field full"><label for="setting-bybit_register_url">注册邀请链接（AFF，可选）</label><input id="setting-bybit_register_url" class="input" type="url" name="bybit_register_url" value="{{.Cfg.Checkout.Bybit.RegisterURL}}" placeholder="https://www.bybit.com/invite?ref=..." autocomplete="off"><span class="hint">填写后，收银台平台卡片旁会显示注册入口，方便没有该平台账号的买家注册。</span></div>
 </div></div></div>      <div class="card-b"><div class="field"><label for="bybit-current-password">当前密码（修改或清空 API 凭据、收款账户时必填）</label><input id="bybit-current-password" class="input" type="password" name="current_password" autocomplete="current-password"></div></div><div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" role="switch" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验 Bybit 并保存</button><button class="btn btn-primary" type="submit">保存 Bybit 配置</button></div></div></div>
     </section>
   </form>
@@ -123,6 +126,7 @@
 <div class="field"><label for="setting-bitget_passphrase">API Passphrase</label><input id="setting-bitget_passphrase" class="input" name="bitget_passphrase" type="password" value="" placeholder="{{if .Cfg.Bitget.Passphrase}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"><span class="hint">创建此 API Key 时设置的口令。</span></div>
 <div class="field"><label for="setting-bitget_poll_interval">到账查询间隔（秒）</label><input id="setting-bitget_poll_interval" class="input" type="number" name="bitget_poll_interval" value="{{.Cfg.Bitget.PollInterval}}" min="2" max="60"></div>
 <div class="field"><label for="setting-bitget_lookback">回看窗口（分钟）</label><input id="setting-bitget_lookback" class="input" type="number" name="bitget_lookback" value="{{.Cfg.Bitget.LookbackBuffer}}" min="1" max="60"></div>
+<div class="field full"><label for="setting-bitget_register_url">注册邀请链接（AFF，可选）</label><input id="setting-bitget_register_url" class="input" type="url" name="bitget_register_url" value="{{.Cfg.Checkout.Bitget.RegisterURL}}" placeholder="https://www.bitget.com/referral/register?..." autocomplete="off"><span class="hint">填写后，收银台平台卡片旁会显示注册入口，方便没有该平台账号的买家注册。</span></div>
 </div></div></div>      <div class="card-b"><div class="field"><label for="bitget-current-password">当前密码（修改或清空 API 凭据、收款账户时必填）</label><input id="bitget-current-password" class="input" type="password" name="current_password" autocomplete="current-password"></div></div><div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" role="switch" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验 Bitget 并保存</button><button class="btn btn-primary" type="submit">保存 Bitget 配置</button></div></div></div>
     </section>
   </form>
@@ -140,7 +144,29 @@
   <form data-settings-panel="checkout" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-checkout">
     <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
     <input type="hidden" name="settings_scope" value="checkout">
-    <section class="card"><div class="card-h"><h2 id="settings-head-checkout">收银台提示</h2></div><div class="card-b"><div class="field"><label for="checkout-note">付款提示</label><input id="checkout-note" class="input" name="checkout_note" value="{{.Cfg.Checkout.Note}}" placeholder="例如：已付款请勿重复转账"></div></div>      <div class="card-b"><div class="section-actions"><div class="actions"><button class="btn btn-primary" type="submit">保存收银台提示</button></div></div></div>
+    <section class="mb-12 card"><div class="card-h"><h2 id="settings-head-checkout">收银台展示与排序</h2></div>
+      <div class="card-b">
+        <div class="field"><label for="checkout-note">付款提示</label><input id="checkout-note" class="input" name="checkout_note" value="{{.Cfg.Checkout.Note}}" placeholder="例如：已付款请勿重复转账"></div>
+      </div>
+      <div class="card-b">
+        <div class="field">
+          <label>收款平台展示顺序</label>
+          <span class="hint">点击上移或下移调整前台收银台的平台展示顺序，保存后立即生效。</span>
+          <input type="hidden" id="provider-order-input" name="provider_order" value="{{.ProviderOrderCSV}}">
+          <div id="provider-order-list" class="order-list">
+            {{range .ProviderOrder}}
+            <div class="order-row" data-provider-key="{{.}}">
+              <span class="order-name">{{index $.ProviderNames .}}</span>
+              <span class="order-actions">
+                <button class="btn btn-ghost btn-sm" type="button" data-move="-1">↑ 上移</button>
+                <button class="btn btn-ghost btn-sm" type="button" data-move="1">↓ 下移</button>
+              </span>
+            </div>
+            {{end}}
+          </div>
+        </div>
+      </div>
+      <div class="card-b"><div class="section-actions"><div class="actions"><button class="btn btn-primary" type="submit">保存收银台设置</button></div></div></div>
     </section>
   </form>
   <form data-settings-panel="orders" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-orders">
@@ -247,7 +273,29 @@
    var verify=form.querySelector('[name="verify_accounts"]');if(verify)verify.disabled=box.checked;
   });
  });
- var balance=document.getElementById('gram-balance'),price=document.getElementById('gram-price');
+  var balance=document.getElementById('gram-balance'),price=document.getElementById('gram-price');
+  var orderList=document.getElementById('provider-order-list'),orderInput=document.getElementById('provider-order-input');
+  if(orderList&&orderInput){
+   function syncOrder(){
+    var keys=Array.from(orderList.querySelectorAll('[data-provider-key]')).map(function(el){return el.dataset.providerKey});
+    orderInput.value=keys.join(',');
+    var rows=orderList.querySelectorAll('.order-row');
+    rows.forEach(function(row,idx){
+     var up=row.querySelector('[data-move="-1"]'),down=row.querySelector('[data-move="1"]');
+     if(up)up.disabled=idx===0;
+     if(down)down.disabled=idx===rows.length-1;
+    });
+   }
+   orderList.addEventListener('click',function(e){
+    var btn=e.target.closest('[data-move]');if(!btn)return;
+    var row=btn.closest('.order-row');if(!row)return;
+    var dir=Number(btn.dataset.move);
+    if(dir<0&&row.previousElementSibling)orderList.insertBefore(row,row.previousElementSibling);
+    else if(dir>0&&row.nextElementSibling)orderList.insertBefore(row.nextElementSibling,row);
+    syncOrder();
+   });
+   syncOrder();
+  }
  var gramTimer=null;
  async function checkGRAM(){
   if(gramTimer){clearTimeout(gramTimer);gramTimer=null;}
