@@ -67,22 +67,19 @@ func (r *replayCache) accept(endpoint string, body map[string]interface{}, now t
 }
 
 type bepusdtCreateRequest struct {
-	OrderID     string      `json:"order_id"`
-	NotifyURL   string      `json:"notify_url"`
-	RedirectURL string      `json:"redirect_url"`
-	Signature   string      `json:"signature"`
-	Amount      json.Number `json:"amount"`
-	Name        string      `json:"name"`
-	Fiat        string      `json:"fiat"`
-	Currencies  string      `json:"currencies"`
-	Timeout     int64       `json:"timeout"`
-	Reselect    *bool       `json:"reselect"`
+	OrderID     string
+	NotifyURL   string
+	RedirectURL string
+	Name        string
+	Fiat        string
+	Currencies  string
+	Timeout     int64
+	Reselect    *bool
 }
 
 type bepusdtCancelRequest struct {
-	OrderID   string `json:"order_id"`
-	TradeID   string `json:"trade_id"`
-	Signature string `json:"signature"`
+	OrderID string
+	TradeID string
 }
 
 type bepusdtResponse struct {
@@ -103,7 +100,7 @@ func (h *Handlers) BEpusdtCreateOrder(c *gin.Context) {
 // BEpusdtCancelOrder 实现 /api/v1/order/cancel-transaction。
 // 取消后停止认领付款；原金额档位继续保留到冷却期结束。
 func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
-	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
+	raw, err := readBoundedBody(c, 1<<20)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -122,13 +119,11 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 		h.bepusdtSigFail(c, "invalid_signature", "signature verification failed")
 		return
 	}
-	var req bepusdtCancelRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
+	req, err := parseBEpusdtCancelRequest(generic)
+	if err != nil {
 		h.bepusdtFail(c, "request error: "+err.Error())
 		return
 	}
-	req.TradeID = strings.TrimSpace(req.TradeID)
-	req.OrderID = strings.TrimSpace(req.OrderID)
 	if len(req.TradeID) > 128 || len(req.OrderID) > 128 {
 		h.bepusdtFail(c, "order reference is too long")
 		return
@@ -159,7 +154,7 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		h.bepusdtFail(c, "no payment provider is configured")
 		return
 	}
-	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
+	raw, err := readBoundedBody(c, 1<<20)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -197,21 +192,16 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		return
 	}
 
-	var req bepusdtCreateRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
+	req, err := parseBEpusdtCreateRequest(generic)
+	if err != nil {
 		h.bepusdtFail(c, "request error: "+err.Error())
 		return
 	}
-	req.OrderID = strings.TrimSpace(req.OrderID)
-	req.NotifyURL = strings.TrimSpace(req.NotifyURL)
-	req.RedirectURL = strings.TrimSpace(req.RedirectURL)
-	req.Name = strings.TrimSpace(req.Name)
-	req.Currencies = strings.TrimSpace(req.Currencies)
 	if req.OrderID == "" || req.NotifyURL == "" || req.RedirectURL == "" {
 		h.bepusdtFail(c, "order_id, notify_url, redirect_url and amount are required")
 		return
 	}
-	if len(req.OrderID) > 128 || len(req.Name) > 255 || len(req.Currencies) > 64 ||
+	if len(req.OrderID) > 128 || len(req.Name) > 255 || len(req.Currencies) > 64 || len(req.Fiat) > 16 ||
 		len(req.NotifyURL) > 512 || len(req.RedirectURL) > 512 {
 		h.bepusdtFail(c, "request field exceeds maximum length")
 		return
@@ -383,6 +373,105 @@ func (h *Handlers) logOrderSigFail(c *gin.Context, reason, message string, now t
 func (h *Handlers) bepusdtFail(c *gin.Context, message string) {
 	h.logger().Warn("BEpusdt API 返回业务错误", "ip", c.ClientIP(), "message", message)
 	c.JSON(http.StatusOK, bepusdtResponse{StatusCode: 400, Message: message, RequestID: ""})
+}
+
+func readBoundedBody(c *gin.Context, limit int64) ([]byte, error) {
+	if c.Request == nil || c.Request.Body == nil {
+		return nil, io.EOF
+	}
+	return io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, limit))
+}
+
+// parseBEpusdtCreateRequest reads fields from the exact lowercase keys in the
+// already signature-verified map so case-variant keys cannot override signed values.
+func parseBEpusdtCreateRequest(generic map[string]interface{}) (bepusdtCreateRequest, error) {
+	var req bepusdtCreateRequest
+	var err error
+	if req.OrderID, err = jsonStringField(generic, "order_id"); err != nil {
+		return req, err
+	}
+	if req.NotifyURL, err = jsonStringField(generic, "notify_url"); err != nil {
+		return req, err
+	}
+	if req.RedirectURL, err = jsonStringField(generic, "redirect_url"); err != nil {
+		return req, err
+	}
+	if req.Name, err = jsonStringField(generic, "name"); err != nil {
+		return req, err
+	}
+	if req.Fiat, err = jsonStringField(generic, "fiat"); err != nil {
+		return req, err
+	}
+	if req.Currencies, err = jsonStringField(generic, "currencies"); err != nil {
+		return req, err
+	}
+	if req.Timeout, err = jsonInt64Field(generic, "timeout"); err != nil {
+		return req, err
+	}
+	if req.Reselect, err = jsonBoolPtrField(generic, "reselect"); err != nil {
+		return req, err
+	}
+	req.OrderID = strings.TrimSpace(req.OrderID)
+	req.NotifyURL = strings.TrimSpace(req.NotifyURL)
+	req.RedirectURL = strings.TrimSpace(req.RedirectURL)
+	req.Name = strings.TrimSpace(req.Name)
+	req.Fiat = strings.TrimSpace(req.Fiat)
+	req.Currencies = strings.TrimSpace(req.Currencies)
+	return req, nil
+}
+
+func parseBEpusdtCancelRequest(generic map[string]interface{}) (bepusdtCancelRequest, error) {
+	var req bepusdtCancelRequest
+	var err error
+	if req.OrderID, err = jsonStringField(generic, "order_id"); err != nil {
+		return req, err
+	}
+	if req.TradeID, err = jsonStringField(generic, "trade_id"); err != nil {
+		return req, err
+	}
+	req.OrderID = strings.TrimSpace(req.OrderID)
+	req.TradeID = strings.TrimSpace(req.TradeID)
+	return req, nil
+}
+
+func jsonStringField(m map[string]interface{}, key string) (string, error) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", key)
+	}
+	return s, nil
+}
+
+func jsonInt64Field(m map[string]interface{}, key string) (int64, error) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return 0, nil
+	}
+	num, ok := v.(json.Number)
+	if !ok {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	n, err := strconv.ParseInt(num.String(), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	return n, nil
+}
+
+func jsonBoolPtrField(m map[string]interface{}, key string) (*bool, error) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a boolean", key)
+	}
+	return &b, nil
 }
 
 func decodeBEpusdtJSON(raw []byte) (map[string]interface{}, error) {
