@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"litepay/internal/binance"
+	"litepay/internal/bybit"
 	"litepay/internal/config"
 	"litepay/internal/gram"
 	"litepay/internal/okx"
@@ -35,6 +36,7 @@ func verificationTargets(c *config.Config) []AccountVerification {
 	out := []AccountVerification{
 		{Provider: config.ProviderBinance, Missing: missing("API Key", c.Binance.APIKey, "API Secret", c.Binance.APISecret, "收款 UID", c.Checkout.Binance.UID)},
 		{Provider: config.ProviderOKX, Missing: missing("API Key", c.OKX.APIKey, "API Secret", c.OKX.APISecret, "Passphrase", c.OKX.Passphrase, "收款 UID", c.Checkout.OKX.UID)},
+		{Provider: config.ProviderBybit, Missing: missing("API Key", c.Bybit.APIKey, "API Secret", c.Bybit.APISecret, "收款 UID", c.Checkout.Bybit.UID)},
 		{Provider: config.ProviderTON, Missing: tonMissing},
 	}
 	for i := range out {
@@ -64,6 +66,15 @@ func verifyCollectionAccount(ctx context.Context, c *config.Config, provider str
 		}
 		if uid != c.Checkout.OKX.UID {
 			return fmt.Errorf("OKX API Key 所属账户与收款 UID 不一致")
+		}
+	case config.ProviderBybit:
+		cli := bybit.New(c.Bybit.APIKey, c.Bybit.APISecret, c.Bybit.BaseURL, c.Bybit.RecvWindow, c.Bybit.Limit)
+		uid, err := cli.AccountUID(ctx)
+		if err != nil {
+			return fmt.Errorf("Bybit 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
+		}
+		if uid != c.Checkout.Bybit.UID {
+			return fmt.Errorf("Bybit API Key 所属账户与收款 UID 不一致")
 		}
 	case config.ProviderTON:
 		cli := gram.New(c.TON.BaseURL, c.TON.APIKey, c.TON.Address)

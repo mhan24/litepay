@@ -37,6 +37,8 @@ var sensitiveSettingKeys = []string{
 	"okx_api_key",
 	"okx_api_secret",
 	"okx_passphrase",
+	"bybit_api_key",
+	"bybit_api_secret",
 	"ton_api_key",
 }
 

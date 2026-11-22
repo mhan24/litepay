@@ -632,15 +632,18 @@ func (h *Handlers) AdminSettings(c *gin.Context) {
 		"KnownCurrencies":    []string{"USDT", "USDC"},
 		"BinanceCurrencies":  cfg.ProviderCurrencies(config.ProviderBinance),
 		"OKXCurrencies":      cfg.ProviderCurrencies(config.ProviderOKX),
+		"BybitCurrencies":    cfg.ProviderCurrencies(config.ProviderBybit),
 		"TONCurrencies":      cfg.ProviderCurrencies(config.ProviderTON),
 		"DelaysJoined":       joinInts(cfg.Notify.RetryDelays),
 		"BEpusdtKeyMask":     maskSecret(cfg.BEpusdt.APIToken),
 		"BinanceKey":         maskSecret(cfg.Binance.APIKey),
 		"BinanceOn":          cfg.BinanceEnabled(),
 		"OKXOn":              cfg.OKXEnabled(),
+		"BybitOn":            cfg.BybitEnabled(),
 		"CollectionOn":       cfg.AnyProviderEnabled(),
 		"Provider":           "multi",
 		"OKXKey":             maskSecret(cfg.OKX.APIKey),
+		"BybitKey":           maskSecret(cfg.Bybit.APIKey),
 		"TONKey":             maskSecret(cfg.TON.APIKey),
 		"DBPath":             cfg.Database.Path,
 
@@ -653,7 +656,7 @@ func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 	p, errs := parseSettingsForm(c)
 	destination := h.adminURL("/admin/settings?msg=")
 	scope := c.PostForm("settings_scope")
-	for _, valid := range []string{"binance", "okx", "ton", "checkout", "orders", "merchant"} {
+	for _, valid := range []string{"binance", "okx", "bybit", "ton", "checkout", "orders", "merchant"} {
 		if scope == valid {
 			destination = h.adminURL("/admin/settings?view=" + scope + "&msg=")
 			break
@@ -667,8 +670,8 @@ func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 	// Deployment controls (notify_hosts, base_url, production) are startup-only;
 	// parseSettingsForm never exposes them as editable settings.
 	cfg := h.C()
-	sensitive := p.BinanceAPIKey != nil || p.BinanceAPISecret != nil || p.OKXAPIKey != nil || p.OKXAPISecret != nil || p.OKXPassphrase != nil || p.TONAPIKey != nil ||
-		(p.BinanceUID != nil && *p.BinanceUID != cfg.Checkout.Binance.UID) || (p.OKXUID != nil && *p.OKXUID != cfg.Checkout.OKX.UID) || (p.TONAddress != nil && *p.TONAddress != cfg.TON.Address)
+	sensitive := p.BinanceAPIKey != nil || p.BinanceAPISecret != nil || p.OKXAPIKey != nil || p.OKXAPISecret != nil || p.OKXPassphrase != nil || p.BybitAPIKey != nil || p.BybitAPISecret != nil || p.TONAPIKey != nil ||
+		(p.BinanceUID != nil && *p.BinanceUID != cfg.Checkout.Binance.UID) || (p.OKXUID != nil && *p.OKXUID != cfg.Checkout.OKX.UID) || (p.BybitUID != nil && *p.BybitUID != cfg.Checkout.Bybit.UID) || (p.TONAddress != nil && *p.TONAddress != cfg.TON.Address)
 	if sensitive && !h.reauthenticate(c) {
 		c.Redirect(http.StatusSeeOther, destination+url.QueryEscape("当前密码错误或验证过于频繁，请重新登录后重试")+"&t=err")
 		return
@@ -695,7 +698,7 @@ func (h *Handlers) AdminSettingsSave(c *gin.Context) {
 }
 
 func verificationMessage(checks []settings.AccountVerification) (string, bool) {
-	names := map[string]string{config.ProviderBinance: "Binance", config.ProviderOKX: "OKX", config.ProviderTON: "GRAM 余额接口"}
+	names := map[string]string{config.ProviderBinance: "Binance", config.ProviderOKX: "OKX", config.ProviderBybit: "Bybit", config.ProviderTON: "GRAM 余额接口"}
 	parts := []string{"配置已保存"}
 	partial := false
 	for _, check := range checks {
@@ -884,6 +887,22 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 			p.OKXLookback = &defaults.OKX.LookbackBuffer
 			errs = nil
 		}
+	case config.ProviderBybit:
+		p.BybitUID = text("bybit_uid", false)
+		p.BybitAPIKey = text("bybit_api_key", true)
+		p.BybitAPISecret = text("bybit_api_secret", true)
+		p.BybitCurrencies = currencies("bybit_currencies")
+		p.BybitPollInterval = integer("bybit_poll_interval", 2, 60)
+		p.BybitLookback = integer("bybit_lookback", 1, 60)
+		if clear {
+			p.BybitUID = &empty
+			p.BybitAPIKey = &empty
+			p.BybitAPISecret = &empty
+			p.BybitCurrencies = &none
+			p.BybitPollInterval = &defaults.Bybit.PollInterval
+			p.BybitLookback = &defaults.Bybit.LookbackBuffer
+			errs = nil
+		}
 	case config.ProviderTON:
 		p.TONAddress = text("ton_address", false)
 		p.TONAPIKey = text("ton_api_key", true)
@@ -926,7 +945,7 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 	default:
 		errs = append(errs, "设置分区无效，请刷新设置页后重试")
 	}
-	if scope == config.ProviderBinance || scope == config.ProviderOKX || scope == config.ProviderTON {
+	if scope == config.ProviderBinance || scope == config.ProviderOKX || scope == config.ProviderBybit || scope == config.ProviderTON {
 		p.VerifyProvider = scope
 		p.VerifyAccounts = !clear && c.PostForm("verify_accounts") == "on"
 	}

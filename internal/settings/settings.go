@@ -40,11 +40,13 @@ type Patch struct {
 	// 收款信息
 	BinanceCurrencies  *[]string `json:"binance_currencies,omitempty"`
 	OKXCurrencies      *[]string `json:"okx_currencies,omitempty"`
+	BybitCurrencies    *[]string `json:"bybit_currencies,omitempty"`
 	TONCurrencies      *[]string `json:"ton_currencies,omitempty"`
 	CheckoutCurrencies *[]string `json:"checkout_currencies,omitempty"`
 	CheckoutNote       *string   `json:"checkout_note,omitempty"`
 	BinanceUID         *string   `json:"binance_uid,omitempty"`
 	OKXUID             *string   `json:"okx_uid,omitempty"`
+	BybitUID           *string   `json:"bybit_uid,omitempty"`
 
 	// 订单
 	OrderExpireMinutes   *int    `json:"order_expire_minutes,omitempty"`
@@ -66,6 +68,12 @@ type Patch struct {
 	OKXPassphrase   *string `json:"okx_passphrase,omitempty"`
 	OKXPollInterval *int    `json:"okx_poll_interval,omitempty"`
 	OKXLookback     *int    `json:"okx_lookback,omitempty"`
+
+	// Bybit
+	BybitAPIKey       *string `json:"bybit_api_key,omitempty"`
+	BybitAPISecret    *string `json:"bybit_api_secret,omitempty"`
+	BybitPollInterval *int    `json:"bybit_poll_interval,omitempty"`
+	BybitLookback     *int    `json:"bybit_lookback,omitempty"`
 
 	// TON 主网
 	TONAddress      *string `json:"ton_address,omitempty"`
@@ -105,6 +113,9 @@ func (p Patch) Apply(c *config.Config) {
 		if p.OKXCurrencies == nil {
 			c.Checkout.OKXCurrencies = nil
 		}
+		if p.BybitCurrencies == nil {
+			c.Checkout.BybitCurrencies = nil
+		}
 		if p.TONCurrencies == nil {
 			c.Checkout.TONCurrencies = nil
 		}
@@ -114,6 +125,9 @@ func (p Patch) Apply(c *config.Config) {
 	}
 	if p.OKXCurrencies != nil {
 		c.Checkout.OKXCurrencies = append([]string{}, (*p.OKXCurrencies)...)
+	}
+	if p.BybitCurrencies != nil {
+		c.Checkout.BybitCurrencies = append([]string{}, (*p.BybitCurrencies)...)
 	}
 	if p.TONCurrencies != nil {
 		c.Checkout.TONCurrencies = append([]string{}, (*p.TONCurrencies)...)
@@ -126,6 +140,9 @@ func (p Patch) Apply(c *config.Config) {
 	}
 	if p.OKXUID != nil {
 		c.Checkout.OKX.UID = strings.TrimSpace(*p.OKXUID)
+	}
+	if p.BybitUID != nil {
+		c.Checkout.Bybit.UID = strings.TrimSpace(*p.BybitUID)
 	}
 
 	if p.OrderExpireMinutes != nil {
@@ -175,6 +192,18 @@ func (p Patch) Apply(c *config.Config) {
 	if p.OKXLookback != nil {
 		c.OKX.LookbackBuffer = *p.OKXLookback
 	}
+	if p.BybitAPIKey != nil {
+		c.Bybit.APIKey = strings.TrimSpace(*p.BybitAPIKey)
+	}
+	if p.BybitAPISecret != nil {
+		c.Bybit.APISecret = strings.TrimSpace(*p.BybitAPISecret)
+	}
+	if p.BybitPollInterval != nil {
+		c.Bybit.PollInterval = *p.BybitPollInterval
+	}
+	if p.BybitLookback != nil {
+		c.Bybit.LookbackBuffer = *p.BybitLookback
+	}
 	if p.TONAddress != nil {
 		c.TON.Address = strings.TrimSpace(*p.TONAddress)
 	}
@@ -208,10 +237,11 @@ func Snapshot(c *config.Config) Patch {
 		AdminUsername:      s(c.Admin.Username),
 		BEpusdtReselect:    b(c.BEpusdt.Reselect),
 		CheckoutCurrencies: &[]string{},
-		BinanceCurrencies:  &c.Checkout.BinanceCurrencies, OKXCurrencies: &c.Checkout.OKXCurrencies, TONCurrencies: &c.Checkout.TONCurrencies,
+		BinanceCurrencies:  &c.Checkout.BinanceCurrencies, OKXCurrencies: &c.Checkout.OKXCurrencies, BybitCurrencies: &c.Checkout.BybitCurrencies, TONCurrencies: &c.Checkout.TONCurrencies,
 		CheckoutNote: s(c.Checkout.Note),
 		BinanceUID:   s(c.Checkout.Binance.UID),
 		OKXUID:       s(c.Checkout.OKX.UID),
+		BybitUID:     s(c.Checkout.Bybit.UID),
 
 		OrderExpireMinutes:   i(c.Order.ExpireMinutes),
 		OrderAmountStep:      s(c.Order.AmountStep),
@@ -230,6 +260,11 @@ func Snapshot(c *config.Config) Patch {
 		OKXPassphrase:   s(c.OKX.Passphrase),
 		OKXPollInterval: i(c.OKX.PollInterval),
 		OKXLookback:     i(c.OKX.LookbackBuffer),
+
+		BybitAPIKey:       s(c.Bybit.APIKey),
+		BybitAPISecret:    s(c.Bybit.APISecret),
+		BybitPollInterval: i(c.Bybit.PollInterval),
+		BybitLookback:     i(c.Bybit.LookbackBuffer),
 
 		TONAddress: s(c.TON.Address), TONAPIKey: s(c.TON.APIKey), TONPollInterval: i(c.TON.PollInterval),
 		NotifyRetryDelays: &[]int{},
@@ -393,9 +428,9 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 	current := m.cur.Load()
 	// 只有会改变到账归属或付款窗口的字段需要在待付款期间冻结。API 凭据不改变
 	// 归属（换 Key 仍须通过 UID 核验），必须允许在扫描失败时随时修正。
-	sensitive := current.TON.Address != next.TON.Address || current.Checkout.Binance.UID != next.Checkout.Binance.UID || current.Checkout.OKX.UID != next.Checkout.OKX.UID ||
+	sensitive := current.TON.Address != next.TON.Address || current.Checkout.Binance.UID != next.Checkout.Binance.UID || current.Checkout.OKX.UID != next.Checkout.OKX.UID || current.Checkout.Bybit.UID != next.Checkout.Bybit.UID ||
 		current.Order.SlotGraceSeconds != next.Order.SlotGraceSeconds || !reflect.DeepEqual(current.Checkout.Currencies, next.Checkout.Currencies) ||
-		!reflect.DeepEqual(current.Checkout.BinanceCurrencies, next.Checkout.BinanceCurrencies) || !reflect.DeepEqual(current.Checkout.OKXCurrencies, next.Checkout.OKXCurrencies) || !reflect.DeepEqual(current.Checkout.TONCurrencies, next.Checkout.TONCurrencies)
+		!reflect.DeepEqual(current.Checkout.BinanceCurrencies, next.Checkout.BinanceCurrencies) || !reflect.DeepEqual(current.Checkout.OKXCurrencies, next.Checkout.OKXCurrencies) || !reflect.DeepEqual(current.Checkout.BybitCurrencies, next.Checkout.BybitCurrencies) || !reflect.DeepEqual(current.Checkout.TONCurrencies, next.Checkout.TONCurrencies)
 	if sensitive {
 		active, err := m.st.HasActivePayments(ctx)
 		if err != nil {
@@ -406,7 +441,7 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 		}
 	}
 
-	if p.VerifyProvider != "" && p.VerifyProvider != config.ProviderBinance && p.VerifyProvider != config.ProviderOKX && p.VerifyProvider != config.ProviderTON {
+	if p.VerifyProvider != "" && p.VerifyProvider != config.ProviderBinance && p.VerifyProvider != config.ProviderOKX && p.VerifyProvider != config.ProviderBybit && p.VerifyProvider != config.ProviderTON {
 		return fmt.Errorf("核验平台无效")
 	}
 	if p.VerifyAccounts && p.VerifyProvider != "" && !next.ProviderEnabled(p.VerifyProvider) {
@@ -423,6 +458,7 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 	changed := map[string]bool{
 		config.ProviderBinance: !current.BinanceEnabled() || current.Binance.APIKey != next.Binance.APIKey || current.Binance.APISecret != next.Binance.APISecret || current.Checkout.Binance.UID != next.Checkout.Binance.UID,
 		config.ProviderOKX:     !current.OKXEnabled() || current.OKX.APIKey != next.OKX.APIKey || current.OKX.APISecret != next.OKX.APISecret || current.OKX.Passphrase != next.OKX.Passphrase || current.Checkout.OKX.UID != next.Checkout.OKX.UID,
+		config.ProviderBybit:   !current.BybitEnabled() || current.Bybit.APIKey != next.Bybit.APIKey || current.Bybit.APISecret != next.Bybit.APISecret || current.Checkout.Bybit.UID != next.Checkout.Bybit.UID,
 		config.ProviderTON:     !current.TONEnabled() || current.TON.Address != next.TON.Address || current.TON.APIKey != next.TON.APIKey,
 	}
 	checks := verificationTargets(next)
@@ -484,7 +520,8 @@ func Validate(c *config.Config) error {
 		return fmt.Errorf("BEpusdt API Token 至少 16 位（建议 32 位随机字符串）")
 	}
 	if (c.BinanceEnabled() && strings.TrimSpace(c.Checkout.Binance.UID) == "") ||
-		(c.OKXEnabled() && strings.TrimSpace(c.Checkout.OKX.UID) == "") {
+		(c.OKXEnabled() && strings.TrimSpace(c.Checkout.OKX.UID) == "") ||
+		(c.BybitEnabled() && strings.TrimSpace(c.Checkout.Bybit.UID) == "") {
 		return fmt.Errorf("已配置凭据的收款平台必须填写收款 UID")
 	}
 	for _, cur := range c.Checkout.Currencies {
@@ -527,6 +564,12 @@ func Validate(c *config.Config) error {
 	if c.OKX.LookbackBuffer < 1 || c.OKX.LookbackBuffer > 60 {
 		return fmt.Errorf("OKX 回看缓冲需在 1~60 分钟之间")
 	}
+	if c.Bybit.PollInterval < 2 || c.Bybit.PollInterval > 60 {
+		return fmt.Errorf("Bybit 查询间隔需在 2~60 秒之间")
+	}
+	if c.Bybit.LookbackBuffer < 1 || c.Bybit.LookbackBuffer > 60 {
+		return fmt.Errorf("Bybit 回看缓冲需在 1~60 分钟之间")
+	}
 	if c.TON.Address != "" {
 		if _, err := gram.ParseAddress(c.TON.Address); err != nil {
 			return err
@@ -565,6 +608,9 @@ func clone(c *config.Config) *config.Config {
 	}
 	if c.Checkout.OKXCurrencies != nil {
 		n.Checkout.OKXCurrencies = append([]string{}, c.Checkout.OKXCurrencies...)
+	}
+	if c.Checkout.BybitCurrencies != nil {
+		n.Checkout.BybitCurrencies = append([]string{}, c.Checkout.BybitCurrencies...)
 	}
 	if c.Checkout.TONCurrencies != nil {
 		n.Checkout.TONCurrencies = append([]string{}, c.Checkout.TONCurrencies...)

@@ -60,6 +60,9 @@ func (h *Handlers) orderProviderAccepting(c *gin.Context, cfg *config.Config, o 
 	if o.Provider == config.ProviderOKX {
 		receiver = cfg.Checkout.OKX.UID
 	}
+	if o.Provider == config.ProviderBybit {
+		receiver = cfg.Checkout.Bybit.UID
+	}
 	if o.Provider == config.ProviderTON {
 		receiver = cfg.TON.Address
 	}
@@ -99,8 +102,8 @@ func (h *Handlers) providerState(c *gin.Context, cfg *config.Config, provider st
 
 func (h *Handlers) providerHealths(c *gin.Context) []providerHealth {
 	cfg := h.C()
-	out := make([]providerHealth, 0, 3)
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
+	out := make([]providerHealth, 0, 4)
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderTON} {
 		out = append(out, h.providerState(c, cfg, provider))
 	}
 	return out

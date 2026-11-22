@@ -69,7 +69,7 @@
       <h2>按到账证据补单</h2><p class="hint">补单前请确认商城尚未发货且同意继续履约。仅支持选用付款窗口内、金额与收款账户完全匹配的已确认流水证据，不支持手工输入金额核销。</p>
       <form method="post" action="{{adminPath}}/orders/{{urlEscape .Order.TradeNo}}/reconcile">
         <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
-        <div class="form-grid"><div class="field"><label>收款平台</label><select class="input" name="provider"><option value="binance">Binance</option><option value="okx">OKX</option><option value="ton">TON</option></select></div>
+        <div class="form-grid"><div class="field"><label>收款平台</label><select class="input" name="provider"><option value="binance">Binance</option><option value="okx">OKX</option><option value="bybit">Bybit</option><option value="ton">TON</option></select></div>
         <div class="field"><label>原始资金事件编号</label><input class="input" name="event_id" required></div>
         <div class="field"><label for="reconcile-current-password">当前密码</label><input id="reconcile-current-password" class="input" type="password" name="current_password" autocomplete="current-password" required></div><div class="field full"><label>核对结果与补单原因</label><input class="input" name="reason" required maxlength="300"></div></div>
         <button class="mt-12 btn btn-ghost" type="submit" >确认证据并补单</button>

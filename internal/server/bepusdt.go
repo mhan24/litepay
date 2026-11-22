@@ -273,7 +273,7 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 func bepusdtCurrency(cfg *config.Config, req bepusdtCreateRequest) error {
 	for _, currency := range cfg.Checkout.Currencies {
 		if config.IsSupportedCurrency(currency) && currencyAllowedByLimit(req.Currencies, currency) {
-			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
+			for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderTON} {
 				if cfg.ProviderEnabled(provider) && cfg.ProviderCurrency(provider, currency) {
 					return nil
 				}
@@ -312,14 +312,17 @@ func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *mod
 // BEpusdt. Dujiao Next currently ignores this field, but returning the complete
 // contract keeps the cashier response interoperable with other clients.
 func bepusdtPaymentMethods(cfg *config.Config, order *model.Order, quotes ...gram.Snapshot) []gin.H {
-	out := make([]gin.H, 0, 4)
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderTON} {
+	out := make([]gin.H, 0, 6)
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderTON} {
 		if !cfg.ProviderEnabled(provider) {
 			continue
 		}
 		network := "Binance"
 		if provider == config.ProviderOKX {
 			network = "OKX"
+		}
+		if provider == config.ProviderBybit {
+			network = "Bybit"
 		}
 		if provider == config.ProviderTON {
 			network = "TON"
