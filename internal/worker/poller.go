@@ -9,6 +9,7 @@ import (
 
 	"gorm.io/gorm"
 	"litepay/internal/binance"
+	"litepay/internal/bitget"
 	"litepay/internal/bybit"
 	"litepay/internal/config"
 	"litepay/internal/gram"
@@ -44,7 +45,7 @@ type Poller struct {
 }
 
 func NewPoller(cfg *settings.Manager, st *store.Store) *Poller {
-	return &Poller{GRAM: gram.NewMonitor(), cfg: cfg, st: st, clients: map[string]*connection{}, scannedScope: map[string]string{}, scanLocks: map[string]*sync.Mutex{"binance": {}, "okx": {}, "bybit": {}, "ton": {}}, pendingOffset: map[string]int{}}
+	return &Poller{GRAM: gram.NewMonitor(), cfg: cfg, st: st, clients: map[string]*connection{}, scannedScope: map[string]string{}, scanLocks: map[string]*sync.Mutex{"binance": {}, "okx": {}, "bybit": {}, "bitget": {}, "ton": {}}, pendingOffset: map[string]int{}}
 }
 
 // UseTestTransports 只用于端到端测试：调度器创建的交易所客户端只访问本地模拟服务，
@@ -63,12 +64,14 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 
 	p.mu.Lock()
 	cached := p.clients[provider]
-	if cached == nil || cached.config.TON != cfg.TON || cached.config.Binance != cfg.Binance || cached.config.OKX != cfg.OKX || cached.config.Bybit != cfg.Bybit || cached.config.Checkout.Binance != cfg.Checkout.Binance || cached.config.Checkout.OKX != cfg.Checkout.OKX || cached.config.Checkout.Bybit != cfg.Checkout.Bybit {
+	if cached == nil || cached.config.TON != cfg.TON || cached.config.Binance != cfg.Binance || cached.config.OKX != cfg.OKX || cached.config.Bybit != cfg.Bybit || cached.config.Bitget != cfg.Bitget || cached.config.Checkout.Binance != cfg.Checkout.Binance || cached.config.Checkout.OKX != cfg.Checkout.OKX || cached.config.Checkout.Bybit != cfg.Checkout.Bybit || cached.config.Checkout.Bitget != cfg.Checkout.Bitget {
 		var cli source
 		if provider == config.ProviderBinance {
 			cli = binance.New(cfg.Binance.APIKey, cfg.Binance.APISecret, cfg.Binance.BaseURL, cfg.Binance.RecvWindow, cfg.Binance.Limit)
 		} else if provider == config.ProviderBybit {
 			cli = bybit.New(cfg.Bybit.APIKey, cfg.Bybit.APISecret, cfg.Bybit.BaseURL, cfg.Bybit.RecvWindow, cfg.Bybit.Limit)
+		} else if provider == config.ProviderBitget {
+			cli = bitget.New(cfg.Bitget.APIKey, cfg.Bitget.APISecret, cfg.Bitget.Passphrase, cfg.Bitget.BaseURL, cfg.Bitget.Limit)
 		} else if provider == config.ProviderTON {
 			cli = gram.New(cfg.TON.BaseURL, cfg.TON.APIKey, cfg.TON.Address)
 		} else {
@@ -99,6 +102,9 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 		}
 		if provider == config.ProviderBybit {
 			want = cfg.Checkout.Bybit.UID
+		}
+		if provider == config.ProviderBitget {
+			want = cfg.Checkout.Bitget.UID
 		}
 		if uid != want {
 			return nil, errors.New("API 账户与收款 UID 不一致")
@@ -304,7 +310,7 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 func (p *Poller) Run(ctx context.Context) {
 	var workers sync.WaitGroup
 	workers.Go(func() { p.monitorGRAM(ctx) })
-	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderTON} {
+	for _, provider := range []string{config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderBitget, config.ProviderTON} {
 		workers.Go(func() {
 			for {
 				if ctx.Err() != nil {

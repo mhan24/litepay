@@ -30,7 +30,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
 </style>
 {{template "layout_css" .}}
 </head>
-<body class="{{if eq .Provider "binance"}}brand-binance{{else if eq .Provider "okx"}}brand-okx{{else if eq .Provider "bybit"}}brand-bybit{{else}}brand-neutral{{end}}">
+<body class="{{if eq .Provider "binance"}}brand-binance{{else if eq .Provider "okx"}}brand-okx{{else if eq .Provider "bybit"}}brand-bybit{{else if eq .Provider "bitget"}}brand-bitget{{else}}brand-neutral{{end}}">
 <div class="page {{if not .NeedsProvider}}{{if not .NeedsCurrency}}stage-transfer{{end}}{{end}}">
   <header class="checkout-brand">
     <a class="brand-link wordmark" href="/" ><span class="mark">{{template "brand_mark" .}}</span><strong>LitePay</strong></a>
@@ -51,7 +51,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     {{if not .NeedsProvider}}
     <div class="channel">
       <span class="channel-icon">
-        {{if eq .Provider "binance"}}<img src="/assets/brand/binance.svg" alt="">{{else if eq .Provider "okx"}}<img src="/assets/brand/okx.svg" alt="">{{else if eq .Provider "bybit"}}<img src="/assets/brand/bybit.svg" alt="">{{else if eq .Provider "ton"}}<img src="/assets/brand/gram.svg" alt="">{{else}}LP{{end}}
+        {{if eq .Provider "binance"}}<img src="/assets/brand/binance.svg" alt="">{{else if eq .Provider "okx"}}<img src="/assets/brand/okx.svg" alt="">{{else if eq .Provider "bybit"}}<img src="/assets/brand/bybit.svg" alt="">{{else if eq .Provider "bitget"}}<img src="/assets/brand/bitget.svg" alt="">{{else if eq .Provider "ton"}}<img src="/assets/brand/gram.svg" alt="">{{else}}LP{{end}}
       </span>
       <span class="channel-copy">
         <strong>{{.ProviderName}}</strong>
@@ -93,7 +93,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
         <span class="choice-body">
           <span class="choice-name">{{.Currency}}</span>
           <span class="choice-sub">
-            {{if eq $.Provider "okx"}}OKX 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "binance"}}Binance 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "bybit"}}Bybit 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "ton"}}TON 主网链上转账 · 按实时 USD 报价锁定应付数量{{else}}按精确金额自动确认{{end}}
+            {{if eq $.Provider "okx"}}OKX 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "binance"}}Binance 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "bybit"}}Bybit 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "bitget"}}Bitget 站内转账（0 手续费）· 按精确金额自动确认{{else if eq $.Provider "ton"}}TON 主网链上转账 · 按实时 USD 报价锁定应付数量{{else}}按精确金额自动确认{{end}}
             {{if not .Enabled}} · 当前不可用{{end}}
           </span>
         </span>
@@ -155,7 +155,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     <div class="pay-note">请使用 TON 主网向此地址转入 <b>{{.Amount}} GRAM</b>（手续费另付），请勿转入 Jetton 代币。</div>
     <a class="copy primary" id="gram-open-wallet" href="{{tonURL .TransferURL}}">打开钱包付款</a>
     {{else}}
-    <div class="pay-note">请在 <b>{{if eq .Provider "okx"}}OKX{{else if eq .Provider "bybit"}}Bybit{{else}}Binance{{end}}</b> 向此 UID 发起<b>站内转账</b>，币种选择 <b>{{.Currency}}</b>，转账金额填写 <b>{{.Amount}}</b>。</div>
+    <div class="pay-note">请在 <b>{{if eq .Provider "okx"}}OKX{{else if eq .Provider "bybit"}}Bybit{{else if eq .Provider "bitget"}}Bitget{{else}}Binance{{end}}</b> 向此 UID 发起<b>站内转账</b>，币种选择 <b>{{.Currency}}</b>，转账金额填写 <b>{{.Amount}}</b>。</div>
     {{end}}
     {{else}}
     <div class="pay-note error">收款账户暂未配置，请稍后刷新重试或联系商户处理。</div>

@@ -44,7 +44,7 @@ func TestVerificationReportsOnlyAccountsActuallyChecked(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(called, []string{config.ProviderBinance}) {
 		t.Fatal(called, err)
 	}
-	if len(checks) != 4 || !checks[0].Verified || checks[1].Verified || checks[2].Verified || checks[3].Verified {
+	if len(checks) != 5 || !checks[0].Verified || checks[1].Verified || checks[2].Verified || checks[3].Verified || checks[4].Verified {
 		t.Fatal(checks)
 	}
 	if !reflect.DeepEqual(checks[1].Missing, []string{"API Key", "API Secret", "Passphrase"}) {
@@ -97,6 +97,10 @@ func TestCompleteVerificationChecksEveryEnabledProvider(t *testing.T) {
 	cfg.Bybit.APIKey = "key"
 	cfg.Bybit.APISecret = "secret"
 	cfg.Checkout.Bybit.UID = "bybit-receiver"
+	cfg.Bitget.APIKey = "key"
+	cfg.Bitget.APISecret = "secret"
+	cfg.Bitget.Passphrase = "phrase"
+	cfg.Checkout.Bitget.UID = "bitget-receiver"
 	cfg.TON.Address = gram.DefaultAddress
 	cfg.Checkout.Currencies = append(cfg.Checkout.Currencies, "GRAM")
 	m := verificationManager(t, cfg)
@@ -106,7 +110,7 @@ func TestCompleteVerificationChecksEveryEnabledProvider(t *testing.T) {
 		return nil
 	}
 	checks, err := m.UpdateWithVerification(context.Background(), Patch{VerifyAccounts: true}, "test")
-	if err != nil || !reflect.DeepEqual(called, []string{"binance", "okx", "bybit", "ton"}) {
+	if err != nil || !reflect.DeepEqual(called, []string{"binance", "okx", "bybit", "bitget", "ton"}) {
 		t.Fatal(called, err)
 	}
 	for _, check := range checks {
@@ -172,7 +176,7 @@ func TestProviderCurrenciesLegacyPersistenceAndScopedVerification(t *testing.T) 
 		t.Fatal(c.Checkout)
 	}
 	empty := []string{}
-	if err = loaded.Update(ctx, Patch{BinanceCurrencies: &empty, OKXCurrencies: &empty, BybitCurrencies: &empty, TONCurrencies: &empty}, "test"); err != nil {
+	if err = loaded.Update(ctx, Patch{BinanceCurrencies: &empty, OKXCurrencies: &empty, BybitCurrencies: &empty, BitgetCurrencies: &empty, TONCurrencies: &empty}, "test"); err != nil {
 		t.Fatal(err)
 	}
 	reloaded := New(baseCfg, m.st)

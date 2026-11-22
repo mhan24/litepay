@@ -22,6 +22,9 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 	if provider == config.ProviderBybit {
 		receiver = cfg.Checkout.Bybit.UID
 	}
+	if provider == config.ProviderBitget {
+		receiver = cfg.Checkout.Bitget.UID
+	}
 	if provider == config.ProviderTON {
 		receiver = cfg.TON.Address
 	}

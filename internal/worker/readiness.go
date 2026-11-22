@@ -24,6 +24,8 @@ func scanScope(cfg *config.Config, provider string) string {
 		account = []any{provider, cfg.OKX, cfg.Checkout.OKX.UID}
 	case config.ProviderBybit:
 		account = []any{provider, cfg.Bybit, cfg.Checkout.Bybit.UID}
+	case config.ProviderBitget:
+		account = []any{provider, cfg.Bitget, cfg.Checkout.Bitget.UID}
 	case config.ProviderTON:
 		account = []any{provider, cfg.TON}
 	}

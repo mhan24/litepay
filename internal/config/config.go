@@ -35,6 +35,7 @@ type Config struct {
 	Binance  BinanceConfig  `yaml:"-"`
 	OKX      OKXConfig      `yaml:"-"`
 	Bybit    BybitConfig    `yaml:"-"`
+	Bitget   BitgetConfig   `yaml:"-"`
 	TON      TONConfig      `yaml:"-"`
 	Checkout CheckoutConfig `yaml:"-"`
 	Order    OrderConfig    `yaml:"-"`
@@ -45,6 +46,7 @@ const (
 	ProviderBinance = "binance"
 	ProviderOKX     = "okx"
 	ProviderBybit   = "bybit"
+	ProviderBitget  = "bitget"
 	ProviderTON     = "ton"
 )
 
@@ -156,6 +158,17 @@ type BybitConfig struct {
 	LookbackBuffer int    `yaml:"lookback_buffer_minutes"` // 订单时间回看缓冲（分钟）
 }
 
+// BitgetConfig Bitget 只读 API 与站内转账收款配置。
+type BitgetConfig struct {
+	APIKey         string `yaml:"api_key"`
+	APISecret      string `yaml:"api_secret"`
+	Passphrase     string `yaml:"passphrase"`
+	BaseURL        string `yaml:"base_url"`                // 默认 https://api.bitget.com
+	PollInterval   int    `yaml:"poll_interval"`           // 查询间隔（秒）
+	Limit          int    `yaml:"limit"`                   // 单次查询条数，最大 100
+	LookbackBuffer int    `yaml:"lookback_buffer_minutes"` // 订单时间回看缓冲（分钟）
+}
+
 // TONConfig configures read-only native GRAM collection on TON mainnet.
 type TONConfig struct {
 	Address        string
@@ -170,12 +183,14 @@ type CheckoutConfig struct {
 	BinanceCurrencies []string        `yaml:"-"`
 	OKXCurrencies     []string        `yaml:"-"`
 	BybitCurrencies   []string        `yaml:"-"`
+	BitgetCurrencies  []string        `yaml:"-"`
 	TONCurrencies     []string        `yaml:"-"`
 	Currencies        []string        `yaml:"currencies"` // 支持的币种，如 ["USDT","USDC"]
 	Note              string          `yaml:"note"`       // 收银台提示文案
 	Binance           ProviderDisplay `yaml:"binance"`
 	OKX               ProviderDisplay `yaml:"okx"`
 	Bybit             ProviderDisplay `yaml:"bybit"`
+	Bitget            ProviderDisplay `yaml:"bitget"`
 }
 
 // ProviderDisplay 收款平台展示信息。UID 同时用于展示、转账和到账归属校验。
@@ -239,6 +254,12 @@ func Default() *Config {
 			PollInterval:   4,
 			RecvWindow:     5000,
 			Limit:          50,
+			LookbackBuffer: 2,
+		},
+		Bitget: BitgetConfig{
+			BaseURL:        "https://api.bitget.com",
+			PollInterval:   4,
+			Limit:          100,
 			LookbackBuffer: 2,
 		},
 		TON:      TONConfig{BaseURL: "https://toncenter.com/api/v2", PollInterval: 5, LookbackBuffer: 2},
@@ -357,6 +378,19 @@ func (c *Config) normalize() error {
 	if c.Bybit.LookbackBuffer <= 0 {
 		c.Bybit.LookbackBuffer = 2
 	}
+	c.Bitget.BaseURL = strings.TrimRight(strings.TrimSpace(c.Bitget.BaseURL), "/")
+	if c.Bitget.BaseURL == "" {
+		c.Bitget.BaseURL = "https://api.bitget.com"
+	}
+	if c.Bitget.PollInterval < 1 {
+		c.Bitget.PollInterval = 4
+	}
+	if c.Bitget.Limit <= 0 || c.Bitget.Limit > 100 {
+		c.Bitget.Limit = 100
+	}
+	if c.Bitget.LookbackBuffer <= 0 {
+		c.Bitget.LookbackBuffer = 2
+	}
 	c.TON.BaseURL = strings.TrimRight(strings.TrimSpace(c.TON.BaseURL), "/")
 	if c.TON.BaseURL == "" {
 		c.TON.BaseURL = "https://toncenter.com/api/v2"
@@ -370,6 +404,7 @@ func (c *Config) normalize() error {
 	c.Checkout.Binance.UID = strings.TrimSpace(c.Checkout.Binance.UID)
 	c.Checkout.OKX.UID = strings.TrimSpace(c.Checkout.OKX.UID)
 	c.Checkout.Bybit.UID = strings.TrimSpace(c.Checkout.Bybit.UID)
+	c.Checkout.Bitget.UID = strings.TrimSpace(c.Checkout.Bitget.UID)
 	c.Checkout.Currencies = NormalizeCurrencies(c.Checkout.Currencies)
 	if c.Order.ExpireMinutes <= 0 {
 		c.Order.ExpireMinutes = 10
@@ -526,6 +561,14 @@ func (c *Config) BybitEnabled() bool {
 		strings.TrimSpace(c.Checkout.Bybit.UID) != ""
 }
 
+// BitgetEnabled 是否具备 Bitget 站内转账到账确认条件。
+func (c *Config) BitgetEnabled() bool {
+	return len(c.ProviderCurrencies(ProviderBitget)) > 0 && strings.TrimSpace(c.Bitget.APIKey) != "" &&
+		strings.TrimSpace(c.Bitget.APISecret) != "" &&
+		strings.TrimSpace(c.Bitget.Passphrase) != "" &&
+		strings.TrimSpace(c.Checkout.Bitget.UID) != ""
+}
+
 // ProviderEnabled 某收款平台是否已完成只读 API 配置。
 func (c *Config) ProviderEnabled(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
@@ -535,6 +578,8 @@ func (c *Config) ProviderEnabled(provider string) bool {
 		return c.OKXEnabled()
 	case ProviderBybit:
 		return c.BybitEnabled()
+	case ProviderBitget:
+		return c.BitgetEnabled()
 	case ProviderTON:
 		return c.TONEnabled()
 	default:
@@ -554,6 +599,9 @@ func (c *Config) ProviderInterval(provider string) int {
 	if provider == ProviderBybit {
 		return c.Bybit.PollInterval
 	}
+	if provider == ProviderBitget {
+		return c.Bitget.PollInterval
+	}
 	return c.Binance.PollInterval
 }
 
@@ -569,13 +617,16 @@ func (c *Config) ProviderLookback(provider string) int {
 	if provider == ProviderBybit {
 		return c.Bybit.LookbackBuffer
 	}
+	if provider == ProviderBitget {
+		return c.Bitget.LookbackBuffer
+	}
 	return c.Binance.LookbackBuffer
 }
 
 // InitialScanLookback bounds only the initial history query. Confirmation tasks have their own
 // persistent deadline based on the actual order window, independent of this default.
 func (c *Config) InitialScanLookback() time.Duration {
-	return time.Duration(c.Order.ExpireMinutes+max(c.Binance.LookbackBuffer, c.OKX.LookbackBuffer, c.Bybit.LookbackBuffer, c.TON.LookbackBuffer))*time.Minute +
+	return time.Duration(c.Order.ExpireMinutes+max(c.Binance.LookbackBuffer, c.OKX.LookbackBuffer, c.Bybit.LookbackBuffer, c.Bitget.LookbackBuffer, c.TON.LookbackBuffer))*time.Minute +
 		time.Duration(c.Order.SlotGraceSeconds)*time.Second
 }
 
@@ -609,7 +660,7 @@ func FilterProviderCurrencies(provider string, currencies []string) []string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	out := []string{}
 	for _, currency := range NormalizeCurrencies(currencies) {
-		if provider == ProviderTON && currency == "GRAM" || (provider == ProviderBinance || provider == ProviderOKX || provider == ProviderBybit) && (currency == "USDT" || currency == "USDC") {
+		if provider == ProviderTON && currency == "GRAM" || (provider == ProviderBinance || provider == ProviderOKX || provider == ProviderBybit || provider == ProviderBitget) && (currency == "USDT" || currency == "USDC") {
 			out = append(out, currency)
 		}
 	}
@@ -626,6 +677,8 @@ func (c *Config) ProviderCurrencies(provider string) []string {
 		currencies = c.Checkout.OKXCurrencies
 	case ProviderBybit:
 		currencies = c.Checkout.BybitCurrencies
+	case ProviderBitget:
+		currencies = c.Checkout.BitgetCurrencies
 	case ProviderTON:
 		currencies = c.Checkout.TONCurrencies
 	default:
@@ -652,13 +705,14 @@ func (c *Config) NormalizePaymentCurrencies() {
 	c.Checkout.BinanceCurrencies = c.ProviderCurrencies(ProviderBinance)
 	c.Checkout.OKXCurrencies = c.ProviderCurrencies(ProviderOKX)
 	c.Checkout.BybitCurrencies = c.ProviderCurrencies(ProviderBybit)
+	c.Checkout.BitgetCurrencies = c.ProviderCurrencies(ProviderBitget)
 	c.Checkout.TONCurrencies = c.ProviderCurrencies(ProviderTON)
-	combined := append(append(append(append([]string{}, c.Checkout.BinanceCurrencies...), c.Checkout.OKXCurrencies...), c.Checkout.BybitCurrencies...), c.Checkout.TONCurrencies...)
+	combined := append(append(append(append(append([]string{}, c.Checkout.BinanceCurrencies...), c.Checkout.OKXCurrencies...), c.Checkout.BybitCurrencies...), c.Checkout.BitgetCurrencies...), c.Checkout.TONCurrencies...)
 	c.Checkout.Currencies = NormalizeCurrencies(combined)
 }
 
 func (c *Config) AnyProviderEnabled() bool {
-	return c.BinanceEnabled() || c.OKXEnabled() || c.BybitEnabled() || c.TONEnabled()
+	return c.BinanceEnabled() || c.OKXEnabled() || c.BybitEnabled() || c.BitgetEnabled() || c.TONEnabled()
 }
 
 // ValidateNotifyURL enforces explicit production transport and merchant identity.

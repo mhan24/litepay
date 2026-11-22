@@ -31,6 +31,7 @@
     <button type="button" data-settings-view="binance" aria-pressed="true">币安</button>
     <button type="button" data-settings-view="okx" aria-pressed="false">欧易</button>
     <button type="button" data-settings-view="bybit" aria-pressed="false">Bybit</button>
+    <button type="button" data-settings-view="bitget" aria-pressed="false">Bitget</button>
     <button type="button" data-settings-view="ton" aria-pressed="false">GRAM</button>
     <button type="button" data-settings-view="checkout" aria-pressed="false">收银台</button>
     <button type="button" data-settings-view="orders" aria-pressed="false">订单规则</button>
@@ -108,6 +109,21 @@
 <div class="field"><label for="setting-bybit_poll_interval">到账查询间隔（秒）</label><input id="setting-bybit_poll_interval" class="input" type="number" name="bybit_poll_interval" value="{{.Cfg.Bybit.PollInterval}}" min="2" max="60"></div>
 <div class="field"><label for="setting-bybit_lookback">回看窗口（分钟）</label><input id="setting-bybit_lookback" class="input" type="number" name="bybit_lookback" value="{{.Cfg.Bybit.LookbackBuffer}}" min="1" max="60"></div>
 </div></div></div>      <div class="card-b"><div class="field"><label for="bybit-current-password">当前密码（修改或清空 API 凭据、收款账户时必填）</label><input id="bybit-current-password" class="input" type="password" name="current_password" autocomplete="current-password"></div></div><div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" role="switch" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验 Bybit 并保存</button><button class="btn btn-primary" type="submit">保存 Bybit 配置</button></div></div></div>
+    </section>
+  </form>
+  <form data-settings-panel="bitget" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-bitget">
+    <input type="hidden" name="csrf" value="{{.Base.CSRF}}">
+    <input type="hidden" name="settings_scope" value="bitget">
+    <section class="mb-12 card" ><div class="card-h"><h2 id="settings-head-bitget">Bitget</h2><span class="badge {{if .BitgetOn}}b-ok{{else}}b-gray{{end}}">{{if .BitgetOn}}可收款{{else}}未启用收款{{end}}</span></div>
+<div class="card-b"><p class="section-desc">收款 UID 必须与当前主账号 API 凭据所属账户一致（外部站内转账仅支持主账号）。API 凭据仅需只读查询权限；密钥输入框留空则保留原值。</p><div data-section-fields><div class="form-grid">
+<div class="field"><label for="setting-bitget_uid">收款 UID</label><input id="setting-bitget_uid" class="input" name="bitget_uid" value="{{.Cfg.Checkout.Bitget.UID}}" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"></div>
+<div class="field"><label>开放币种</label><div class="currency-toggles">{{range .KnownCurrencies}}<label class="switch"><input type="checkbox" role="switch" name="bitget_currencies" value="{{.}}" {{if hasStr $.BitgetCurrencies .}}checked{{end}}><span>{{.}}</span></label>{{end}}</div></div>
+<div class="field"><label for="setting-bitget_api_key">API Key</label><input id="setting-bitget_api_key" class="input" name="bitget_api_key" type="password" value="" placeholder="{{.BitgetKey}}" autocomplete="new-password"></div>
+<div class="field"><label for="setting-bitget_api_secret">API Secret</label><input id="setting-bitget_api_secret" class="input" name="bitget_api_secret" type="password" value="" placeholder="{{if .Cfg.Bitget.APISecret}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"></div>
+<div class="field"><label for="setting-bitget_passphrase">API Passphrase</label><input id="setting-bitget_passphrase" class="input" name="bitget_passphrase" type="password" value="" placeholder="{{if .Cfg.Bitget.Passphrase}}已配置，留空保留{{else}}尚未配置{{end}}" autocomplete="new-password"><span class="hint">创建此 API Key 时设置的口令。</span></div>
+<div class="field"><label for="setting-bitget_poll_interval">到账查询间隔（秒）</label><input id="setting-bitget_poll_interval" class="input" type="number" name="bitget_poll_interval" value="{{.Cfg.Bitget.PollInterval}}" min="2" max="60"></div>
+<div class="field"><label for="setting-bitget_lookback">回看窗口（分钟）</label><input id="setting-bitget_lookback" class="input" type="number" name="bitget_lookback" value="{{.Cfg.Bitget.LookbackBuffer}}" min="1" max="60"></div>
+</div></div></div>      <div class="card-b"><div class="field"><label for="bitget-current-password">当前密码（修改或清空 API 凭据、收款账户时必填）</label><input id="bitget-current-password" class="input" type="password" name="current_password" autocomplete="current-password"></div></div><div class="card-b"><div class="section-actions"><label class="switch"><input type="checkbox" role="switch" name="clear_section" data-clear-section><span>清空本平台收款配置（账户、API 和币种）</span></label><div class="actions"><button class="btn btn-ghost" type="submit" name="verify_accounts" value="on">核验 Bitget 并保存</button><button class="btn btn-primary" type="submit">保存 Bitget 配置</button></div></div></div>
     </section>
   </form>
   <form data-settings-panel="ton" method="post" action="{{adminPath}}/settings" aria-labelledby="settings-head-ton">

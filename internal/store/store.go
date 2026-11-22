@@ -344,7 +344,7 @@ func (s *Store) selectPayment(ctx context.Context, no, provider, currency, recei
 	if provider == "ton" && (currency != "GRAM" || quoted == 0) {
 		return nil, errors.New("GRAM 付款必须使用有效 USD 报价")
 	}
-	if provider != "ton" && ((provider != "binance" && provider != "okx" && provider != "bybit") || (currency != "USDT" && currency != "USDC")) {
+	if provider != "ton" && ((provider != "binance" && provider != "okx" && provider != "bybit" && provider != "bitget") || (currency != "USDT" && currency != "USDC")) {
 		return nil, errors.New("收款平台与币种不匹配")
 	}
 	if strings.TrimSpace(receiver) == "" {
@@ -553,7 +553,7 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 	if t.Provider == "ton" && t.State == model.Confirmed && t.MasterchainSeqno <= 0 {
 		return "unfinalized", errors.New("TON 到账缺少主链最终性确认")
 	}
-	if t.EventID == "" || (t.Provider != "binance" && t.Provider != "okx" && t.Provider != "bybit" && t.Provider != "ton") || t.OccurredAt.IsZero() {
+	if t.EventID == "" || (t.Provider != "binance" && t.Provider != "okx" && t.Provider != "bybit" && t.Provider != "bitget" && t.Provider != "ton") || t.OccurredAt.IsZero() {
 		return "invalid_evidence", errors.New("交易缺少可靠身份或时间")
 	}
 	t.OccurredAt = normalizeTime(t.OccurredAt)

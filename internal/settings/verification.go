@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"litepay/internal/binance"
+	"litepay/internal/bitget"
 	"litepay/internal/bybit"
 	"litepay/internal/config"
 	"litepay/internal/gram"
@@ -37,6 +38,7 @@ func verificationTargets(c *config.Config) []AccountVerification {
 		{Provider: config.ProviderBinance, Missing: missing("API Key", c.Binance.APIKey, "API Secret", c.Binance.APISecret, "收款 UID", c.Checkout.Binance.UID)},
 		{Provider: config.ProviderOKX, Missing: missing("API Key", c.OKX.APIKey, "API Secret", c.OKX.APISecret, "Passphrase", c.OKX.Passphrase, "收款 UID", c.Checkout.OKX.UID)},
 		{Provider: config.ProviderBybit, Missing: missing("API Key", c.Bybit.APIKey, "API Secret", c.Bybit.APISecret, "收款 UID", c.Checkout.Bybit.UID)},
+		{Provider: config.ProviderBitget, Missing: missing("API Key", c.Bitget.APIKey, "API Secret", c.Bitget.APISecret, "Passphrase", c.Bitget.Passphrase, "收款 UID", c.Checkout.Bitget.UID)},
 		{Provider: config.ProviderTON, Missing: tonMissing},
 	}
 	for i := range out {
@@ -75,6 +77,15 @@ func verifyCollectionAccount(ctx context.Context, c *config.Config, provider str
 		}
 		if uid != c.Checkout.Bybit.UID {
 			return fmt.Errorf("Bybit API Key 所属账户与收款 UID 不一致")
+		}
+	case config.ProviderBitget:
+		cli := bitget.New(c.Bitget.APIKey, c.Bitget.APISecret, c.Bitget.Passphrase, c.Bitget.BaseURL, c.Bitget.Limit)
+		uid, err := cli.AccountUID(ctx)
+		if err != nil {
+			return fmt.Errorf("Bitget 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
+		}
+		if uid != c.Checkout.Bitget.UID {
+			return fmt.Errorf("Bitget API Key 所属账户与收款 UID 不一致")
 		}
 	case config.ProviderTON:
 		cli := gram.New(c.TON.BaseURL, c.TON.APIKey, c.TON.Address)

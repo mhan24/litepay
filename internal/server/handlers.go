@@ -107,7 +107,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 	reselectRequested := cfg.BEpusdt.Reselect && c.Query("reselect") == "1" && o.Reselect &&
 		(o.Status == model.Pending || o.Status == model.Ready)
 	selectedProvider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
-	if selectedProvider != config.ProviderBinance && selectedProvider != config.ProviderOKX && selectedProvider != config.ProviderBybit && selectedProvider != config.ProviderTON {
+	if selectedProvider != config.ProviderBinance && selectedProvider != config.ProviderOKX && selectedProvider != config.ProviderBybit && selectedProvider != config.ProviderBitget && selectedProvider != config.ProviderTON {
 		selectedProvider = ""
 	}
 	// 第一步选择收款平台是纯前端过渡页，不写数据库；只有第二步选择币种
@@ -142,6 +142,8 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 			providerName = "OKX 站内转账"
 		} else if provider == config.ProviderBybit {
 			providerName = "Bybit 站内转账"
+		} else if provider == config.ProviderBitget {
+			providerName = "Bitget 站内转账"
 		}
 	} else if provider == config.ProviderBinance {
 		providerName = "Binance 站内转账"
@@ -150,6 +152,9 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		uid = o.Receiver
 	} else if provider == config.ProviderBybit {
 		providerName = "Bybit 站内转账"
+		uid = o.Receiver
+	} else if provider == config.ProviderBitget {
+		providerName = "Bitget 站内转账"
 		uid = o.Receiver
 	}
 	if provider == config.ProviderTON {
@@ -162,11 +167,15 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		providerSubtitle = "选择 OKX 收款币种"
 	} else if needsCurrency && provider == config.ProviderBybit {
 		providerSubtitle = "选择 Bybit 收款币种"
+	} else if needsCurrency && provider == config.ProviderBitget {
+		providerSubtitle = "选择 Bitget 收款币种"
 	} else if provider == config.ProviderBinance {
 		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
 	} else if provider == config.ProviderOKX {
 		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
 	} else if provider == config.ProviderBybit {
+		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
+	} else if provider == config.ProviderBitget {
 		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
 	}
 	if provider == config.ProviderTON {
@@ -278,6 +287,12 @@ func providerOptions(cfg *config.Config, o *model.Order) []providerOption {
 			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBybit)),
 			Enabled:  cfg.BybitEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBybit)...),
 			Selected: strings.EqualFold(o.Provider, config.ProviderBybit),
+		},
+		{
+			Key: config.ProviderBitget, Name: "Bitget", Logo: "/assets/brand/bitget.svg",
+			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBitget)),
+			Enabled:  cfg.BitgetEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBitget)...),
+			Selected: strings.EqualFold(o.Provider, config.ProviderBitget),
 		},
 		{Key: config.ProviderTON, Name: "TON / GRAM", Subtitle: "TON 主网转账 · GRAM · 实时 USD 报价", Logo: "/assets/brand/gram.svg", Enabled: cfg.TONEnabled() && orderCurrencyAllowed(cfg, o, "GRAM"), Selected: o.Provider == config.ProviderTON},
 	}
@@ -400,6 +415,9 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 		}
 		if provider == config.ProviderBybit {
 			receiver = cfg.Checkout.Bybit.UID
+		}
+		if provider == config.ProviderBitget {
+			receiver = cfg.Checkout.Bitget.UID
 		}
 		step, e := amount.Parse(cfg.Order.AmountStep)
 		minimum, me := amount.Parse(cfg.Order.MinAmount)
