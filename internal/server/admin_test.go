@@ -3,6 +3,11 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -771,5 +776,140 @@ func TestNilPollerAndNilLoggerDefensiveHandling(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 on %s with nil poller, got %d", path, w.Code)
 		}
+	}
+}
+
+func TestAdminLoginRateLimitMapCapDoesNotDoSLegitimateAdmin(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "correct-horse-battery-staple"
+	auth := newAdminAuth(cfg)
+
+	// Lock out attacker IP on the real admin username first.
+	for range adminUserAttemptLimit {
+		if !auth.allow("203.0.113.10", "admin") {
+			t.Fatal("early lockout on attacker IP")
+		}
+		auth.failed("203.0.113.10", "admin")
+	}
+
+	// Spray adminMaxAttemptKeys+5 distinct usernames from attacker IP and distinct IPs.
+	for i := range adminMaxAttemptKeys + 5 {
+		user := fmt.Sprintf("spray-%d", i)
+		if !auth.allow("203.0.113.10", user) {
+			t.Fatalf("spray attempt %d unexpectedly blocked", i)
+		}
+		auth.failed("203.0.113.10", user)
+	}
+	for i := range adminMaxAttemptKeys + 5 {
+		ip := fmt.Sprintf("198.51.100.%d", i)
+		if !auth.allow(ip, fmt.Sprintf("other-%d", i)) {
+			t.Fatalf("ip spray %d unexpectedly blocked", i)
+		}
+		auth.failed(ip, fmt.Sprintf("other-%d", i))
+	}
+
+	// Attacker's lockout on ("203.0.113.10", "admin") must still hold.
+	if auth.allow("203.0.113.10", "admin") {
+		t.Fatal("username spray evicted active admin lockout")
+	}
+	// Legitimate admin from a clean IP must not be globally locked out by map cap exhaustion.
+	if !auth.allow("192.0.2.55", "admin") {
+		t.Fatal("map cap exhaustion caused global login DoS for legitimate admin")
+	}
+	auth.succeeded("192.0.2.55", "admin")
+
+	// Bounded memory: maps remain capped at adminMaxAttemptKeys.
+	auth.mu.Lock()
+	attemptsLen, ipLen := len(auth.attempts), len(auth.ipAttempts)
+	auth.mu.Unlock()
+	if attemptsLen > adminMaxAttemptKeys || ipLen > adminMaxAttemptKeys {
+		t.Fatalf("rate limit maps exceeded cap: attempts=%d ipAttempts=%d", attemptsLen, ipLen)
+	}
+}
+
+func TestAdminLoginWithValidSessionRevokesOnRepeatedWrongPassword(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "valid-session-probe-test-pass"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	token, _, err := newAdminAuth(mgr.Get()).issue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: adminCookieName, Value: token}
+
+	// Repeated wrong password attempts on /admin/login with a valid session cookie must revoke the session.
+	for i := range adminUserAttemptLimit {
+		form := url.Values{"username": {"admin"}, "password": {fmt.Sprintf("wrong-%d", i)}}
+		req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		if w.Code != http.StatusSeeOther {
+			t.Fatalf("unexpected code on failed login %d: %d", i, w.Code)
+		}
+	}
+
+	// Session must now be revoked when accessing protected routes.
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther || !strings.Contains(w.Header().Get("Location"), "/admin/login") {
+		t.Fatalf("session was not revoked after repeated wrong password guesses on /admin/login: code=%d loc=%s", w.Code, w.Header().Get("Location"))
+	}
+}
+
+func TestAdminAuthRejectsEmptyCSRFClaimAndEmptyCredentials(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "strong-admin-password"
+	auth := newAdminAuth(cfg)
+
+	payload, err := json.Marshal(adminSession{
+		ID:    "fixedsid",
+		Epoch: 1,
+		User:  "admin",
+		Exp:   time.Now().Add(time.Hour).Unix(),
+		CSRF:  "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, auth.key)
+	mac.Write([]byte(raw))
+	forgedEmptyCSRF := raw + "." + hex.EncodeToString(mac.Sum(nil))
+	if _, ok := auth.parse(forgedEmptyCSRF); ok {
+		t.Fatal("accepted session token with empty CSRF claim")
+	}
+
+	emptyCfg := config.Default()
+	emptyCfg.Server.Production = false
+	emptyCfg.Admin.Username = "admin"
+	emptyCfg.Admin.Password = ""
+	emptyAuth := newAdminAuth(emptyCfg)
+	if emptyAuth.checkCredentials("admin", "") {
+		t.Fatal("empty configured password authenticated")
 	}
 }

@@ -189,12 +189,7 @@ func (a *adminAuth) bumpEpoch() (uint64, error) {
 // reauthenticate reserves by session ID and username, with a separate global budget.
 func (h *Handlers) reauthenticate(c *gin.Context) bool {
 	a := h.currentAdmin()
-	a.mu.Lock()
-	if a.reauth == nil {
-		a.reauth = &adminAuth{hardLimits: true, attempts: make(map[string]*loginAttempt), ipAttempts: make(map[string]*loginAttempt)}
-	}
-	limiter := a.reauth
-	a.mu.Unlock()
+	limiter := a.reauthLimiter()
 	sid, user := c.GetString("admin_sid"), c.GetString("admin_user")
 	allowed := sid != "" && limiter.allow(sid, user)
 	if allowed && a.checkCredentials(user, c.PostForm("current_password")) {
@@ -204,17 +199,30 @@ func (h *Handlers) reauthenticate(c *gin.Context) bool {
 	exhausted := !allowed
 	if allowed {
 		limiter.failed(sid, user)
-		limiter.mu.Lock()
-		_, key := adminAttemptKeys(sid, user)
-		attempt := limiter.attempts[key]
-		exhausted = (attempt != nil && attempt.count >= adminUserAttemptLimit) || limiter.globalCount >= adminGlobalAttemptLimit
-		limiter.mu.Unlock()
+		exhausted = limiter.isExhausted(sid, user)
 	}
 	if exhausted {
 		_, err := a.bumpEpoch()
-		slog.Warn("后台密码重新验证达到上限，已吊销会话", "operator", user, "session_id", sid, "err", err)
+		h.logger().Warn("后台密码重新验证达到上限，已吊销会话", "operator", user, "session_id", sid, "ip", c.ClientIP(), "err", err)
 	}
 	return false
+}
+
+func (a *adminAuth) reauthLimiter() *adminAuth {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.reauth == nil {
+		a.reauth = &adminAuth{hardLimits: true, attempts: make(map[string]*loginAttempt), ipAttempts: make(map[string]*loginAttempt)}
+	}
+	return a.reauth
+}
+
+func (a *adminAuth) isExhausted(ip, user string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, key := adminAttemptKeys(ip, user)
+	attempt := a.attempts[key]
+	return (attempt != nil && attempt.count >= adminUserAttemptLimit) || a.globalCount >= adminGlobalAttemptLimit
 }
 
 // issue 生成新会话 token 与 CSRF token。
@@ -272,7 +280,7 @@ func (a *adminAuth) parse(token string) (*adminSession, bool) {
 	if err := json.Unmarshal(payload, &s); err != nil {
 		return nil, false
 	}
-	if s.Epoch == 0 || s.ID == "" || s.User != a.user || s.Epoch != a.currentEpoch() {
+	if s.Epoch == 0 || s.ID == "" || s.CSRF == "" || s.User != a.user || s.Epoch != a.currentEpoch() {
 		return nil, false
 	}
 	if time.Now().Unix() > s.Exp {
@@ -294,7 +302,7 @@ func (a *adminAuth) checkCredentials(user, pass string) bool {
 	if config.IsBcryptHash(a.pass) {
 		pOK = bcrypt.CompareHashAndPassword([]byte(a.pass), []byte(pass)) == nil
 	}
-	return uOK && pOK
+	return a.user != "" && a.pass != "" && uOK && pOK
 }
 
 func adminAttemptKeys(ip, user string) (string, string) {
@@ -339,12 +347,17 @@ func (a *adminAuth) allow(ip string, users ...string) bool {
 	}
 	if len(a.attempts) >= adminMaxAttemptKeys {
 		if _, exists := a.attempts[userKey]; !exists {
-			return false
+			_, adminSuffix := adminAttemptKeys("", a.user)
+			if a.hardLimits || !evictIdleAttempt(a.attempts, adminSuffix) {
+				return false
+			}
 		}
 	}
 	if len(a.ipAttempts) >= adminMaxAttemptKeys {
 		if _, exists := a.ipAttempts[ipKey]; !exists {
-			return false
+			if a.hardLimits || !evictIdleAttempt(a.ipAttempts, "") {
+				return false
+			}
 		}
 	}
 
@@ -371,6 +384,36 @@ func (a *adminAuth) allow(ip string, users ...string) bool {
 	}
 	a.globalCount++
 	a.globalInflight++
+	return true
+}
+
+func evictIdleAttempt(entries map[string]*loginAttempt, protectSuffix string) bool {
+	victim := ""
+	victimPri := 3
+	var victimCount int
+	var victimUntil time.Time
+	for key, attempt := range entries {
+		if attempt.inflight > 0 {
+			continue
+		}
+		pri := 2
+		switch {
+		case attempt.count < adminUserAttemptLimit:
+			pri = 0
+		case protectSuffix == "" || !strings.HasSuffix(key, protectSuffix):
+			pri = 1
+		}
+		if victim == "" || pri < victimPri || (pri == victimPri && (attempt.count < victimCount || (attempt.count == victimCount && attempt.until.Before(victimUntil)))) {
+			victim = key
+			victimPri = pri
+			victimCount = attempt.count
+			victimUntil = attempt.until
+		}
+	}
+	if victim == "" {
+		return false
+	}
+	delete(entries, victim)
 	return true
 }
 
@@ -437,12 +480,16 @@ func (a *adminAuth) failed(ip string, users ...string) {
 	}
 }
 
-func (h *Handlers) hasValidAdminSession(c *gin.Context) bool {
+func (h *Handlers) validAdminSession(c *gin.Context) (*adminSession, bool) {
 	cookie, err := c.Cookie(adminCookieName)
 	if err != nil || cookie == "" {
-		return false
+		return nil, false
 	}
-	_, ok := h.currentAdmin().parse(cookie)
+	return h.currentAdmin().parse(cookie)
+}
+
+func (h *Handlers) hasValidAdminSession(c *gin.Context) bool {
+	_, ok := h.validAdminSession(c)
 	return ok
 }
 
@@ -464,7 +511,7 @@ func (h *Handlers) AdminAuth() gin.HandlerFunc {
 		}
 
 		// CSRF：所有写操作必须携带会话内的 token
-		if c.Request.Method == http.MethodPost {
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions {
 			token := c.PostForm("csrf")
 			if token == "" {
 				token = c.GetHeader("X-CSRF-Token")
@@ -552,8 +599,18 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	pass := c.PostForm("password")
 	next := c.PostForm("next")
 
-	hasSession := h.hasValidAdminSession(c)
-	if !hasSession && !auth.allow(ip, user) {
+	sess, hasSession := h.validAdminSession(c)
+	var reauthLimiter *adminAuth
+	if hasSession {
+		reauthLimiter = auth.reauthLimiter()
+		if !reauthLimiter.allow(sess.ID, sess.User) {
+			_, err := auth.bumpEpoch()
+			h.logger().Warn("后台会话登录验证达到上限，已吊销会话", "operator", sess.User, "session_id", sess.ID, "ip", ip, "err", err)
+			c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("登录尝试过于频繁，请重新登录后重试"))
+			return
+		}
+	} else if !auth.allow(ip, user) {
+		h.logger().Warn("后台登录触发频控限制", "username", user, "ip", ip)
 		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("登录尝试过于频繁，请 10 分钟后再试"))
 		return
 	}
@@ -562,10 +619,17 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 		waitForRequest(c, auth.loginDelay(ip))
 	}
 	if !auth.checkCredentials(user, pass) {
-		if !hasSession {
+		if hasSession {
+			reauthLimiter.failed(sess.ID, sess.User)
+			if reauthLimiter.isExhausted(sess.ID, sess.User) {
+				_, err := auth.bumpEpoch()
+				h.logger().Warn("后台会话登录验证达到上限，已吊销会话", "operator", sess.User, "session_id", sess.ID, "ip", ip, "err", err)
+			}
+		} else {
 			// Attempts are reserved atomically in allow, including concurrent requests.
 			auth.failed(ip, user)
 		}
+		h.logger().Warn("后台登录失败", "username", user, "ip", ip, "has_session", hasSession)
 		errTarget := h.adminURL("/admin/login?err=") + url.QueryEscape("管理员账号或密码错误，请核对后重试")
 		if safeAdminNext(next, h.C().AdminPath()) {
 			errTarget += "&next=" + url.QueryEscape(next)
@@ -573,7 +637,9 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, errTarget)
 		return
 	}
-	if !hasSession {
+	if hasSession {
+		reauthLimiter.succeeded(sess.ID, sess.User)
+	} else {
 		auth.succeeded(ip, user)
 	}
 
@@ -587,6 +653,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 	}
 	c.SetSameSite(http.SameSiteStrictMode)
 	c.SetCookie(adminCookieName, token, int(auth.ttl.Seconds()), h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
+	h.logger().Info("管理员登录成功", "operator", user, "ip", ip)
 
 	if !safeAdminNext(next, h.C().AdminPath()) {
 		next = h.adminURL("/admin")
@@ -599,6 +666,7 @@ func (h *Handlers) logoutAdmin(c *gin.Context, cookiePath string) {
 		c.String(http.StatusInternalServerError, "会话吊销失败，请稍后重试")
 		return
 	}
+	h.logger().Info("管理员退出登录", "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	if cookiePath == "" {
 		cookiePath = h.C().AdminPath()
 	}
