@@ -2,10 +2,12 @@
 
 LitePay 是一个轻量级加密货币支付收银台网关，基于 Go、Gin 与 SQLite 构建，对外提供兼容 BEpusdt 的标准 JSON API。
 
-系统支持将商户的 USD 计价订单转换为 **Binance Pay（币安支付）**、**OKX 站内转账**及 **TON 主网原生 GRAM** 支付，支持的付款币种包括 USDT、USDC 与 GRAM。
+系统支持将商户的 USD 计价订单转换为 **Binance Pay（币安支付）**、**OKX 站内转账**、**Bybit 站内转账**及 **Bitget 站内转账**支付，支持的付款币种包括 USDT 与 USDC。
 
-> [!WARNING]
-> **当前状态**：本项目处于开发阶段，已通过离线与只读 API 自动化验证，尚未执行小额真实资金付款与商城端端到端发货交付的人工验收。验收清单详见 [小额真实付款人工验收清单](docs/acceptance-real-payment.md)。
+> [!NOTE]
+> **当前状态**：系统已在生产环境接入商城（dujiao-next）稳定运行。根据生产服务器实测订单与运行日志：
+> - **已通过生产真实资金闭环验证**：**Binance Pay（USDT 5 笔、USDC 4 笔）** 与 **OKX 站内转账（USDT 3 笔）** 共 12 笔真实订单（金额区间 `0.52`～`3.51` USDT/USDC，覆盖基础整额与 `+0.01` 独占档位递增场景）均在到账后数秒内自动认领核销，商城异步回调 12 笔全部首轮（`attempt=1`）返回 `HTTP 200` 确认交付，零重试、零冲突；同时生产环境已实际验证 Binance 出账流水（`not_incoming_payment`）自动拒认、OKX 无匹配订单流水（`no_match`）保留证据不误领，以及 `dujiao_cancel_sync` 关单同步守护进程双向心跳与 15 笔取消意图同步。
+> - **待执行真实资金付款验证**：新接入的 **Bybit 站内转账**与 **Bitget 站内转账**已在生产环境完成只读 API 凭据接入与后台持续轮询扫描（`scan_cursors` 正常推进无报错），尚未产生真实资金到账订单。验收流程详见 [小额真实付款人工验收清单](docs/acceptance-real-payment.md)。
 
 ---
 
@@ -116,7 +118,7 @@ docker build -t litepay:dev .
 
 ### 真实付款人工验收
 
-自动化模拟与只读探测不能替代真实交易所字段、到账延迟及商城幂等交付验收；上线前请按 [小额真实付款人工验收清单](docs/acceptance-real-payment.md) 完成实测。
+Binance Pay（USDT / USDC）与 OKX 站内转账（USDT）已在生产服务器完成 12 笔真实资金付款与商城端到端回调交付验证；新增收款渠道（如 Bybit、Bitget）或变更收款账户前，请按 [小额真实付款人工验收清单](docs/acceptance-real-payment.md) 完成小额实测。
 
 ### 容器化与生产部署安全规范
 
