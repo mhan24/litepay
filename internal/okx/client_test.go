@@ -118,3 +118,71 @@ func TestTimeSyncFailureLogsTypeOnceAndContinuesPrivateRequests(t *testing.T) {
 		}
 	}
 }
+
+func TestHistorySubMillisecondWindowBoundary(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/public/time":
+			fmt.Fprint(w, `{"code":"0","data":[{"ts":"100000"}]}`)
+		case "/api/v5/account/config":
+			fmt.Fprint(w, `{"code":"0","data":[{"uid":"receiver"}]}`)
+		default:
+			fmt.Fprint(w, `{"code":"0","data":[{"depId":"dep-edge","fromWdId":"wd-edge","ccy":"USDT","amt":"12.34","state":"2","ts":"100000"}]}`)
+		}
+	}))
+	defer srv.Close()
+
+	c := New("k", "s", "p", srv.URL, 100)
+	c.UseTestTransport()
+	start := time.UnixMilli(100000).Add(500 * time.Microsecond)
+	end := time.UnixMilli(101000).Add(750 * time.Microsecond)
+	rows, err := c.History(context.Background(), start, end)
+	if err != nil {
+		t.Fatalf("History failed: %v", err)
+	}
+	if len(rows) != 1 || rows[0].EventID != "dep-edge" {
+		t.Fatalf("expected boundary record at start.UnixMilli(), got %+v", rows)
+	}
+}
+
+func TestTimestampExpiredResyncsAndRetriesOnce(t *testing.T) {
+	var timeCalls atomic.Int32
+	var accountCalls atomic.Int32
+	const syncedTimeMS = int64(1700000500000)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/public/time" {
+			n := timeCalls.Add(1)
+			if n == 1 {
+				http.Error(w, "temporary outage", http.StatusServiceUnavailable)
+				return
+			}
+			fmt.Fprintf(w, `{"code":"0","data":[{"ts":"%d"}]}`, syncedTimeMS)
+			return
+		}
+		if r.URL.Path == "/api/v5/account/config" {
+			n := accountCalls.Add(1)
+			if n == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				fmt.Fprint(w, `{"code":"50102","msg":"Timestamp request expired"}`)
+				return
+			}
+			ts, err := time.Parse("2006-01-02T15:04:05.000Z", r.Header.Get("OK-ACCESS-TIMESTAMP"))
+			if err != nil || ts.UnixMilli() < syncedTimeMS || ts.UnixMilli() > syncedTimeMS+5000 {
+				t.Errorf("unexpected retried timestamp: %q (%v)", r.Header.Get("OK-ACCESS-TIMESTAMP"), err)
+			}
+			fmt.Fprint(w, `{"code":"0","data":[{"uid":"receiver"}]}`)
+		}
+	}))
+	defer srv.Close()
+
+	c := New("k", "s", "p", srv.URL, 100)
+	c.UseTestTransport()
+	uid, err := c.AccountUID(context.Background())
+	if err != nil || uid != "receiver" {
+		t.Fatalf("expected resync recovery on 50102, got uid=%q err=%v", uid, err)
+	}
+	if timeCalls.Load() != 2 || accountCalls.Load() != 2 {
+		t.Fatalf("unexpected call counts: time=%d account=%d", timeCalls.Load(), accountCalls.Load())
+	}
+}

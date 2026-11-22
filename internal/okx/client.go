@@ -3,6 +3,7 @@ package okx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -85,9 +86,11 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 			return nil, err
 		}
 	}
+	startMs := start.UnixMilli()
+	endMs := end.UnixMilli()
 	out := []model.Transaction{}
 	seen := map[string]bool{}
-	after := end.UnixMilli() + 1
+	after := endMs + 1
 	for page := 0; page < 20; page++ {
 		rows, err := c.page(ctx, after)
 		if err != nil {
@@ -95,16 +98,17 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 		}
 		oldest := after
 		for _, t := range rows {
-			if t.OccurredAt.UnixMilli() < oldest {
-				oldest = t.OccurredAt.UnixMilli()
+			ms := t.OccurredAt.UnixMilli()
+			if ms < oldest {
+				oldest = ms
 			}
-			if t.OccurredAt.Before(start) || t.OccurredAt.After(end) || seen[t.EventID] {
+			if ms < startMs || ms > endMs || seen[t.EventID] {
 				continue
 			}
 			seen[t.EventID] = true
 			out = append(out, t)
 		}
-		if len(rows) < c.limit || oldest < start.UnixMilli() {
+		if len(rows) < c.limit || oldest < startMs {
 			return out, nil
 		}
 		next := oldest + 1
@@ -170,9 +174,23 @@ func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, er
 	return out, nil
 }
 func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {
-	if c.apiKey == "" || c.apiSecret == "" || c.passphrase == "" {
+	if strings.TrimSpace(c.apiKey) == "" || strings.TrimSpace(c.apiSecret) == "" || strings.TrimSpace(c.passphrase) == "" {
 		return nil, fmt.Errorf("未配置 OKX API Key / Secret / Passphrase")
 	}
+	for attempt := 0; attempt < 2; attempt++ {
+		data, err := c.getOnce(ctx, path, q)
+		var apiErr *APIError
+		if attempt == 0 && errors.As(err, &apiErr) && apiErr.Code == "50102" {
+			if syncErr := c.syncServerTime(ctx); syncErr == nil {
+				continue
+			}
+		}
+		return data, err
+	}
+	return nil, fmt.Errorf("OKX request failed")
+}
+
+func (c *Client) getOnce(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {
 	c.rateMu.Lock()
 	if delay := time.Until(c.nextRequest); delay > 0 {
 		timer := time.NewTimer(delay)
@@ -209,7 +227,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+requestPath, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("OKX invalid request")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -249,6 +267,7 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	reqStart := time.Now()
 	status, body, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -272,10 +291,10 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 	if err != nil || ms <= 0 {
 		return fmt.Errorf("OKX invalid server timestamp")
 	}
+	midpoint := reqStart.Add(time.Since(reqStart) / 2)
 	server := time.UnixMilli(ms)
-	syncedAt := time.Now()
 	c.clockMu.Lock()
-	c.now = func() time.Time { return server.Add(time.Since(syncedAt)) }
+	c.now = func() time.Time { return server.Add(time.Since(midpoint)) }
 	c.clockMu.Unlock()
 	return nil
 }
