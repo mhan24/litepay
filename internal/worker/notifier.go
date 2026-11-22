@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -126,6 +128,9 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 		req.Header.Set("Content-Type", "application/json")
 		var response []byte
 		status, response, err = n.http.Do(req)
+		if err != nil && status == 0 && ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			return false, tradeID, n.releaseCallback(ctx, *task, err)
+		}
 		if err == nil {
 			ack := strings.TrimSpace(string(response))
 			ok = status >= 200 && status < 300 && (ack == "success" || ack == "ok")
@@ -155,6 +160,17 @@ func (n *Notifier) releaseCallback(ctx context.Context, task model.Callback, cau
 	return cause
 }
 
+func (n *Notifier) deliverSafe(ctx context.Context) (did bool, tradeID string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("回调任务发生异常", "trade_id", tradeID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			did = false
+			err = fmt.Errorf("deliver panic: %v", r)
+		}
+	}()
+	return n.deliver(ctx)
+}
+
 func (n *Notifier) Run(ctx context.Context) {
 	workers := n.cfg.Get().Server.CallbackWorkers
 	if workers <= 0 {
@@ -165,7 +181,7 @@ func (n *Notifier) Run(ctx context.Context) {
 	for range workers {
 		group.Go(func() {
 			for ctx.Err() == nil {
-				did, tradeID, err := n.deliver(ctx)
+				did, tradeID, err := n.deliverSafe(ctx)
 				if did && err == nil {
 					continue
 				}

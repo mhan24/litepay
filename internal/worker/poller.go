@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -145,6 +147,9 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	}
 	historyParent := ctx
 	defer func() {
+		if historyParent.Err() != nil {
+			return
+		}
 		if err := p.scanHistorical(historyParent, cfg, provider); err != nil && historyParent.Err() == nil {
 			slog.Warn("管理员历史补扫未完成", "provider", provider)
 		}
@@ -177,6 +182,9 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	rechecked := err == nil
 	if rechecked {
 		pendingErr = p.recheckPending(ctx, cfg, provider, cli, coveredFrom, end)
+	}
+	if parentErr := historyParent.Err(); parentErr != nil && (errors.Is(err, parentErr) || errors.Is(pendingErr, parentErr)) {
+		return parentErr
 	}
 	// Use the parent deadline-independent write to retain a safe diagnostic even after API timeout.
 	saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
@@ -304,8 +312,8 @@ func (p *Poller) Run(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
-				if err := p.Scan(ctx, provider); err != nil && ctx.Err() == nil {
-					slog.Warn("收款扫描未完成", "provider", provider)
+				if err := p.scanOnceSafe(ctx, provider); err != nil && ctx.Err() == nil {
+					slog.Warn("收款扫描未完成", "provider", provider, "error", err)
 				}
 				interval := max(p.cfg.Get().ProviderInterval(provider), 1)
 				timer := time.NewTimer(time.Duration(interval) * time.Second)
@@ -326,17 +334,37 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if p.cfg.Get().Server.CancelSyncRequired {
-				ready, err := p.st.RecoveryReady(ctx)
-				if err != nil || !ready {
-					continue
-				}
-			}
-			if err := p.st.Expire(ctx, p.cfg.Get().Order.SlotGraceSeconds); err != nil && ctx.Err() == nil {
-				slog.Error("订单过期状态写入失败")
+			if err := p.expireOnceSafe(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("订单过期状态写入失败", "error", err)
 			}
 		}
 	}
+}
+
+func (p *Poller) scanOnceSafe(ctx context.Context, provider string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("收款扫描发生异常", "provider", provider, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			err = fmt.Errorf("scan panic: %v", r)
+		}
+	}()
+	return p.Scan(ctx, provider)
+}
+
+func (p *Poller) expireOnceSafe(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("订单过期检查发生异常", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			err = fmt.Errorf("expire panic: %v", r)
+		}
+	}()
+	if p.cfg.Get().Server.CancelSyncRequired {
+		ready, err := p.st.RecoveryReady(ctx)
+		if err != nil || !ready {
+			return err
+		}
+	}
+	return p.st.Expire(ctx, p.cfg.Get().Order.SlotGraceSeconds)
 }
 
 // scanBounds never skips a previously unscanned gap, including time after cancellation.
