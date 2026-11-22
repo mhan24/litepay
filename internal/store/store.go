@@ -900,3 +900,47 @@ func (s *Store) ScanResult(ctx context.Context, provider string, end time.Time, 
 		return db.Model(&model.ScanCursor{}).Where("provider = ?", provider).Updates(updates).Error
 	})
 }
+
+// ProviderStat records completed collection outcomes per provider, excluding expired and canceled orders.
+type ProviderStat struct {
+	Paid   int64
+	Failed int64
+}
+
+// ProviderSuccessStats aggregates paid orders and unconfirmed manual-review tasks per provider.
+func (s *Store) ProviderSuccessStats(ctx context.Context) (map[string]ProviderStat, error) {
+	out := make(map[string]ProviderStat)
+	var paidRows []struct {
+		Provider string
+		Count    int64
+	}
+	if err := s.db.WithContext(ctx).Model(&model.Order{}).
+		Select("provider, count(*) as count").
+		Where("provider <> '' AND status = ?", model.Paid).
+		Group("provider").
+		Scan(&paidRows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range paidRows {
+		st := out[r.Provider]
+		st.Paid = r.Count
+		out[r.Provider] = st
+	}
+	var failRows []struct {
+		Provider string
+		Count    int64
+	}
+	if err := s.db.WithContext(ctx).Model(&model.ConfirmationTask{}).
+		Select("provider, count(*) as count").
+		Where("provider <> '' AND order_id IS NOT NULL AND state = ?", "manual_review").
+		Group("provider").
+		Scan(&failRows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range failRows {
+		st := out[r.Provider]
+		st.Failed = r.Count
+		out[r.Provider] = st
+	}
+	return out, nil
+}

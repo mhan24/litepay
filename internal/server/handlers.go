@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -162,14 +163,14 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 	} else if needsCurrency && provider == config.ProviderBybit {
 		providerSubtitle = "选择 Bybit 收款币种"
 	} else if provider == config.ProviderBinance {
-		providerSubtitle = "UID 站内转账 · 自动确认到账"
+		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
 	} else if provider == config.ProviderOKX {
-		providerSubtitle = "UID 站内转账 · 自动确认到账"
+		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
 	} else if provider == config.ProviderBybit {
-		providerSubtitle = "UID 站内转账 · 自动确认到账"
+		providerSubtitle = "UID 站内转账（0 手续费）· 按精确金额自动确认"
 	}
 	if provider == config.ProviderTON {
-		providerSubtitle = "TON 主网链上转账 · 按精确金额确认"
+		providerSubtitle = "TON 主网链上转账 · 按精确金额自动确认"
 	}
 	hasPayee := uid != ""
 	canReselect := cfg.BEpusdt.Reselect && o.Reselect &&
@@ -177,8 +178,18 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		!reselectRequested && cfg.ProviderEnabled(provider)
 
 	options := providerOptions(cfg, o)
+	stats, _ := h.st.ProviderSuccessStats(c.Request.Context())
 	for i := range options {
 		options[i].Enabled = options[i].Enabled && h.providerAccepting(c, cfg, options[i].Key)
+		stat := stats[options[i].Key]
+		total := stat.Paid + stat.Failed
+		if total > 0 {
+			pct := math.Round(float64(stat.Paid) * 100 / float64(total))
+			options[i].SuccessLabel = fmt.Sprintf("成功率 %.0f%%", pct)
+			options[i].HasSuccessRate = true
+		} else {
+			options[i].SuccessLabel = "等待第一笔测试"
+		}
 	}
 
 	transferURL := ""
@@ -224,12 +235,14 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 }
 
 type providerOption struct {
-	Key      string
-	Name     string
-	Subtitle string
-	Logo     string
-	Enabled  bool
-	Selected bool
+	Key            string
+	Name           string
+	Subtitle       string
+	Logo           string
+	Enabled        bool
+	Selected       bool
+	SuccessLabel   string
+	HasSuccessRate bool
 }
 
 type currencyOption struct {
@@ -239,27 +252,34 @@ type currencyOption struct {
 	Selected bool
 }
 
+func internalTransferSubtitle(currencies []string) string {
+	if len(currencies) == 0 {
+		return "UID 站内转账（0 手续费）"
+	}
+	return "UID 站内转账（0 手续费）· " + strings.Join(currencies, " / ")
+}
+
 func providerOptions(cfg *config.Config, o *model.Order) []providerOption {
 	return []providerOption{
 		{
 			Key: config.ProviderBinance, Name: "Binance", Logo: "/assets/brand/binance.svg",
-			Subtitle: "UID 站内转账 · " + strings.Join(cfg.ProviderCurrencies(config.ProviderBinance), " / "),
+			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBinance)),
 			Enabled:  cfg.BinanceEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBinance)...),
 			Selected: strings.EqualFold(o.Provider, config.ProviderBinance),
 		},
 		{
 			Key: config.ProviderOKX, Name: "OKX", Logo: "/assets/brand/okx.svg",
-			Subtitle: "UID 站内转账 · 按精确金额自动确认",
+			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderOKX)),
 			Enabled:  cfg.OKXEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderOKX)...),
 			Selected: strings.EqualFold(o.Provider, config.ProviderOKX),
 		},
 		{
 			Key: config.ProviderBybit, Name: "Bybit", Logo: "/assets/brand/bybit.svg",
-			Subtitle: "UID 站内转账 · 按精确金额自动确认",
+			Subtitle: internalTransferSubtitle(cfg.ProviderCurrencies(config.ProviderBybit)),
 			Enabled:  cfg.BybitEnabled() && orderCurrencyAllowed(cfg, o, cfg.ProviderCurrencies(config.ProviderBybit)...),
 			Selected: strings.EqualFold(o.Provider, config.ProviderBybit),
 		},
-		{Key: config.ProviderTON, Name: "TON / GRAM", Subtitle: "主网转账 · 实时 USD 报价", Logo: "/assets/brand/gram.svg", Enabled: cfg.TONEnabled() && orderCurrencyAllowed(cfg, o, "GRAM"), Selected: o.Provider == config.ProviderTON},
+		{Key: config.ProviderTON, Name: "TON / GRAM", Subtitle: "TON 主网转账 · GRAM · 实时 USD 报价", Logo: "/assets/brand/gram.svg", Enabled: cfg.TONEnabled() && orderCurrencyAllowed(cfg, o, "GRAM"), Selected: o.Provider == config.ProviderTON},
 	}
 }
 
