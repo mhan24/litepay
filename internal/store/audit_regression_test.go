@@ -362,3 +362,41 @@ func TestStoreValidationBoundaryGuardsAndForeignTimezones(t *testing.T) {
 		t.Fatal("accepted zero-ID historical scan failure")
 	}
 }
+
+func TestReconcilePaymentRejectsOutOfRangeAttemptAndCancellationReviewedTx(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+
+	// Case 1: attempt outside MallCompatible range must be rejected by ReconcilePayment.
+	o1 := readyOrder(t, s, "reconcile-out-of-range")
+	if err := s.DB().Model(o1).Updates(map[string]any{"status": model.Expired, "pay_units": amount.MaxMall}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().Model(&model.PaymentAttempt{}).Where("order_id = ?", o1.ID).Update("units", amount.MaxMall).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev1 := model.Transaction{Provider: o1.Provider, EventID: "out-of-range-ev", Reference: "ref-oor", Receiver: o1.Receiver, Currency: o1.Currency, Units: amount.MaxMall, OccurredAt: time.Now(), State: model.Confirmed}
+	if _, err := s.Process(ctx, ev1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcilePayment(ctx, o1.TradeNo, ev1.Provider, ev1.EventID, "operator", "manual check"); err == nil {
+		t.Fatal("ReconcilePayment accepted out-of-range attempt units")
+	}
+
+	// Case 2: transaction already bound to a CancellationReview cannot be reconciled to an order.
+	o2 := readyOrder(t, s, "reconcile-canceled-target")
+	if err := s.Cancel(ctx, o2.TradeNo); err != nil {
+		t.Fatal(err)
+	}
+	ev2 := evidence(o2, "cr-bound-ev")
+	if _, err := s.Process(ctx, ev2, ""); err != nil {
+		t.Fatal(err)
+	}
+	o3 := readyOrder(t, s, "reconcile-other-order")
+	if err := s.DB().Model(o3).Update("status", model.Expired).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcilePayment(ctx, o3.TradeNo, ev2.Provider, ev2.EventID, "operator", "cross-order check"); err == nil {
+		t.Fatal("ReconcilePayment accepted transaction bound to a cancellation review")
+	}
+}

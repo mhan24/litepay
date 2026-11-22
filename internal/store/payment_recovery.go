@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"gorm.io/gorm"
+	"litepay/internal/amount"
 	"litepay/internal/model"
 )
 
@@ -35,6 +36,13 @@ func (s *Store) ReconcilePayment(ctx context.Context, tradeNo, provider, eventID
 		if t.State != model.Confirmed || t.OrderID != nil || t.Units <= 0 || t.Receiver == "" || !validCurrency {
 			return errors.New("必须选择未认领、已确认且满足最终性的到账证据")
 		}
+		var reviewed int64
+		if err := db.Model(&model.CancellationReview{}).Where("provider = ? AND event_id = ?", t.Provider, t.EventID).Count(&reviewed).Error; err != nil {
+			return err
+		}
+		if reviewed > 0 {
+			return errors.New("该笔到账已进入取消到账核对流程，禁止补单")
+		}
 		var candidates []model.PaymentAttempt
 		if err := db.Where("provider = ? AND receiver = ? AND currency = ? AND units = ? AND selected_at <= ? AND expires_at >= ?", t.Provider, t.Receiver, t.Currency, t.Units, t.OccurredAt, t.OccurredAt).Order("id").Find(&candidates).Error; err != nil {
 			return err
@@ -48,6 +56,9 @@ func (s *Store) ReconcilePayment(ctx context.Context, tradeNo, provider, eventID
 				return errors.New("到账归属存在歧义")
 			}
 			a = candidate
+		}
+		if !amount.MallCompatible(a.Units) {
+			return errors.New("历史付款金额超出可核销范围")
 		}
 		// Duplicate/conflicting references can never be cleared by manual recovery.
 		if t.Reference != "" {
