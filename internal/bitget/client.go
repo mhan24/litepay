@@ -74,7 +74,7 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	body, err := c.get(ctx, "/api/v3/account/info", nil)
 	if err != nil {
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.HTTPStatus == http.StatusNotFound {
+		if errors.As(err, &apiErr) && (apiErr.HTTPStatus == http.StatusNotFound || apiErr.Code == "40085") {
 			body, err = c.get(ctx, "/api/v2/spot/account/info", nil)
 		}
 		if err != nil {
@@ -200,7 +200,8 @@ func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cur
 	var rows []rawRow
 	var nextCursor string
 	trimmed := strings.TrimSpace(string(body))
-	if strings.HasPrefix(trimmed, "{") {
+	isObject := strings.HasPrefix(trimmed, "{")
+	if isObject {
 		var container struct {
 			List   *json.RawMessage `json:"list"`
 			Cursor flexString       `json:"cursor"`
@@ -292,7 +293,7 @@ func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cur
 		}
 		out = append(out, t)
 	}
-	if !useV3 && nextCursor == "" && len(rows) >= c.limit {
+	if !isObject && nextCursor == "" && len(rows) >= c.limit {
 		nextCursor = lastID
 	}
 	return out, len(rows), nextCursor, nil
@@ -302,6 +303,20 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 	if strings.TrimSpace(c.apiKey) == "" || strings.TrimSpace(c.apiSecret) == "" || strings.TrimSpace(c.passphrase) == "" {
 		return nil, fmt.Errorf("未配置 Bitget API Key / Secret / Passphrase")
 	}
+	for attempt := 0; attempt < 2; attempt++ {
+		data, err := c.getOnce(ctx, path, q)
+		var apiErr *APIError
+		if attempt == 0 && errors.As(err, &apiErr) && (apiErr.Code == "40005" || apiErr.Code == "40008") {
+			if syncErr := c.syncServerTime(ctx); syncErr == nil {
+				continue
+			}
+		}
+		return data, err
+	}
+	return nil, fmt.Errorf("Bitget request failed")
+}
+
+func (c *Client) getOnce(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {
 	c.rateMu.Lock()
 	if delay := time.Until(c.nextRequest); delay > 0 {
 		timer := time.NewTimer(delay)
@@ -339,7 +354,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+requestPath, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Bitget invalid request")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -380,6 +395,7 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		reqStart := time.Now()
 		status, body, err := c.http.Do(req)
 		if err != nil || status != http.StatusOK {
 			continue
@@ -401,10 +417,10 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 		if err != nil || ms <= 0 {
 			continue
 		}
+		midpoint := reqStart.Add(time.Since(reqStart) / 2)
 		server := time.UnixMilli(ms)
-		syncedAt := time.Now()
 		c.clockMu.Lock()
-		c.now = func() time.Time { return server.Add(time.Since(syncedAt)) }
+		c.now = func() time.Time { return server.Add(time.Since(midpoint)) }
 		c.clockMu.Unlock()
 		return nil
 	}
