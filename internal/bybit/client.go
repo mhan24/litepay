@@ -3,6 +3,7 @@ package bybit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -83,7 +84,10 @@ func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	if json.Unmarshal(body, &payload) != nil || strings.TrimSpace(string(payload.UserID)) == "" {
 		return "", fmt.Errorf("Bybit missing account UID")
 	}
-	if payload.IsMaster != nil && !*payload.IsMaster {
+	if payload.IsMaster == nil {
+		return "", fmt.Errorf("Bybit missing account master status")
+	}
+	if !*payload.IsMaster {
 		return "", fmt.Errorf("Bybit API Key 必须属于主账号（外部站内转账无法直接转入子账号）")
 	}
 	uid := strings.TrimSpace(string(payload.UserID))
@@ -229,6 +233,20 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 	if strings.TrimSpace(c.apiKey) == "" || strings.TrimSpace(c.apiSecret) == "" {
 		return nil, fmt.Errorf("未配置 Bybit API Key / Secret")
 	}
+	for attempt := 0; attempt < 2; attempt++ {
+		data, err := c.getOnce(ctx, path, q)
+		var apiErr *APIError
+		if attempt == 0 && errors.As(err, &apiErr) && apiErr.Code == "10002" {
+			if syncErr := c.syncServerTime(ctx); syncErr == nil {
+				continue
+			}
+		}
+		return data, err
+	}
+	return nil, fmt.Errorf("Bybit request failed")
+}
+
+func (c *Client) getOnce(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {
 	c.rateMu.Lock()
 	if delay := time.Until(c.nextRequest); delay > 0 {
 		timer := time.NewTimer(delay)
@@ -268,7 +286,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMe
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+requestPath, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Bybit invalid request")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-BAPI-API-KEY", c.apiKey)
@@ -307,6 +325,7 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	reqStart := time.Now()
 	status, body, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -339,10 +358,10 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 	if ms <= 0 {
 		return fmt.Errorf("Bybit invalid server timestamp")
 	}
+	midpoint := reqStart.Add(time.Since(reqStart) / 2)
 	server := time.UnixMilli(ms)
-	syncedAt := time.Now()
 	c.clockMu.Lock()
-	c.now = func() time.Time { return server.Add(time.Since(syncedAt)) }
+	c.now = func() time.Time { return server.Add(time.Since(midpoint)) }
 	c.clockMu.Unlock()
 	return nil
 }

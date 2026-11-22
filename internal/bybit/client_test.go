@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,6 +194,69 @@ func TestHistoryRejectsNullRowsAndCursorLoop(t *testing.T) {
 		cli.UseTestTransport()
 		if _, err := cli.History(context.Background(), start, end); err == nil {
 			t.Fatal("expected error for repeated cursor")
+		}
+	})
+}
+
+func TestAccountUIDRequiresIsMasterAndResyncsOn10002(t *testing.T) {
+	t.Run("missing_is_master", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v5/market/time" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"retCode": 0, "time": time.Now().UnixMilli(), "result": map[string]any{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"retCode": 0,
+				"retMsg":  "OK",
+				"result":  map[string]any{"userID": 999999},
+			})
+		}))
+		defer srv.Close()
+
+		cli := New("k", "s", srv.URL, 5000, 50)
+		cli.UseTestTransport()
+		if _, err := cli.AccountUID(context.Background()); err == nil {
+			t.Fatal("expected error when isMaster is missing")
+		}
+	})
+
+	t.Run("resync_on_10002", func(t *testing.T) {
+		var timeCalls atomic.Int32
+		var apiCalls atomic.Int32
+		const syncedTimeMS = int64(1700000700000)
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v5/market/time" {
+				if timeCalls.Add(1) == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"retCode": 0, "time": syncedTimeMS, "result": map[string]any{}})
+				return
+			}
+			if apiCalls.Add(1) == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"retCode": 10002, "retMsg": "timestamp out of window"})
+				return
+			}
+			ms, err := strconv.ParseInt(r.Header.Get("X-BAPI-TIMESTAMP"), 10, 64)
+			if err != nil || ms < syncedTimeMS || ms > syncedTimeMS+5000 {
+				t.Errorf("unexpected retried X-BAPI-TIMESTAMP: %q (%v)", r.Header.Get("X-BAPI-TIMESTAMP"), err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"retCode": 0,
+				"result":  map[string]any{"userID": 88990011, "isMaster": true},
+			})
+		}))
+		defer srv.Close()
+
+		cli := New("k", "s", srv.URL, 5000, 50)
+		cli.UseTestTransport()
+		uid, err := cli.AccountUID(context.Background())
+		if err != nil || uid != "88990011" {
+			t.Fatalf("expected resync recovery on 10002, got uid=%q err=%v", uid, err)
+		}
+		if timeCalls.Load() != 2 || apiCalls.Load() != 2 {
+			t.Fatalf("unexpected call counts: time=%d api=%d", timeCalls.Load(), apiCalls.Load())
 		}
 	})
 }
