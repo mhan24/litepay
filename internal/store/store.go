@@ -577,6 +577,9 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 		}
 		t.OrderID = nil
 		t.AttemptID = nil
+		if e == nil && t.State == model.Ambiguous && old.AttemptID != nil {
+			t.AttemptID = old.AttemptID
+		}
 		if e = db.Save(&t).Error; e != nil {
 			return e
 		}
@@ -586,7 +589,11 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 				return err
 			}
 		} else {
-			if err := db.Model(&model.ConfirmationTask{}).Where("provider = ? AND event_id = ? AND state = ?", t.Provider, t.EventID, "pending").Update("state", "resolved").Error; err != nil {
+			nextState := any("resolved")
+			if t.State == model.Confirmed || t.State == model.Ambiguous {
+				nextState = gorm.Expr("CASE WHEN deadline <= ? THEN 'manual_review' ELSE 'resolved' END", time.Now())
+			}
+			if err := db.Model(&model.ConfirmationTask{}).Where("provider = ? AND event_id = ? AND state = ?", t.Provider, t.EventID, "pending").Update("state", nextState).Error; err != nil {
 				return err
 			}
 		}

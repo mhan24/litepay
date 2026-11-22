@@ -400,3 +400,74 @@ func TestReconcilePaymentRejectsOutOfRangeAttemptAndCancellationReviewedTx(t *te
 		t.Fatal("ReconcilePayment accepted transaction bound to a cancellation review")
 	}
 }
+
+func TestLateConfirmationMovesTaskToManualReviewInsteadOfResolved(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	o := readyOrder(t, s, "late-confirm-state")
+	tx := evidence(o, "late-confirm-ev")
+	tx.State = model.Unconfirmed
+	if res, err := s.Process(ctx, tx, ""); err != nil || res != "pending" {
+		t.Fatalf("unexpected pending result: %q err=%v", res, err)
+	}
+	if err := s.DB().Model(&model.ConfirmationTask{}).Where("provider = ? AND event_id = ?", tx.Provider, tx.EventID).Update("deadline", time.Now().Add(-time.Second)).Error; err != nil {
+		t.Fatal(err)
+	}
+	tx.State = model.Confirmed
+	res, err := s.Process(ctx, tx, "")
+	if err != nil || res != "confirmation_review_required" {
+		t.Fatalf("expected confirmation_review_required, got %q err=%v", res, err)
+	}
+	var task model.ConfirmationTask
+	if err := s.DB().First(&task, "provider = ? AND event_id = ?", tx.Provider, tx.EventID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if task.State != "manual_review" {
+		t.Fatalf("expired confirmation task marked %q instead of manual_review", task.State)
+	}
+	stats, err := s.ProviderSuccessStats(ctx)
+	if err != nil || stats["binance"].Failed != 1 {
+		t.Fatalf("expected Failed=1 in provider stats, got %+v err=%v", stats, err)
+	}
+}
+
+func TestAmbiguousReplayOfAdditionalPaymentPreservesAttemptLinkForCancellationReview(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	o := readyOrder(t, s, "ambig-additional")
+	first := evidence(o, "first-claim")
+	if res, err := s.Process(ctx, first, ""); err != nil || res != "paid" {
+		t.Fatalf("first claim failed: %q err=%v", res, err)
+	}
+	extra := evidence(o, "extra-deposit")
+	if res, err := s.Process(ctx, extra, ""); err != nil || res != "additional_payment" {
+		t.Fatalf("expected additional_payment, got %q err=%v", res, err)
+	}
+	// Replay extra deposit with conflicting units -> becomes ambiguous, must preserve attempt_id.
+	conflict := extra
+	conflict.Units++
+	if res, err := s.Process(ctx, conflict, ""); err != nil || res != model.Ambiguous {
+		t.Fatalf("expected ambiguous, got %q err=%v", res, err)
+	}
+	var stored model.Transaction
+	if err := s.DB().First(&stored, "provider = ? AND event_id = ?", extra.Provider, extra.EventID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.AttemptID == nil || stored.State != model.Ambiguous {
+		t.Fatalf("ambiguous additional payment lost attempt_id: %+v", stored)
+	}
+	if _, err := s.CancelReference(ctx, o.TradeNo, o.OutTradeNo); err == nil {
+		t.Fatal("expected paid conflict error")
+	}
+	if err := s.RecordCancellationRefund(ctx, o.TradeNo, first.Provider, first.EventID, "operator", "refund-1", "refunded first deposit"); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := s.CancellationReviewSummary(ctx, o.ID)
+	if err != nil || summary.Uncovered != 1 || summary.Current() {
+		t.Fatalf("ambiguous extra receipt missing from uncovered cancellation review: %+v err=%v", summary, err)
+	}
+	queue, err := s.CancellationReviewQueue(ctx)
+	if err != nil || len(queue) != 1 || queue[0].EventID != extra.EventID {
+		t.Fatalf("expected ambiguous extra receipt in queue, got %+v err=%v", queue, err)
+	}
+}
