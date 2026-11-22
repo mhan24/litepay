@@ -205,10 +205,11 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 // 预算返回 incomplete。这里减半窗口重试，成功后游标只推进到本次真正读完的位置；被跳过的
 // 后半段留在游标之后，下一轮从该位置继续扫，不丢记录。
 func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provider string, cli source, end time.Time) (time.Time, time.Time, error) {
-	start, end, err := p.scanBounds(ctx, cfg, provider, end)
+	start, end, scannedUntil, err := p.scanBounds(ctx, cfg, provider, end)
 	if err != nil {
 		return start, end, err
 	}
+	origEnd := end
 	for {
 		rows, err := cli.History(ctx, start, end)
 		if err == nil {
@@ -220,10 +221,24 @@ func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provid
 			}
 			return start, end, nil
 		}
-		if !scanOverflow(err) || end.Sub(start) <= time.Second {
+		if !scanOverflow(err) {
 			return start, end, err
 		}
-		end = start.Add(end.Sub(start) / 2)
+		if end.Sub(start) <= time.Second {
+			if !scannedUntil.IsZero() && start.Before(scannedUntil) && origEnd.After(scannedUntil) {
+				start = scannedUntil
+				end = origEnd
+				continue
+			}
+			return start, end, err
+		}
+		nextEnd := start.Add(end.Sub(start) / 2)
+		if !scannedUntil.IsZero() && start.Before(scannedUntil) && !nextEnd.After(scannedUntil) && origEnd.After(scannedUntil) {
+			start = scannedUntil
+			end = origEnd
+			continue
+		}
+		end = nextEnd
 	}
 }
 
@@ -325,10 +340,10 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 // scanBounds never skips a previously unscanned gap, including time after cancellation.
-func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider string, end time.Time) (time.Time, time.Time, error) {
+func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider string, end time.Time) (time.Time, time.Time, time.Time, error) {
 	cursor, err := p.st.Cursor(ctx, provider)
 	if err != nil {
-		return end, end, err
+		return end, end, time.Time{}, err
 	}
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	first := cursor.ScannedUntil.IsZero()
@@ -341,7 +356,7 @@ func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider st
 	var earliest model.PaymentAttempt
 	e := p.st.DB().WithContext(ctx).Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ?", model.Ready, provider).Order("a.selected_at").First(&earliest).Error
 	if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
-		return end, end, e
+		return end, end, cursor.ScannedUntil, e
 	}
 	if e == nil {
 		floor := earliest.SelectedAt.Add(-lookback)
@@ -352,10 +367,14 @@ func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider st
 	if start.After(end) {
 		start = end.Add(-lookback)
 	}
-	if end.Sub(start) > time.Hour {
-		end = start.Add(time.Hour)
+	if first || cursor.ScannedUntil.After(end) {
+		if end.Sub(start) > time.Hour {
+			end = start.Add(time.Hour)
+		}
+	} else if end.Sub(cursor.ScannedUntil) > time.Hour {
+		end = cursor.ScannedUntil.Add(time.Hour)
 	}
-	return start, end, nil
+	return start, end, cursor.ScannedUntil, nil
 }
 
 func (p *Poller) BinanceUsage() binance.Usage {

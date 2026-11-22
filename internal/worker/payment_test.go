@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"litepay/internal/binance"
 	"litepay/internal/config"
 	"litepay/internal/httpx"
 	"litepay/internal/model"
@@ -582,5 +583,116 @@ func TestPendingRecheckFailureIsRecorded(t *testing.T) {
 	}
 	if o, _ := st.GetByTradeNo(ctx, "d"); o.Status != model.Paid {
 		t.Fatal("deposit was not settled after the recheck recovered", o.Status)
+	}
+}
+
+func TestScanAdvancesCursorWithMaxLookbackBuffer(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Binance.LookbackBuffer = 60
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	prev := time.Now().Add(-3 * time.Hour)
+	if err = st.ScanResult(ctx, "binance", prev, nil); err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture{}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: f, uid: "receiver"}
+
+	if err = p.Scan(ctx, "binance"); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := st.Cursor(ctx, "binance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cursor.ScannedUntil.After(prev) {
+		t.Fatalf("cursor livelocked at %v with LookbackBuffer=60", cursor.ScannedUntil)
+	}
+}
+
+type overlapOverflowSource struct {
+	denseBefore time.Time
+	windows     [][2]time.Time
+	rows        []model.Transaction
+}
+
+func (s *overlapOverflowSource) AccountUID(context.Context) (string, error) { return "receiver", nil }
+func (s *overlapOverflowSource) History(_ context.Context, start, end time.Time) ([]model.Transaction, error) {
+	s.windows = append(s.windows, [2]time.Time{start, end})
+	if start.Before(s.denseBefore) {
+		return nil, &binance.APIError{Kind: binance.ErrorIncomplete}
+	}
+	var out []model.Transaction
+	for _, r := range s.rows {
+		if !r.OccurredAt.Before(start) && !r.OccurredAt.After(end) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func TestScanOverflowInLookbackWindowStillAdvancesCursor(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Binance.LookbackBuffer = 10
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	prev := time.Now().Add(-20 * time.Second)
+	if err = st.ScanResult(ctx, "binance", prev, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.Create(ctx, model.Order{TradeNo: "overflow-new", OutTradeNo: "overflow-new", OriginUnits: 10000000, NotifyURL: "https://merchant.example/callback", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Select(ctx, "overflow-new", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.DB().Model(o).Update("selected_at", prev).Error; err != nil {
+		t.Fatal(err)
+	}
+	syncAttemptFixture(t, st)
+	payment := model.Transaction{Provider: "binance", EventID: "after-dense", Reference: "after-dense", Receiver: "receiver", Currency: "USDT", Units: o.PayUnits, OccurredAt: prev.Add(2 * time.Second), State: model.Confirmed}
+	src := &overlapOverflowSource{denseBefore: prev, rows: []model.Transaction{payment}}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: src, uid: "receiver"}
+
+	if err = p.Scan(ctx, "binance"); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := st.Cursor(ctx, "binance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cursor.ScannedUntil.After(prev) {
+		t.Fatalf("cursor failed to advance past dense overlap: prev=%v got=%v", prev, cursor.ScannedUntil)
+	}
+	fresh, err := st.GetByTradeNo(ctx, o.TradeNo)
+	if err != nil || fresh.Status != model.Paid {
+		t.Fatalf("order after dense overlap not paid: status=%v err=%v", fresh.Status, err)
 	}
 }
