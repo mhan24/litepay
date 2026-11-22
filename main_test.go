@@ -75,3 +75,30 @@ func TestRotateMasterKeyCommandExitsAfterAtomicRotation(t *testing.T) {
 		t.Fatal("old key still works after CLI rotation")
 	}
 }
+
+func TestRotateAndRecoverFlagsAreMutuallyExclusive(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "litepay.db")
+	oldFile := filepath.Join(dir, "old.key")
+	if err := os.WriteFile(oldFile, []byte(strings.Repeat("83", 32)), 0400); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("config.production.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configText := strings.ReplaceAll(string(raw), `base_url: ""`, `base_url: "https://pay.example.com"`)
+	configText = strings.ReplaceAll(configText, `notify_hosts: []`, `notify_hosts: ["shop.example.com"]`)
+	configText = strings.ReplaceAll(configText, `"/app/data/litepay.db"`, `"`+dbPath+`"`)
+	configFile := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configFile, []byte(configText), 0600); err != nil {
+		t.Fatal(err)
+	}
+	previousFlags, previousArgs := flag.CommandLine, os.Args
+	t.Cleanup(func() { flag.CommandLine, os.Args = previousFlags, previousArgs })
+	flag.CommandLine = flag.NewFlagSet("litepay", flag.ContinueOnError)
+	os.Args = []string{"litepay", "-config", configFile, "-rotate-master-key-from", oldFile, "-recover-reason", "manual copy"}
+	if err := run(); err == nil || !strings.Contains(err.Error(), "不能同时使用") {
+		t.Fatalf("expected mutually exclusive flag error, got: %v", err)
+	}
+}

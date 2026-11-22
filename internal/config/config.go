@@ -345,6 +345,7 @@ func (c *Config) normalize() error {
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") {
 		return fmt.Errorf("server.base_url 必须是无路径、查询参数和用户信息的 HTTP(S) 站点地址")
 	}
+	c.Server.BaseURL = base.Scheme + "://" + base.Host
 	if c.Server.Production && (base.Scheme != "https" || len(c.Server.NotifyHosts) == 0) {
 		return fmt.Errorf("production 模式要求 HTTPS base_url 和非空 notify_hosts")
 	}
@@ -725,7 +726,7 @@ func (c *Config) ValidateNotifyURL(raw string) error {
 	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("notify_url 必须是有效的商户回调地址")
 	}
-	if c.Server.Production || strings.HasPrefix(c.Server.BaseURL, "https://") {
+	if c.Server.Production || strings.HasPrefix(strings.ToLower(c.Server.BaseURL), "https://") {
 		if u.Scheme != "https" || u.Port() != "" && u.Port() != "443" {
 			return fmt.Errorf("生产回调必须使用 HTTPS 标准端口")
 		}

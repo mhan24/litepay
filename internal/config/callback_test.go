@@ -51,4 +51,22 @@ func TestExplicitProductionModeCannotBeDisabledByHTTPBaseURL(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatal("explicit local development failed", err)
 	}
+
+	// Uppercase HTTPS scheme is normalized to lowercase so prefix checks for HSTS/Secure/callbacks cannot be bypassed.
+	c = Default()
+	c.Server.Production = true
+	c.Server.BaseURL = "HTTPS://pay.example/"
+	c.Server.NotifyHosts = []string{"shop.example"}
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.BaseURL != "https://pay.example" {
+		t.Fatalf("expected normalized lowercase scheme, got %q", c.Server.BaseURL)
+	}
+	c.Server.Production = false
+	c.Server.BaseURL = "HTTPS://pay.example"
+	c.Server.NotifyHosts = nil
+	if err := c.ValidateNotifyURL("http://shop.example/notify"); err == nil {
+		t.Fatal("uppercase HTTPS base_url bypassed HTTPS callback requirement")
+	}
 }

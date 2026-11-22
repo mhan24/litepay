@@ -53,6 +53,9 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+	if strings.TrimSpace(*rotateFrom) != "" && strings.TrimSpace(*recoverReason) != "" {
+		return errors.New("-rotate-master-key-from 与 -recover-reason 不能同时使用")
+	}
 	if strings.TrimSpace(*rotateFrom) != "" {
 		oldKey, err := store.LoadMasterKeyFromFile(strings.TrimSpace(*rotateFrom), cfg.Server.Production)
 		if err != nil {
