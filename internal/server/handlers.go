@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"litepay/internal/amount"
 	"litepay/internal/config"
@@ -361,10 +363,14 @@ func currencyAllowedByLimit(limit string, currency string) bool {
 func (h *Handlers) CashierPage(c *gin.Context) {
 	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Param("trade_no"))
 	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			h.renderError(c, 503, "收款服务暂不可用", "暂时无法读取订单状态，请稍后刷新页面重试。")
+			return
+		}
 		h.renderError(c, 404, "未找到订单", "该订单不存在或链接有误，请返回商户页面核对后重试。")
 		return
 	}
-	if o.Status == model.Paid || o.Status == model.Expired || o.Status == model.Canceled || time.Now().After(o.ExpiresAt) {
+	if o.Status == model.Paid || o.Status == model.Expired || o.Status == model.Canceled || !time.Now().Before(o.ExpiresAt) {
 		h.renderResult(c, o)
 		return
 	}
@@ -385,7 +391,15 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 		provider := strings.ToLower(strings.TrimSpace(c.PostForm("provider")))
 		currency := strings.ToUpper(strings.TrimSpace(c.PostForm("currency")))
 		o, err := h.st.GetByTradeNo(c.Request.Context(), no)
-		if err != nil || !cfg.ProviderEnabled(provider) || !cfg.ProviderCurrency(provider, currency) || !currencyAllowedByLimit(o.CurrencyLimit, currency) {
+		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(503, gin.H{"code": 1, "msg": "暂时无法读取订单状态，请稍后重试"})
+				return
+			}
+			c.JSON(400, gin.H{"code": 1, "msg": "当前付款方式不可用，请刷新页面后重新选择"})
+			return
+		}
+		if !cfg.ProviderEnabled(provider) || !cfg.CurrencyEnabled(currency) || !cfg.ProviderCurrency(provider, currency) || !currencyAllowedByLimit(o.CurrencyLimit, currency) {
 			c.JSON(400, gin.H{"code": 1, "msg": "当前付款方式不可用，请刷新页面后重新选择"})
 			return
 		}
@@ -415,6 +429,10 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 		}
 		_, err = h.st.Select(c.Request.Context(), no, provider, currency, receiver, cfg.Order.AmountPrecision, step, minimum, cfg.Order.MaxOffset, cfg.Order.SlotGraceSeconds)
 		if err != nil {
+			if isInternalDBError(err) {
+				c.JSON(503, gin.H{"code": 1, "msg": "系统繁忙，请稍后重试"})
+				return
+			}
 			status := 400
 			if errors.Is(err, store.ErrSelectionThrottled) {
 				status = 429
@@ -429,7 +447,12 @@ func (h *Handlers) SelectPayment(c *gin.Context) {
 func (h *Handlers) renderResult(c *gin.Context, o *model.Order) {
 	var cb model.Callback
 	ack := "PENDING"
-	if err := h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil && cb.DeliveredAt != nil {
+	if err := h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			h.renderError(c, 503, "暂时无法读取订单通知状态", "请稍后刷新页面重试，或联系商户客服处理。")
+			return
+		}
+	} else if cb.DeliveredAt != nil {
 		ack = "SUCCESS"
 	}
 	review, reviewErr := h.st.CancellationReviewSummary(c.Request.Context(), o.ID)
@@ -461,12 +484,21 @@ func (h *Handlers) renderError(c *gin.Context, status int, title, detail string)
 func (h *Handlers) OrderStatus(c *gin.Context) {
 	o, err := h.st.GetByTradeNo(c.Request.Context(), c.Query("order_id"))
 	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(503, gin.H{"code": 1, "msg": "暂时无法读取订单状态，请稍后重试"})
+			return
+		}
 		c.JSON(404, gin.H{"code": 1, "msg": "未找到订单，请返回商户页面核对"})
 		return
 	}
 	var cb model.Callback
 	ack := false
-	if err = h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err == nil {
+	if err = h.st.DB().WithContext(c.Request.Context()).First(&cb, "order_id = ?", o.ID).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(503, gin.H{"code": 1, "msg": "暂时无法读取订单通知状态，请稍后重试"})
+			return
+		}
+	} else {
 		ack = cb.DeliveredAt != nil
 	}
 	review, err := h.st.CancellationReviewSummary(c.Request.Context(), o.ID)
@@ -474,16 +506,17 @@ func (h *Handlers) OrderStatus(c *gin.Context) {
 		c.JSON(503, gin.H{"code": 1, "msg": "暂时无法读取到账核对记录，请稍后重试"})
 		return
 	}
-	phase := o.PaymentPhase(time.Now())
-	accepting := !h.paymentOperationsBlocked(c) && time.Now().Before(o.ExpiresAt) && (o.Status == model.Pending || o.Status == model.Ready) && h.orderProviderAccepting(c, h.C(), o)
-	if !accepting && (o.Status == model.Pending || o.Status == model.Ready) {
+	now := time.Now()
+	phase := o.PaymentPhase(now)
+	accepting := !h.paymentOperationsBlocked(c) && now.Before(o.ExpiresAt) && (o.Status == model.Pending || o.Status == model.Ready) && h.orderProviderAccepting(c, h.C(), o)
+	if !accepting && phase == "accepting_payment" {
 		phase = "settling"
 	}
 	payAmount := o.PayAmount()
 	if o.PayUnits <= 0 {
 		payAmount = ""
 	}
-	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "cancellation_review_status": review.Status(), "refund_review_generation_current": review.Current(), "amount": payAmount, "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(time.Until(o.ExpiresAt).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": accepting, "merchant_review_required": cb.State == "merchant_review"}})
+	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "cancellation_review_status": review.Status(), "refund_review_generation_current": review.Current(), "amount": payAmount, "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(o.ExpiresAt.Sub(now).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": accepting, "merchant_review_required": cb.State == "merchant_review"}})
 }
 func (h *Handlers) Health(c *gin.Context) {
 	if err := h.st.Ping(c.Request.Context()); err != nil {
@@ -557,4 +590,12 @@ func generateTradeNo() (string, error) {
 		return "", fmt.Errorf("生成订单号失败: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+func isInternalDBError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "sqlite") || strings.Contains(msg, "database") || strings.Contains(msg, "sql:")
 }

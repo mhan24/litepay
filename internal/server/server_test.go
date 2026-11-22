@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"litepay/internal/config"
 	"litepay/internal/model"
@@ -214,5 +215,105 @@ func TestPaymentSelectionRejectsAlignmentOverflow(t *testing.T) {
 	st.DB().Model(&model.Slot{}).Count(&slots)
 	if slots != 0 {
 		t.Fatalf("rejected selection reserved %d tiers", slots)
+	}
+}
+
+func TestExpiredPendingOrderPhaseClosedAndURLHostValidation(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.Create(ctx, model.Order{
+		TradeNo:     "expired-pending-phase",
+		OutTradeNo:  "expired-pending-phase",
+		OriginUnits: 5_000_000,
+		ExpiresAt:   time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := getRequest(engine, "/api/order/status?order_id=expired-pending-phase")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"payment_phase":"closed"`) || strings.Contains(w.Body.String(), `"payment_phase":"settling"`) {
+		t.Fatalf("expired PENDING order reported wrong payment_phase: %s", w.Body.String())
+	}
+
+	// externalURL must reject backslashes in host authority as well as userinfo and non-HTTP schemes.
+	for _, bad := range []string{
+		"https://evil.com\\@shop.example/return",
+		"https://user:pass@shop.example/return",
+		"javascript:alert(1)",
+		"https://shop.example\r\n/return",
+	} {
+		if got := externalURL(bad); got != "" {
+			t.Fatalf("externalURL accepted unsafe URL %q -> %q", bad, got)
+		}
+	}
+	if got := externalURL("https://shop.example/return?ok=1"); got != "https://shop.example/return?ok=1" {
+		t.Fatalf("externalURL rejected valid URL: %q", got)
+	}
+
+	// Cashier page must check cancellation_review_status in onPaid so reviewed orders reload.
+	if _, err := st.Create(ctx, model.Order{
+		TradeNo:     "cashier-review-js",
+		OutTradeNo:  "cashier-review-js",
+		OriginUnits: 5_000_000,
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	selectPayment(t, engine, "cashier-review-js", "binance")
+	w = getRequest(engine, "/pay/cashier-review-js")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "d.cancellation_review_status") {
+		t.Fatalf("cashier missing cancellation_review_status guard: %d", w.Code)
+	}
+}
+
+func TestOrderStatusAndCashierReturn503OnDatabaseFailure(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err := mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(mgr, st, verifiedPoller(t, mgr, st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if w := getRequest(engine, "/api/order/status?order_id=any"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 on DB error for OrderStatus, got %d: %s", w.Code, w.Body.String())
+	}
+	if w := getRequest(engine, "/pay/any"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 on DB error for CashierPage, got %d: %s", w.Code, w.Body.String())
 	}
 }

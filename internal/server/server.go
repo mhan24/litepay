@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,12 +25,16 @@ var templateFS embed.FS
 //go:embed static/brand/*
 var staticFS embed.FS
 
+var ginModeOnce sync.Once
+
 // New 构建 gin 引擎并注册全部路由。
 func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.Engine, error) {
 	if err := mgr.Get().ValidateWebRoutes(); err != nil {
 		return nil, err
 	}
-	gin.SetMode(gin.ReleaseMode)
+	ginModeOnce.Do(func() {
+		gin.SetMode(gin.ReleaseMode)
+	})
 
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"externalURL": externalURL,
@@ -192,7 +197,7 @@ func externalURL(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
-		u.User != nil {
+		u.User != nil || strings.Contains(u.Host, "\\") {
 		return ""
 	}
 	return u.String()

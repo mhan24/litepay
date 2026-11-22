@@ -342,7 +342,7 @@ body{min-height:100dvh;padding:40px 24px;background:var(--bg)}
     if (finished || !showPayment) return;
     finished = true;
     hideWalletPayment();
-    if(d.merchant_review_required){window.location.reload();return;}
+    if(d.merchant_review_required||(d.cancellation_review_status&&d.cancellation_review_status!=='none')){window.location.reload();return;}
     statusEl.textContent = d.merchant_confirmed ? '付款已确认，商户已接收通知' : '付款已确认，正在通知商户，请勿重复转账';
     document.getElementById('ov-title').textContent = '支付成功';
     document.getElementById('ov-desc').textContent = '正在跳转回商户页面…';
