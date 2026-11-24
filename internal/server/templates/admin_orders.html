@@ -55,9 +55,9 @@
     </section>
 
     <div class="pager">
-      <a href="?page={{.Prev}}&q={{queryEscape .Query}}">上一页</a>
+      <a href="?page={{.Prev}}&q={{.Query}}">上一页</a>
       <span>{{.Page}}</span>
-      <a href="?page={{.Next}}&q={{queryEscape .Query}}">下一页</a>
+      <a href="?page={{.Next}}&q={{.Query}}">下一页</a>
     </div>
   </main>
   {{template "theme_script" .}}
