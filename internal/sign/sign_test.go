@@ -91,13 +91,28 @@ func TestHmacSHA256Hex(t *testing.T) {
 func TestBEpusdtSignSkipsNestedStructures(t *testing.T) {
 	const token = "0123456789abcdef0123456789abcdef"
 	flat := BEpusdtSignGeneric(map[string]interface{}{"order_id": "A-1"}, token)
+	var nilIface any
+	var nilStr *string
+	var ifaceHoldingNilPtr any = nilStr
 	for _, nested := range []interface{}{
 		map[string]interface{}{"x": "y"},
 		[]interface{}{"a", "b"},
+		map[string]string{"x": "y"},
+		[]string{"a", "b"},
+		[2]int{1, 2},
+		(*string)(nil),
+		&nilIface,
+		&ifaceHoldingNilPtr,
 	} {
 		with := BEpusdtSignGeneric(map[string]interface{}{"order_id": "A-1", "nested": nested}, token)
 		if with != flat {
-			t.Fatalf("嵌套结构不应参与签名：got %s, want %s", with, flat)
+			t.Fatalf("嵌套结构或空指针不应参与签名 (%T)：got %s, want %s", nested, with, flat)
 		}
+	}
+	val := "42"
+	withPtr := BEpusdtSignGeneric(map[string]interface{}{"order_id": "A-1", "amount": &val}, token)
+	wantPtr := BEpusdtSignGeneric(map[string]interface{}{"order_id": "A-1", "amount": "42"}, token)
+	if withPtr != wantPtr {
+		t.Fatalf("非空指针应解引用参与签名：got %s, want %s", withPtr, wantPtr)
 	}
 }

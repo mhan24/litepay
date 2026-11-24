@@ -15,15 +15,9 @@ import (
 func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, provider string) error {
 	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
-	receiver := cfg.Checkout.Binance.UID
-	if provider == config.ProviderOKX {
-		receiver = cfg.Checkout.OKX.UID
-	}
-	if provider == config.ProviderBybit {
-		receiver = cfg.Checkout.Bybit.UID
-	}
-	if provider == config.ProviderBitget {
-		receiver = cfg.Checkout.Bitget.UID
+	receiver := providerUID(cfg, provider)
+	if receiver == "" {
+		return nil
 	}
 	if err := p.st.QueueSettlementScan(ctx, provider, receiver, time.Duration(cfg.ProviderLookback(provider))*time.Minute); err != nil {
 		return err
@@ -72,9 +66,12 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 			after.Pages++
 		}
 	}
-	save, done := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
-	defer done()
 	if err != nil {
+		if parentErr := parent.Err(); parentErr != nil {
+			return parentErr
+		}
+		save, done := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
+		defer done()
 		var apiErr *binance.APIError
 		if errors.As(err, &apiErr) && (apiErr.Kind == binance.ErrorIncomplete || apiErr.Kind == binance.ErrorBudget) {
 			return p.st.ShrinkHistoricalChunk(save, job, after.ChunkTo)
@@ -84,14 +81,23 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 		}
 		return err
 	}
-	filtered := make([]model.Transaction, 0, len(rows))
+	save, done := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
+	defer done()
+	sameAccount := make([]model.Transaction, 0, len(rows))
 	for _, row := range rows {
-		if row.Provider != job.Provider || row.Receiver != job.Receiver || row.OccurredAt.Before(job.From) || row.OccurredAt.After(job.To) {
+		if row.Provider != job.Provider || row.Receiver != job.Receiver {
+			continue
+		}
+		sameAccount = append(sameAccount, row)
+	}
+	markAmbiguous(sameAccount)
+	filtered := make([]model.Transaction, 0, len(sameAccount))
+	for _, row := range sameAccount {
+		if row.OccurredAt.Before(job.From) || row.OccurredAt.After(job.To) {
 			continue
 		}
 		filtered = append(filtered, row)
 	}
-	markAmbiguous(filtered)
 	if !after.Cursor.Before(job.To) {
 		after.State = "completed"
 	}

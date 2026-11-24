@@ -150,4 +150,34 @@ func TestNormalizeWebRoutesOrderAndPortChecks(t *testing.T) {
 	if err := c.normalize(); err == nil {
 		t.Fatal("expected default HTTPS port 443 matching gateway base_url to be rejected")
 	}
+
+	// Trailing dot on StoreURL host must not bypass same-site redirect loop check.
+	c = Default()
+	c.Server.Production = false
+	c.Server.BaseURL = "https://pay.example.com"
+	c.Server.StoreURL = "https://pay.example.com./shop"
+	if err := c.normalize(); err == nil {
+		t.Fatal("expected trailing-dot same-site StoreURL to be rejected")
+	}
+
+	// Case-variant system route prefixes must also be rejected for admin.path.
+	for _, badPath := range []string{"/API", "/Pay", "/Assets", "/Healthz", "/Readyz"} {
+		c = Default()
+		c.Server.Production = false
+		c.Admin.Path = badPath
+		if err := c.normalize(); err == nil {
+			t.Fatalf("expected case-variant system admin.path %q to be rejected", badPath)
+		}
+	}
+
+	// Empty or whitespace server.addr must default to 0.0.0.0:8080 instead of binding :80.
+	c = Default()
+	c.Server.Production = false
+	c.Server.Addr = "   "
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.Addr != "0.0.0.0:8080" {
+		t.Fatalf("expected default server.addr 0.0.0.0:8080, got %q", c.Server.Addr)
+	}
 }

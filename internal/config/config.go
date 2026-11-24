@@ -329,6 +329,10 @@ func Load(path string) (*Config, error) {
 // normalize 补齐派生字段并做基本校验。
 func (c *Config) normalize() error {
 	c.Admin.Path = strings.TrimSpace(c.Admin.Path)
+	c.Server.Addr = strings.TrimSpace(c.Server.Addr)
+	if c.Server.Addr == "" {
+		c.Server.Addr = "0.0.0.0:8080"
+	}
 	c.Server.StoreURL = strings.TrimSpace(c.Server.StoreURL)
 	c.Server.BaseURL = strings.TrimRight(strings.TrimSpace(c.Server.BaseURL), "/")
 	if c.Server.BaseURL == "" {
@@ -336,7 +340,7 @@ func (c *Config) normalize() error {
 	}
 	for i, host := range c.Server.NotifyHosts {
 		host = strings.ToLower(strings.TrimSpace(host))
-		if host == "" || strings.ContainsAny(host, "/:@*?#\\") || strings.HasSuffix(host, ".") {
+		if host == "" || strings.ContainsAny(host, " \t\r\n/:@*?#\\[]") || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
 			return fmt.Errorf("server.notify_hosts 只能填写精确主机名")
 		}
 		c.Server.NotifyHosts[i] = host
@@ -516,7 +520,7 @@ func (c *Config) ValidateWebRoutes() error {
 	if !regexp.MustCompile(`^/[A-Za-z0-9][A-Za-z0-9_-]{2,95}$`).MatchString(root) {
 		return fmt.Errorf("admin.path 必须为 / 开头、3~96 位字母数字或下划线及连字符的单层路径")
 	}
-	switch root {
+	switch strings.ToLower(root) {
 	case "/pay", "/api", "/assets", "/healthz", "/readyz":
 		return fmt.Errorf("admin.path 与系统路径冲突")
 	}
@@ -538,7 +542,7 @@ func (c *Config) ValidateWebRoutes() error {
 }
 
 func sameSiteHost(a, b *url.URL) bool {
-	if !strings.EqualFold(a.Hostname(), b.Hostname()) {
+	if !strings.EqualFold(strings.TrimSuffix(a.Hostname(), "."), strings.TrimSuffix(b.Hostname(), ".")) {
 		return false
 	}
 	portOf := func(u *url.URL) string {
@@ -722,11 +726,14 @@ func (c *Config) OrderedProviders() []string {
 // ValidateNotifyURL enforces explicit production transport and merchant identity.
 // Editing base_url cannot disable production policy; HTTPS development also keeps TLS checks.
 func (c *Config) ValidateNotifyURL(raw string) error {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return fmt.Errorf("notify_url 必须是有效的商户回调地址")
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("notify_url 必须是有效的商户回调地址")
 	}
-	if c.Server.Production || strings.HasPrefix(strings.ToLower(c.Server.BaseURL), "https://") {
+	if c.Server.Production || strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Server.BaseURL)), "https://") {
 		if u.Scheme != "https" || u.Port() != "" && u.Port() != "443" {
 			return fmt.Errorf("生产回调必须使用 HTTPS 标准端口")
 		}

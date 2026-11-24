@@ -69,4 +69,21 @@ func TestExplicitProductionModeCannotBeDisabledByHTTPBaseURL(t *testing.T) {
 	if err := c.ValidateNotifyURL("http://shop.example/notify"); err == nil {
 		t.Fatal("uppercase HTTPS base_url bypassed HTTPS callback requirement")
 	}
+	c.Server.BaseURL = "  https://pay.example  "
+	if err := c.ValidateNotifyURL("http://shop.example/notify"); err == nil {
+		t.Fatal("padded HTTPS base_url bypassed HTTPS callback requirement")
+	}
+	c.Server.NotifyHosts = []string{"shop.example"}
+	if err := c.ValidateNotifyURL("https://shop.example/notify "); err == nil {
+		t.Fatal("trailing whitespace notify_url accepted")
+	}
+	for _, badHost := range []string{".shop.example", "shop .example", "[::1]"} {
+		c = Default()
+		c.Server.Production = true
+		c.Server.BaseURL = "https://pay.example"
+		c.Server.NotifyHosts = []string{badHost}
+		if err := c.normalize(); err == nil {
+			t.Fatalf("invalid notify_host %q accepted", badHost)
+		}
+	}
 }

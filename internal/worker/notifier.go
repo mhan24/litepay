@@ -78,7 +78,7 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 	}
 	tradeID := o.TradeNo
 	var tx model.Transaction
-	if err = n.st.DB().WithContext(ctx).First(&tx, "order_id = ?", o.ID).Error; err != nil {
+	if err = n.st.DB().WithContext(ctx).First(&tx, "order_id = ? AND state = ?", o.ID, model.Confirmed).Error; err != nil {
 		return false, tradeID, n.releaseCallback(ctx, *task, err)
 	}
 	payload := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "amount": json.Number(o.Original()), "actual_amount": json.Number(amount.String(o.PayUnits)), "token": o.Receiver, "block_transaction_id": tx.EventID, "status": 2}
@@ -128,7 +128,7 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 		req.Header.Set("Content-Type", "application/json")
 		var response []byte
 		status, response, err = n.http.Do(req)
-		if err != nil && status == 0 && ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		if err != nil && status == 0 && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 			return false, tradeID, n.releaseCallback(ctx, *task, err)
 		}
 		if err == nil {
@@ -140,7 +140,11 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 	if ok {
 		message = ""
 	}
-	delay := retryDelaySeconds(cfg.Notify.RetryDelays, task.Attempts)
+	batchAttempt := task.Attempts - task.AttemptBase
+	if batchAttempt <= 0 {
+		batchAttempt = task.Attempts
+	}
+	delay := retryDelaySeconds(cfg.Notify.RetryDelays, batchAttempt)
 	save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer done()
 	err = n.st.FinishCallback(save, *task, status, ok, message, time.Duration(delay)*time.Second)
