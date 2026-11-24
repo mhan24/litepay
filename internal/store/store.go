@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 type Store struct {
 	db        *gorm.DB
 	lock      *os.File
+	keyMu     sync.RWMutex
 	masterKey []byte
 }
 
@@ -576,9 +578,20 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 				t.Reason = "duplicate_reference"
 			}
 		}
+		now := time.Now()
+		if expectedTrade != "" && t.State == model.Confirmed && t.Units > 0 && t.Receiver != "" && (t.Currency == "USDT" || t.Currency == "USDC") {
+			_, matchedOrder, matchReason, matchErr := matchAttemptAt(db, t, false, now)
+			if matchErr != nil {
+				return matchErr
+			}
+			if matchReason == "" && matchedOrder.TradeNo != expectedTrade {
+				result = "other_order"
+				return nil
+			}
+		}
 		t.OrderID = nil
 		t.AttemptID = nil
-		if e == nil && t.State == model.Ambiguous && old.AttemptID != nil {
+		if e == nil && old.AttemptID != nil {
 			t.AttemptID = old.AttemptID
 		}
 		if e = db.Save(&t).Error; e != nil {
@@ -592,7 +605,7 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 		} else {
 			nextState := any("resolved")
 			if t.State == model.Confirmed || t.State == model.Ambiguous {
-				nextState = gorm.Expr("CASE WHEN deadline <= ? THEN 'manual_review' ELSE 'resolved' END", time.Now())
+				nextState = gorm.Expr("CASE WHEN deadline <= ? THEN 'manual_review' ELSE 'resolved' END", now)
 			}
 			if err := db.Model(&model.ConfirmationTask{}).Where("provider = ? AND event_id = ? AND state = ?", t.Provider, t.EventID, "pending").Update("state", nextState).Error; err != nil {
 				return err
@@ -605,7 +618,7 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 		if t.Units <= 0 || t.Receiver == "" || (t.Currency != "USDT" && t.Currency != "USDC") {
 			return finish("invalid_payment")
 		}
-		attempt, o, reason, err := matchAttempt(db, t, false)
+		attempt, o, reason, err := matchAttemptAt(db, t, false, now)
 		if err != nil {
 			return err
 		}
@@ -637,7 +650,6 @@ func (s *Store) Process(ctx context.Context, t model.Transaction, expectedTrade 
 			return finish("other_order")
 		}
 		applyAttempt(&o, attempt)
-		now := time.Now()
 		o.Status = model.Paid
 		o.PaidAt = &now
 		if e = db.Save(&o).Error; e != nil {
@@ -722,12 +734,13 @@ func (s *Store) PendingTimes(ctx context.Context, provider string, offset, limit
 	if limit <= 0 {
 		return nil, nil
 	}
+	now := time.Now()
 	db := s.db.WithContext(ctx)
-	if err := db.Model(&model.ConfirmationTask{}).Where("state = ? AND deadline <= ?", "pending", time.Now()).Update("state", "manual_review").Error; err != nil {
+	if err := db.Model(&model.ConfirmationTask{}).Where("state = ? AND deadline <= ?", "pending", now).Update("state", "manual_review").Error; err != nil {
 		return nil, err
 	}
 	var rows []model.ConfirmationTask
-	err := db.Where("provider = ? AND state = ? AND deadline > ?", provider, "pending", time.Now()).Where("EXISTS (SELECT 1 FROM transactions t WHERE t.provider = confirmation_tasks.provider AND t.event_id = confirmation_tasks.event_id AND t.state = ?)", model.Unconfirmed).Order("occurred_at, event_id").Offset(max(offset, 0)).Limit(limit).Find(&rows).Error
+	err := db.Where("provider = ? AND state = ? AND deadline > ?", provider, "pending", now).Where("EXISTS (SELECT 1 FROM transactions t WHERE t.provider = confirmation_tasks.provider AND t.event_id = confirmation_tasks.event_id AND t.state = ?)", model.Unconfirmed).Order("occurred_at, event_id").Offset(max(offset, 0)).Limit(limit).Find(&rows).Error
 	times := make([]time.Time, 0, len(rows))
 	for _, row := range rows {
 		times = append(times, row.OccurredAt)
@@ -768,14 +781,15 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 	var o model.Order
 	missing := false
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state NOT IN ?", maxAttempts, time.Now(), []string{"exhausted", "merchant_review", "canceled_refunded"}).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Updates(map[string]any{"state": "exhausted", "lease_until": time.Time{}}).Error; err != nil {
+		now := time.Now()
+		if err := db.Model(&model.Callback{}).Where("delivered_at IS NULL AND attempts >= attempt_base + ? AND next_at <= ? AND state NOT IN ?", maxAttempts, now, []string{"exhausted", "merchant_review", "canceled_refunded"}).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Updates(map[string]any{"state": "exhausted", "lease_until": time.Time{}}).Error; err != nil {
 			return err
 		}
 		// Only paid orders are notified. Filtering here keeps a task whose order is not paid
 		// from blocking the queue: it would never become deliverable and every reservation
 		// would return the same row again.
 		paid := db.Model(&model.Order{}).Select("id").Where("status = ?", model.Paid)
-		if e := db.Where("delivered_at IS NULL AND attempts < attempt_base + ? AND next_at <= ? AND order_id IN (?) AND state NOT IN ?", maxAttempts, time.Now(), paid, []string{"exhausted", "merchant_review", "canceled_refunded"}).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Order("next_at").First(&task).Error; e != nil {
+		if e := db.Where("delivered_at IS NULL AND attempts < attempt_base + ? AND next_at <= ? AND order_id IN (?) AND state NOT IN ?", maxAttempts, now, paid, []string{"exhausted", "merchant_review", "canceled_refunded"}).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Order("next_at").First(&task).Error; e != nil {
 			if errors.Is(e, gorm.ErrRecordNotFound) {
 				missing = true
 				return nil
@@ -786,7 +800,7 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 			return e
 		}
 		task.Attempts++
-		task.NextAt = time.Now().Add(time.Duration(timeout+5) * time.Second)
+		task.NextAt = now.Add(time.Duration(timeout+5) * time.Second)
 		task.LeaseUntil = task.NextAt
 		task.State = "in_flight"
 		task.AttemptLimit = task.AttemptBase + maxAttempts
@@ -801,11 +815,14 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 // ReleaseCallback returns an unsent reservation without consuming the merchant retry
 // budget. The lease fence prevents an old worker from releasing a newer attempt.
 func (s *Store) ReleaseCallback(ctx context.Context, task model.Callback) error {
+	task.LeaseUntil = normalizeTime(task.LeaseUntil)
 	return s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND attempts > attempt_base AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(map[string]any{"attempts": max(task.Attempts-1, 0), "next_at": time.Now(), "lease_until": time.Time{}, "state": gorm.Expr("CASE WHEN EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id) THEN 'merchant_review' ELSE 'queued' END")}).Error
 }
 
 func (s *Store) FinishCallback(ctx context.Context, task model.Callback, status int, ok bool, message string, delay time.Duration) error {
+	task.LeaseUntil = normalizeTime(task.LeaseUntil)
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		now := time.Now()
 		state := "queued"
 		if !ok && task.Attempts >= task.AttemptLimit && task.AttemptLimit > 0 {
 			state = "exhausted"
@@ -817,9 +834,9 @@ func (s *Store) FinishCallback(ctx context.Context, task model.Callback, status 
 		if holds > 0 {
 			state = "merchant_review"
 		}
-		updates := map[string]any{"last_error": message, "next_at": time.Now().Add(delay), "lease_until": time.Time{}, "state": state}
+		updates := map[string]any{"last_error": message, "next_at": now.Add(delay), "lease_until": time.Time{}, "state": state}
 		if ok {
-			updates["delivered_at"] = time.Now()
+			updates["delivered_at"] = now
 			updates["state"] = "delivered"
 		}
 		r := db.Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(updates)

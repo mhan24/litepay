@@ -30,7 +30,8 @@ func migratePaymentAttempts(db *gorm.DB) error {
 			}
 			if o.Status == model.Ready {
 				// Existing reservations are extended; detached historical slots cannot be guessed.
-				if err := tx.Model(&model.Slot{}).Where("order_id = ?", o.ID).Update("expires_at", o.ExpiresAt.Add(LateVisibilityWindow)).Error; err != nil {
+				minExpiry := o.ExpiresAt.Add(LateVisibilityWindow)
+				if err := tx.Model(&model.Slot{}).Where("order_id = ? AND expires_at < ?", o.ID, minExpiry).Update("expires_at", minExpiry).Error; err != nil {
 					return err
 				}
 			}
@@ -89,6 +90,10 @@ func applyAttempt(o *model.Order, a model.PaymentAttempt) {
 // matchAttempt deduplicates repeated instructions for one order. Historical paid orders
 // are retained in the match set so a second deposit becomes additional_payment evidence.
 func matchAttempt(db *gorm.DB, t model.Transaction, confirmation bool) (model.PaymentAttempt, model.Order, string, error) {
+	return matchAttemptAt(db, t, confirmation, time.Now())
+}
+
+func matchAttemptAt(db *gorm.DB, t model.Transaction, confirmation bool, now time.Time) (model.PaymentAttempt, model.Order, string, error) {
 	var rows []model.PaymentAttempt
 	if err := db.Where("provider = ? AND receiver = ? AND currency = ? AND units = ? AND selected_at <= ? AND expires_at >= ?", t.Provider, t.Receiver, t.Currency, t.Units, t.OccurredAt, t.OccurredAt).Order("id").Find(&rows).Error; err != nil {
 		return model.PaymentAttempt{}, model.Order{}, "", err
@@ -118,12 +123,12 @@ func matchAttempt(db *gorm.DB, t model.Transaction, confirmation bool) (model.Pa
 		return a, o, "order_closed", nil
 	}
 	if !confirmation {
-		if !time.Now().Before(a.SettleUntil) {
+		if !now.Before(a.SettleUntil) {
 			return a, o, "late_payment_review_required", nil
 		}
 		var q model.ConfirmationTask
 		if err := db.Where("provider = ? AND event_id = ?", t.Provider, t.EventID).First(&q).Error; err == nil {
-			if q.State == "manual_review" || !time.Now().Before(q.Deadline) {
+			if q.State == "manual_review" || !now.Before(q.Deadline) {
 				return a, o, "confirmation_review_required", nil
 			}
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {

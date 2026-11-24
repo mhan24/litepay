@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/hmac"
 	"errors"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ func findSigningKeyByPlaintext(db *gorm.DB, masterKey []byte, plainToken string)
 				return model.SigningKey{}, false, err
 			}
 		}
-		if candidate == plainToken {
+		if hmac.Equal([]byte(candidate), []byte(plainToken)) {
 			return row, true, nil
 		}
 	}
@@ -37,9 +38,10 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 	if strings.TrimSpace(token) == "" || operator == "" {
 		return 0, errors.New("签名 Token 和操作人不能为空")
 	}
+	masterKey := s.masterKeyCopy()
 	var key model.SigningKey
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		txStore := &Store{db: db, masterKey: s.masterKey}
+		txStore := &Store{db: db, masterKey: masterKey}
 		current, err := txStore.LoadCredential(ctx, "bepusdt_api_token")
 		if err != nil {
 			return err
@@ -49,14 +51,14 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 			currentValue = current.Value
 		}
 		if currentValue != "" {
-			old, found, e := findSigningKeyByPlaintext(db, s.masterKey, currentValue)
+			old, found, e := findSigningKeyByPlaintext(db, masterKey, currentValue)
 			if e != nil {
 				return e
 			}
 			if !found {
 				storedOld := currentValue
-				if s.HasMasterKey() {
-					storedOld, e = EncryptSecret(s.masterKey, currentValue, "signing_keys.token")
+				if len(masterKey) == 32 {
+					storedOld, e = EncryptSecret(masterKey, currentValue, "signing_keys.token")
 					if e != nil {
 						return e
 					}
@@ -72,13 +74,8 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 			if e := db.Model(&model.Callback{}).Where("signing_key_id = 0").Update("signing_key_id", old.ID).Error; e != nil {
 				return e
 			}
-			if rotate && token != currentValue {
-				if e := db.Model(&old).Update("retired_at", time.Now()).Error; e != nil {
-					return e
-				}
-			}
 		}
-		foundKey, found, e := findSigningKeyByPlaintext(db, s.masterKey, token)
+		foundKey, found, e := findSigningKeyByPlaintext(db, masterKey, token)
 		if e != nil {
 			return e
 		}
@@ -92,8 +89,8 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 			key = foundKey
 		} else {
 			storedToken := token
-			if s.HasMasterKey() {
-				storedToken, e = EncryptSecret(s.masterKey, token, "signing_keys.token")
+			if len(masterKey) == 32 {
+				storedToken, e = EncryptSecret(masterKey, token, "signing_keys.token")
 				if e != nil {
 					return e
 				}
@@ -102,6 +99,9 @@ func (s *Store) InstallSigningKey(ctx context.Context, token, operator string, r
 			if e = db.Create(&key).Error; e != nil {
 				return e
 			}
+		}
+		if e := db.Model(&model.SigningKey{}).Where("id <> ? AND retired_at IS NULL", key.ID).Update("retired_at", time.Now()).Error; e != nil {
+			return e
 		}
 		if e := db.Model(&model.Order{}).Where("signing_key_id = 0").Update("signing_key_id", key.ID).Error; e != nil {
 			return e
@@ -126,7 +126,7 @@ func (s *Store) CallbackKey(ctx context.Context, task model.Callback) (string, e
 		return "", err
 	}
 	if IsEncryptedSecret(key.Token) {
-		return DecryptSecret(s.masterKey, key.Token, "signing_keys.token")
+		return DecryptSecret(s.masterKeyCopy(), key.Token, "signing_keys.token")
 	}
 	return key.Token, nil
 }

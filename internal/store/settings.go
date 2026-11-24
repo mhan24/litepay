@@ -167,18 +167,34 @@ func DecryptSecret(key []byte, value, field string) (string, error) {
 // SetMasterKey 设置用于凭据加解密的 32 字节主密钥。
 func (s *Store) SetMasterKey(key []byte) error {
 	if len(key) == 0 {
+		s.keyMu.Lock()
 		s.masterKey = nil
+		s.keyMu.Unlock()
 		return nil
 	}
 	if len(key) != 32 {
 		return errors.New("主密钥长度必须为 32 字节")
 	}
-	s.masterKey = append([]byte(nil), key...)
+	copied := append([]byte(nil), key...)
+	s.keyMu.Lock()
+	s.masterKey = copied
+	s.keyMu.Unlock()
 	return nil
+}
+
+func (s *Store) masterKeyCopy() []byte {
+	s.keyMu.RLock()
+	defer s.keyMu.RUnlock()
+	if len(s.masterKey) != 32 {
+		return nil
+	}
+	return append([]byte(nil), s.masterKey...)
 }
 
 // HasMasterKey 返回是否已配置有效主密钥。
 func (s *Store) HasMasterKey() bool {
+	s.keyMu.RLock()
+	defer s.keyMu.RUnlock()
 	return len(s.masterKey) == 32
 }
 
@@ -384,7 +400,8 @@ func (s *Store) scrubCredentials(ctx context.Context) error {
 }
 
 func (s *Store) MigrateCredentials(ctx context.Context) error {
-	if !s.HasMasterKey() {
+	masterKey := s.masterKeyCopy()
+	if len(masterKey) != 32 {
 		return errors.New("未配置主密钥，无法迁移加密凭据")
 	}
 	if err := s.db.WithContext(ctx).Exec("PRAGMA secure_delete=ON").Error; err != nil {
@@ -397,7 +414,7 @@ func (s *Store) MigrateCredentials(ctx context.Context) error {
 	changed := false
 	if err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var err error
-		changed, err = rewriteSecrets(db, s.masterKey, s.masterKey, false)
+		changed, err = rewriteSecrets(db, masterKey, masterKey, false)
 		if err != nil {
 			return err
 		}
@@ -453,15 +470,15 @@ func (s *Store) LoadSettingPayload(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return decryptSettingPayload(s.masterKey, row.Payload)
+	return decryptSettingPayload(s.masterKeyCopy(), row.Payload)
 }
 
 // SaveSettingPayload 保存后台配置覆盖项。
 func (s *Store) SaveSettingPayload(ctx context.Context, payload, operator string) error {
 	stored := payload
-	if s.HasMasterKey() {
+	if key := s.masterKeyCopy(); len(key) == 32 {
 		var err error
-		stored, _, err = encryptSettingPayload(s.masterKey, payload, false)
+		stored, _, err = encryptSettingPayload(key, payload, false)
 		if err != nil {
 			return err
 		}
@@ -497,7 +514,7 @@ func (s *Store) LoadCredential(ctx context.Context, name string) (*model.Credent
 		return nil, err
 	}
 	if IsEncryptedSecret(row.Value) {
-		plain, err := DecryptSecret(s.masterKey, row.Value, row.Name)
+		plain, err := DecryptSecret(s.masterKeyCopy(), row.Value, row.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -511,8 +528,8 @@ func (s *Store) SaveCredential(ctx context.Context, row model.Credential) error 
 	if strings.TrimSpace(row.Name) == "" {
 		return errors.New("凭据名称不能为空")
 	}
-	if s.HasMasterKey() && !plainCredential(row.Name) && row.Value != "" {
-		enc, err := EncryptSecret(s.masterKey, row.Value, row.Name)
+	if key := s.masterKeyCopy(); len(key) == 32 && !plainCredential(row.Name) && row.Value != "" {
+		enc, err := EncryptSecret(key, row.Value, row.Name)
 		if err != nil {
 			return err
 		}
@@ -526,8 +543,9 @@ func (s *Store) SaveCredential(ctx context.Context, row model.Credential) error 
 }
 
 func (s *Store) SaveSettingAndArchiveTON(ctx context.Context, payload, operator, receiver string) error {
+	key := s.masterKeyCopy()
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		if err := (&Store{db: db, masterKey: s.masterKey}).SaveSettingPayload(ctx, payload, operator); err != nil {
+		if err := (&Store{db: db, masterKey: key}).SaveSettingPayload(ctx, payload, operator); err != nil {
 			return err
 		}
 		return db.Model(&model.TONScanCheckpoint{}).Where("receiver <> ? AND active = ?", receiver, true).Update("active", false).Error

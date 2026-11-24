@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -469,5 +470,412 @@ func TestAmbiguousReplayOfAdditionalPaymentPreservesAttemptLinkForCancellationRe
 	queue, err := s.CancellationReviewQueue(ctx)
 	if err != nil || len(queue) != 1 || queue[0].EventID != extra.EventID {
 		t.Fatalf("expected ambiguous extra receipt in queue, got %+v err=%v", queue, err)
+	}
+}
+
+func TestCancelPaidReconciledOrderCollectsUnlinkedAdditionalDeposit(t *testing.T) {
+	ctx := context.Background()
+	for _, initialStatus := range []string{model.Expired, model.Ready} {
+		t.Run(initialStatus, func(t *testing.T) {
+			s := testStore(t)
+			o := readyOrder(t, s, "reconciled-extra-"+initialStatus)
+			if initialStatus == model.Expired {
+				if err := s.DB().Model(o).Update("status", model.Expired).Error; err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := s.DB().Model(&model.PaymentAttempt{}).Where("order_id=?", o.ID).Update("settle_until", time.Now().Add(-time.Second)).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := evidence(o, "reconciled-ev1-"+initialStatus)
+			second := evidence(o, "reconciled-ev2-"+initialStatus)
+			for _, ev := range []model.Transaction{first, second} {
+				if _, err := s.Process(ctx, ev, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var storedSecond model.Transaction
+			if err := s.DB().First(&storedSecond, "provider=? AND event_id=?", second.Provider, second.EventID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if storedSecond.AttemptID != nil {
+				t.Fatalf("expected pre-reconciliation extra deposit to start with nil attempt_id, got %+v", storedSecond)
+			}
+			if err := s.ReconcilePayment(ctx, o.TradeNo, first.Provider, first.EventID, "operator", "manual reconcile first"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.CancelReference(ctx, o.TradeNo, o.OutTradeNo); err == nil {
+				t.Fatal("expected paid conflict error")
+			}
+			var reviews int64
+			if err := s.DB().Model(&model.CancellationReview{}).Where("order_id=?", o.ID).Count(&reviews).Error; err != nil || reviews != 2 {
+				t.Fatalf("expected 2 cancellation reviews (claimed + unlinked extra), got %d err=%v", reviews, err)
+			}
+			if err := s.RecordCancellationRefund(ctx, o.TradeNo, first.Provider, first.EventID, "operator", "refund-1", "refunded first"); err != nil {
+				t.Fatal(err)
+			}
+			summary, err := s.CancellationReviewSummary(ctx, o.ID)
+			if err != nil || summary.Current() || summary.Pending != 1 {
+				t.Fatalf("first refund must not complete unlinked second deposit: %+v err=%v", summary, err)
+			}
+			if err := s.RecordCancellationRefund(ctx, o.TradeNo, second.Provider, second.EventID, "operator", "refund-2", "refunded second"); err != nil {
+				t.Fatalf("failed to record refund for backfilled extra deposit: %v", err)
+			}
+			if reviewed, err := s.CancellationRefundReviewed(ctx, o.TradeNo, o.OutTradeNo); err != nil || !reviewed {
+				t.Fatalf("expected reviewed=true after both refunds, got %v err=%v", reviewed, err)
+			}
+		})
+	}
+}
+
+func TestReplayMultipleOrdersPreservesAdditionalPaymentAttemptID(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	o := readyOrder(t, s, "replay-multi-extra")
+	first := evidence(o, "multi-first")
+	extra := evidence(o, "multi-extra")
+	if res, err := s.Process(ctx, first, ""); err != nil || res != "paid" {
+		t.Fatalf("first claim failed: %q err=%v", res, err)
+	}
+	if res, err := s.Process(ctx, extra, ""); err != nil || res != "additional_payment" {
+		t.Fatalf("expected additional_payment, got %q err=%v", res, err)
+	}
+	other := readyOrder(t, s, "replay-multi-other")
+	var a model.PaymentAttempt
+	if err := s.DB().Where("order_id=?", o.ID).First(&a).Error; err != nil {
+		t.Fatal(err)
+	}
+	a.ID = 0
+	a.OrderID = other.ID
+	if err := s.DB().Create(&a).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Poller replays identical extra deposit after overlapping attempt exists -> multiple_orders.
+	if res, err := s.Process(ctx, extra, ""); err != nil || res != "multiple_orders" {
+		t.Fatalf("expected multiple_orders on replay, got %q err=%v", res, err)
+	}
+	var stored model.Transaction
+	if err := s.DB().First(&stored, "provider=? AND event_id=?", extra.Provider, extra.EventID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.AttemptID == nil || stored.State != model.Ambiguous {
+		t.Fatalf("multiple_orders replay lost attempt_id: %+v", stored)
+	}
+	if _, err := s.CancelReference(ctx, o.TradeNo, o.OutTradeNo); err == nil {
+		t.Fatal("expected paid conflict error")
+	}
+	if err := s.RecordCancellationRefund(ctx, o.TradeNo, first.Provider, first.EventID, "operator", "refund-1", "refunded first"); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := s.CancellationReviewSummary(ctx, o.ID)
+	if err != nil || summary.Uncovered != 1 || summary.Current() {
+		t.Fatalf("uncertain replayed extra receipt vanished from cancellation summary: %+v err=%v", summary, err)
+	}
+	queue, err := s.CancellationReviewQueue(ctx)
+	if err != nil || len(queue) != 1 || queue[0].EventID != extra.EventID {
+		t.Fatalf("uncertain replayed extra receipt missing from queue: %+v err=%v", queue, err)
+	}
+}
+
+func TestProcessOtherOrderDoesNotResolvePendingConfirmationTask(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	a := readyOrder(t, s, "confirm-order-a")
+	b := readyOrder(t, s, "confirm-order-b")
+	tx := evidence(a, "confirm-ev-a")
+	tx.State = model.Unconfirmed
+	if res, err := s.Process(ctx, tx, ""); err != nil || res != "pending" {
+		t.Fatalf("expected pending, got %q err=%v", res, err)
+	}
+	confirmed := tx
+	confirmed.State = model.Confirmed
+	if res, err := s.Process(ctx, confirmed, b.TradeNo); err != nil || res != "other_order" {
+		t.Fatalf("expected other_order, got %q err=%v", res, err)
+	}
+	var task model.ConfirmationTask
+	if err := s.DB().First(&task, "provider=? AND event_id=?", tx.Provider, tx.EventID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if task.State != "pending" {
+		t.Fatalf("other_order check prematurely changed confirmation task state to %q", task.State)
+	}
+	times, err := s.PendingTimes(ctx, tx.Provider, 0, 10)
+	if err != nil || len(times) != 1 {
+		t.Fatalf("other_order check hid pending confirmation from PendingTimes: %+v err=%v", times, err)
+	}
+	if res, err := s.Process(ctx, confirmed, ""); err != nil || res != "paid" {
+		t.Fatalf("subsequent regular scan failed to pay order a: %q err=%v", res, err)
+	}
+	if err := s.DB().First(&task, "provider=? AND event_id=?", tx.Provider, tx.EventID).Error; err != nil || task.State != "resolved" {
+		t.Fatalf("expected confirmation task resolved after payment, got %+v err=%v", task, err)
+	}
+}
+
+func TestManualHistoricalScanNotSwallowedByAutomaticCohortScan(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	o := readyOrder(t, s, "manual-vs-auto-scan")
+	selected := time.Now().Add(-20 * time.Minute)
+	expires := time.Now().Add(-10 * time.Minute)
+	if err := s.DB().Model(&model.PaymentAttempt{}).Where("order_id=?", o.ID).Updates(map[string]any{"selected_at": selected, "expires_at": expires}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueSettlementScan(ctx, o.Provider, o.Receiver, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var autoCount int64
+	if err := s.DB().Model(&model.HistoricalScan{}).Where("automatic = ? AND state = ?", true, "pending").Count(&autoCount).Error; err != nil || autoCount != 1 {
+		t.Fatalf("expected 1 automatic pending scan, got %d err=%v", autoCount, err)
+	}
+	if err := s.RequestHistoricalScan(ctx, o.TradeNo, "operator", "customer claims paid"); err != nil {
+		t.Fatal(err)
+	}
+	// Duplicate manual click still deduplicates.
+	if err := s.RequestHistoricalScan(ctx, o.TradeNo, "operator", "second click"); err != nil {
+		t.Fatal(err)
+	}
+	var manualRows []model.HistoricalScan
+	if err := s.DB().Where("automatic = ? AND state = ?", false, "pending").Find(&manualRows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(manualRows) != 1 || manualRows[0].Priority != 1 || manualRows[0].Operator != "operator" {
+		t.Fatalf("expected 1 manual priority-1 historical scan alongside automatic scan, got %+v", manualRows)
+	}
+}
+
+func TestReuseHistoricalCoverageZeroWidthAndZeroCoverageAfter(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	o := readyOrder(t, s, "zero-width-reuse")
+	now := time.Now()
+	from := now.Add(-2 * time.Hour)
+	to := now.Add(-time.Hour)
+
+	// Record a coverage proof observed slightly in the future relative to an older job's CreatedAt.
+	proofObserved := now.Add(-5 * time.Minute)
+	if err := s.DB().Create(&model.HistoryCoverage{
+		Provider:   o.Provider,
+		Receiver:   o.Receiver,
+		From:       from,
+		To:         to,
+		ObservedAt: proofObserved,
+		ScanID:     999,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Subcase A: zero-width job (From == To) covered by proof must persist state='completed' in DB.
+	zeroWidth := model.HistoricalScan{
+		Automatic:     true,
+		OrderID:       o.ID,
+		Provider:      o.Provider,
+		Receiver:      o.Receiver,
+		From:          from.Add(10 * time.Minute),
+		To:            from.Add(10 * time.Minute),
+		Cursor:        from.Add(10 * time.Minute),
+		CoverageAfter: now,
+		RequiredAfter: proofObserved.Add(-time.Minute),
+		CreatedAt:     now,
+		State:         "pending",
+		Operator:      "system",
+		Reason:        "zero-width",
+	}
+	if err := s.DB().Create(&zeroWidth).Error; err != nil {
+		t.Fatal(err)
+	}
+	reusedZero, err := s.ReuseHistoricalCoverage(ctx, zeroWidth)
+	if err != nil || reusedZero.State != "completed" {
+		t.Fatalf("expected zero-width reuse to complete, got %+v err=%v", reusedZero, err)
+	}
+	var persisted model.HistoricalScan
+	if err := s.DB().First(&persisted, zeroWidth.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persisted.State != "completed" {
+		t.Fatalf("zero-width job stayed %q in DB after ReuseHistoricalCoverage", persisted.State)
+	}
+
+	// Subcase B: job with zero CoverageAfter and CreatedAt < proofObserved must not exceed CreatedAt.
+	olderCreated := proofObserved.Add(-2 * time.Minute)
+	partial := model.HistoricalScan{
+		Automatic:     true,
+		OrderID:       o.ID,
+		Provider:      o.Provider,
+		Receiver:      o.Receiver,
+		From:          from,
+		To:            to.Add(30 * time.Minute),
+		Cursor:        from,
+		RequiredAfter: olderCreated.Add(-time.Minute),
+		CreatedAt:     olderCreated,
+		State:         "pending",
+		Operator:      "system",
+		Reason:        "partial-zero-coverage-after",
+	}
+	if err := s.DB().Create(&partial).Error; err != nil {
+		t.Fatal(err)
+	}
+	reusedPartial, err := s.ReuseHistoricalCoverage(ctx, partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reusedPartial.CoverageAfter.After(partial.CreatedAt) {
+		t.Fatalf("CoverageAfter %v exceeded CreatedAt %v", reusedPartial.CoverageAfter, partial.CreatedAt)
+	}
+	done := reusedPartial
+	done.Cursor = done.To
+	done.State = "completed"
+	if err := s.SaveHistoricalScan(ctx, reusedPartial, done, nil); err != nil {
+		t.Fatalf("SaveHistoricalScan rejected reused job: %v", err)
+	}
+
+	// ShrinkHistoricalChunk rejects zero-ID and normalizes foreign-timezone Cursor.
+	if err := s.ShrinkHistoricalChunk(ctx, model.HistoricalScan{}, now.Add(time.Hour)); err == nil {
+		t.Fatal("ShrinkHistoricalChunk accepted zero ID")
+	}
+	shrinkJob := model.HistoricalScan{
+		OrderID:   o.ID,
+		Provider:  o.Provider,
+		Receiver:  o.Receiver,
+		From:      from,
+		To:        to,
+		Cursor:    from,
+		State:     "pending",
+		Operator:  "test",
+		Reason:    "tz-shrink",
+	}
+	if err := s.DB().Create(&shrinkJob).Error; err != nil {
+		t.Fatal(err)
+	}
+	shrinkJob.Cursor = shrinkJob.Cursor.In(time.FixedZone("EST", -5*3600))
+	if err := s.ShrinkHistoricalChunk(ctx, shrinkJob, to.In(time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	var afterShrink model.HistoricalScan
+	if err := s.DB().First(&afterShrink, shrinkJob.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if afterShrink.ChunkMillis != 1800000 {
+		t.Fatalf("foreign-timezone ShrinkHistoricalChunk did not update chunk_millis: %+v", afterShrink)
+	}
+}
+
+func TestInstallSigningKeyNonRotateRetiresPreviousActiveKey(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	id1, err := s.InstallSigningKey(ctx, "tok-1", "admin", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := s.InstallSigningKey(ctx, "tok-2", "admin", false)
+	if err != nil || id2 == id1 {
+		t.Fatalf("expected distinct second key, got id1=%d id2=%d err=%v", id1, id2, err)
+	}
+	id1Again, err := s.InstallSigningKey(ctx, "tok-1", "admin", false)
+	if err != nil || id1Again != id1 {
+		t.Fatalf("expected reactivation of id1=%d, got %d err=%v", id1, id1Again, err)
+	}
+	var activeCount int64
+	if err := s.DB().Model(&model.SigningKey{}).Where("retired_at IS NULL").Count(&activeCount).Error; err != nil || activeCount != 1 {
+		t.Fatalf("expected exactly 1 unretired signing key, got %d err=%v", activeCount, err)
+	}
+	o, err := s.Create(ctx, model.Order{TradeNo: "non-rotate-key", OutTradeNo: "non-rotate-key", OriginUnits: 10 * amount.Scale, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil || o.SigningKeyID != id1 {
+		t.Fatalf("expected new order to use active key id1=%d, got %d err=%v", id1, o.SigningKeyID, err)
+	}
+}
+
+func TestConcurrentMasterKeyAccessCallbackLeaseTimezoneAndQueueStats(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	keyA := bytes.Repeat([]byte{0x55}, 32)
+	if err := s.SetMasterKey(keyA); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSettingPayload(ctx, `{"binance_api_secret":"secret-val"}`, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	keyID, err := s.InstallSigningKey(ctx, "sign-tok", "admin", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify concurrent SetMasterKey / HasMasterKey / LoadSettingPayload / CallbackKey is race-free.
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 20 {
+				_ = s.SetMasterKey(keyA)
+				_ = s.HasMasterKey()
+			}
+		})
+		wg.Go(func() {
+			for range 20 {
+				if _, err := s.LoadSettingPayload(ctx); err != nil {
+					t.Error(err)
+				}
+				if _, err := s.CallbackKey(ctx, model.Callback{SigningKeyID: keyID}); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	// CallbackCanSend / ReleaseCallback / FinishCallback normalize foreign-timezone LeaseUntil.
+	o := readyOrder(t, s, "cb-tz-lease")
+	if _, err := s.Process(ctx, evidence(o, "cb-tz-ev"), ""); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := s.ReserveCallback(ctx, 5, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	utcTask := *task
+	utcTask.LeaseUntil = task.LeaseUntil.In(time.FixedZone("EST", -5*3600))
+	if ok, err := s.CallbackCanSend(ctx, utcTask); err != nil || !ok {
+		t.Fatalf("CallbackCanSend failed with foreign-timezone LeaseUntil: ok=%v err=%v", ok, err)
+	}
+	if err := s.ReleaseCallback(ctx, utcTask); err != nil {
+		t.Fatal(err)
+	}
+	task2, _, err := s.ReserveCallback(ctx, 5, 15)
+	if err != nil || task2.Attempts != 1 {
+		t.Fatalf("ReleaseCallback with foreign-timezone LeaseUntil did not release lease: %+v err=%v", task2, err)
+	}
+	utcTask2 := *task2
+	utcTask2.LeaseUntil = task2.LeaseUntil.UTC()
+	if err := s.FinishCallback(ctx, utcTask2, 200, true, "", 0); err != nil {
+		t.Fatal(err)
+	}
+	var cb model.Callback
+	if err := s.DB().First(&cb, "order_id=?", o.ID).Error; err != nil || cb.DeliveredAt == nil {
+		t.Fatalf("FinishCallback with foreign-timezone LeaseUntil did not persist delivery: %+v err=%v", cb, err)
+	}
+
+	// QueueStats excludes in-flight callbacks held by CancellationReview, and RetryCallback rejects canceled_refunded.
+	o2 := readyOrder(t, s, "cb-held-inflight")
+	if _, err := s.Process(ctx, evidence(o2, "cb-held-inflight-ev"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ReserveCallback(ctx, 5, 15); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CancelReference(ctx, o2.TradeNo, o2.OutTradeNo); err == nil {
+		t.Fatal("expected paid conflict error")
+	}
+	stats, err := s.QueueStats(ctx)
+	if err != nil || stats.CallbackWaiting != 0 {
+		t.Fatalf("cancellation-held callback counted in CallbackWaiting: %+v err=%v", stats, err)
+	}
+	// Even without CancellationReview row, RetryCallback must reject state='canceled_refunded'.
+	if err := s.DB().Where("order_id=?", o2.ID).Delete(&model.CancellationReview{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().Model(&model.Callback{}).Where("order_id=?", o2.ID).Updates(map[string]any{"state": "canceled_refunded", "lease_until": time.Time{}}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RetryCallback(ctx, o2.TradeNo, "operator", "should fail", 5); err == nil {
+		t.Fatal("RetryCallback accepted canceled_refunded callback")
 	}
 }

@@ -21,12 +21,16 @@ func (s *Store) ReuseHistoricalCoverage(ctx context.Context, job model.Historica
 	job.CreatedAt = normalizeTime(job.CreatedAt)
 	err := s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		original := job.Cursor
+		originalState := job.State
 		required := job.RequiredAfter
 		if required.IsZero() {
 			required = job.CoverageAfter
 		}
 		if required.IsZero() {
 			required = job.CreatedAt
+		}
+		if job.CoverageAfter.IsZero() && !job.CreatedAt.IsZero() {
+			job.CoverageAfter = job.CreatedAt
 		}
 		for range 128 {
 			var proof model.HistoryCoverage
@@ -49,7 +53,7 @@ func (s *Store) ReuseHistoricalCoverage(ctx context.Context, job model.Historica
 				break
 			}
 		}
-		if !original.Equal(job.Cursor) {
+		if !original.Equal(job.Cursor) || job.State != originalState {
 			job.ChunkTo = time.Time{}
 			result := db.Model(&model.HistoricalScan{}).Where("id=? AND state='pending' AND cursor=? AND lt=? AND pages=?", job.ID, original, job.LT, job.Pages).Updates(map[string]any{"coverage_after": job.CoverageAfter, "cursor": job.Cursor, "chunk_to": job.ChunkTo, "state": job.State, "updated_at": time.Now()})
 			if result.Error != nil {

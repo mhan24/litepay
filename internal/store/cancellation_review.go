@@ -76,8 +76,9 @@ func (s *Store) RecordCancellationRefund(ctx context.Context, tradeNo, provider,
 				return errors.New("额外到账归属尚不唯一，请人工核查")
 			}
 		}
+		now := time.Now()
 		var sending int64
-		if err := db.Model(&model.Callback{}).Where("order_id=? AND state='in_flight' AND lease_until>?", o.ID, time.Now()).Count(&sending).Error; err != nil {
+		if err := db.Model(&model.Callback{}).Where("order_id=? AND state='in_flight' AND lease_until>?", o.ID, now).Count(&sending).Error; err != nil {
 			return err
 		}
 		if sending > 0 {
@@ -98,10 +99,10 @@ func (s *Store) RecordCancellationRefund(ctx context.Context, tradeNo, provider,
 		if err := db.Create(&audit).Error; err != nil {
 			return err
 		}
-		if err := db.Model(&review).Updates(map[string]any{"state": "refund_recorded", "review_generation": r.Generation, "operator": operator, "reason": reason, "refund_reference": reference, "resolved_at": time.Now()}).Error; err != nil {
+		if err := db.Model(&review).Updates(map[string]any{"state": "refund_recorded", "review_generation": r.Generation, "operator": operator, "reason": reason, "refund_reference": reference, "resolved_at": now}).Error; err != nil {
 			return err
 		}
-		if err := db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL AND state='in_flight' AND lease_until<=?", o.ID, time.Now()).Updates(map[string]any{"state": "merchant_review", "lease_until": time.Time{}}).Error; err != nil {
+		if err := db.Model(&model.Callback{}).Where("order_id=? AND delivered_at IS NULL AND state='in_flight' AND lease_until<=?", o.ID, now).Updates(map[string]any{"state": "merchant_review", "lease_until": time.Time{}}).Error; err != nil {
 			return err
 		}
 		return refreshCancellationCallback(db, o.ID)
@@ -232,16 +233,25 @@ func collectCancellationReviews(db *gorm.DB, o model.Order, claimed model.Transa
 
 func collectAdditionalCancellationReviews(db *gorm.DB, o model.Order) error {
 	var rows []model.Transaction
-	if err := db.Where("order_id IS NULL AND state=? AND attempt_id IN (SELECT id FROM payment_attempts WHERE order_id=?)", model.Confirmed, o.ID).Find(&rows).Error; err != nil {
+	if err := db.Table("transactions t").Select("DISTINCT t.*").
+		Joins("JOIN payment_attempts a ON a.provider=t.provider AND a.receiver=t.receiver AND a.currency=t.currency AND a.units=t.units AND a.selected_at<=t.occurred_at AND a.expires_at>=t.occurred_at").
+		Where("a.order_id = ? AND t.order_id IS NULL AND t.state = ?", o.ID, model.Confirmed).
+		Order("t.occurred_at, t.event_id").Find(&rows).Error; err != nil {
 		return err
 	}
 	for _, t := range rows {
-		_, matched, reason, err := matchAttempt(db, t, false)
+		a, matched, reason, err := matchAttempt(db, t, false)
 		if err != nil {
 			return err
 		}
 		if matched.ID != o.ID || (reason != "additional_payment" && !(reason == "order_closed" && o.Status == model.Canceled)) {
 			continue
+		}
+		if t.AttemptID == nil || *t.AttemptID != a.ID {
+			if err := db.Model(&t).Update("attempt_id", a.ID).Error; err != nil {
+				return err
+			}
+			t.AttemptID = &a.ID
 		}
 		if err := ensureCancellationReview(db, o, t); err != nil {
 			return err
@@ -266,6 +276,7 @@ func backfillAdditionalCancellationReviews(db *gorm.DB) error {
 }
 
 func (s *Store) CallbackCanSend(ctx context.Context, task model.Callback) (bool, error) {
+	task.LeaseUntil = normalizeTime(task.LeaseUntil)
 	var n int64
 	err := s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id=? AND attempts=? AND state='in_flight' AND lease_until=? AND delivered_at IS NULL", task.OrderID, task.Attempts, task.LeaseUntil).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Count(&n).Error
 	return n == 1, err

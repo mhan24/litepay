@@ -51,7 +51,11 @@ func (s *Store) RetryCallback(ctx context.Context, tradeNo, operator, reason str
 		if task.DeliveredAt != nil {
 			return errors.New("商城已确认通知，不能重复重新入队")
 		}
-		if time.Now().Before(task.LeaseUntil) || (task.State == "" && task.Attempts > 0 && time.Now().Before(task.NextAt)) {
+		if task.State == "canceled_refunded" {
+			return errors.New("该订单已标记取消退款，不得重新通知交付")
+		}
+		now := time.Now()
+		if now.Before(task.LeaseUntil) || (task.State == "" && task.Attempts > 0 && now.Before(task.NextAt)) {
 			return errors.New("通知仍在发送，请稍后重试")
 		}
 		if task.State != "merchant_review" && task.State != "exhausted" && task.Attempts < task.AttemptBase+maxAttempts {
@@ -61,6 +65,6 @@ func (s *Store) RetryCallback(ctx context.Context, tradeNo, operator, reason str
 		if err := db.Create(&audit).Error; err != nil {
 			return err
 		}
-		return db.Model(&task).Updates(map[string]any{"attempt_base": task.Attempts, "attempt_limit": task.Attempts + maxAttempts, "next_at": time.Now(), "lease_until": time.Time{}, "recoveries": task.Recoveries + 1, "state": "queued"}).Error
+		return db.Model(&task).Updates(map[string]any{"attempt_base": task.Attempts, "attempt_limit": task.Attempts + maxAttempts, "next_at": now, "lease_until": time.Time{}, "recoveries": task.Recoveries + 1, "state": "queued"}).Error
 	})
 }

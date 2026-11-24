@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"litepay/internal/model"
@@ -57,7 +58,7 @@ func (s *Store) AcknowledgeRecovery(ctx context.Context, generation string, comp
 		}
 		var old model.IntegrationHealth
 		err := db.First(&old, "name=?", h.Name).Error
-		if err != nil && err != gorm.ErrRecordNotFound {
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		if err == nil && (h.ReportedAt < old.ReportedAt || (h.Generation == old.Generation && h.ReportedAt == old.ReportedAt)) {

@@ -33,7 +33,7 @@ func (s *Store) RequestHistoricalScan(ctx context.Context, no, operator, reason 
 		now := time.Now()
 		for _, a := range attempts {
 			var n int64
-			if err := db.Model(&model.HistoricalScan{}).Where("attempt_id = ? AND state = ?", a.ID, "pending").Count(&n).Error; err != nil {
+			if err := db.Model(&model.HistoricalScan{}).Where("automatic = ? AND attempt_id = ? AND state = ?", false, a.ID, "pending").Count(&n).Error; err != nil {
 				return err
 			}
 			if n > 0 {
@@ -195,6 +195,9 @@ func (s *Store) QueueSettlementScan(ctx context.Context, provider, receiver stri
 			if end.After(now) {
 				end = now
 			}
+			if end.Before(from) {
+				end = from
+			}
 			if err := db.Create(&model.HistoricalScan{Automatic: true, CoverageAfter: now, RequiredAfter: bound, CreatedAt: now, Priority: priority, OrderID: first.OrderID, AttemptID: first.ID, Provider: provider, Receiver: receiver, From: from, To: end, Cursor: from, State: "pending", Operator: "system", Reason: "付款窗口分组复核"}).Error; err != nil {
 				return err
 			}
@@ -205,6 +208,11 @@ func (s *Store) QueueSettlementScan(ctx context.Context, provider, receiver stri
 
 // A saturated request gets a smaller durable chunk, without advancing its coverage.
 func (s *Store) ShrinkHistoricalChunk(ctx context.Context, job model.HistoricalScan, end time.Time) error {
+	if job.ID == 0 {
+		return errors.New("历史补扫任务无效")
+	}
+	job.Cursor = normalizeTime(job.Cursor)
+	end = normalizeTime(end)
 	size := end.Sub(job.Cursor) / 2
 	if size < time.Millisecond {
 		return s.HistoricalScanFailure(ctx, job, false)

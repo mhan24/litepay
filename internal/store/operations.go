@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"gorm.io/gorm"
 	"litepay/internal/model"
 	"time"
@@ -24,7 +25,7 @@ func (s *Store) QueueStats(ctx context.Context) (QueueStats, error) {
 	var out QueueStats
 	db := s.db.WithContext(ctx)
 
-	err := db.Raw(`SELECT COUNT(*) callback_waiting,MAX(0,CAST(COALESCE(MAX((julianday('now')-julianday(o.paid_at))*86400),0) AS INTEGER)) oldest_callback_seconds FROM callbacks c JOIN orders o ON o.id=c.order_id WHERE o.status='PAID' AND c.delivered_at IS NULL AND c.state NOT IN ('merchant_review','exhausted','canceled_refunded')`).Scan(&out).Error
+	err := db.Raw(`SELECT COUNT(*) callback_waiting,MAX(0,CAST(COALESCE(MAX((julianday('now')-julianday(o.paid_at))*86400),0) AS INTEGER)) oldest_callback_seconds FROM callbacks c JOIN orders o ON o.id=c.order_id WHERE o.status='PAID' AND c.delivered_at IS NULL AND c.state NOT IN ('merchant_review','exhausted','canceled_refunded') AND NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=c.order_id)`).Scan(&out).Error
 	if err != nil {
 		return out, err
 	}
@@ -74,7 +75,7 @@ func (s *Store) SaveIntegrationHealth(ctx context.Context, h model.IntegrationHe
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
 		var old model.IntegrationHealth
 		err := db.First(&old, "name=?", h.Name).Error
-		if err != nil && err != gorm.ErrRecordNotFound {
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		if err == nil && (h.ReportedAt < old.ReportedAt || (h.Generation == old.Generation && h.ReportedAt == old.ReportedAt)) {
