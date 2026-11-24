@@ -3,9 +3,11 @@ package bybit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -257,6 +259,82 @@ func TestAccountUIDRequiresIsMasterAndResyncsOn10002(t *testing.T) {
 		}
 		if timeCalls.Load() != 2 || apiCalls.Load() != 2 {
 			t.Fatalf("unexpected call counts: time=%d api=%d", timeCalls.Load(), apiCalls.Load())
+		}
+	})
+}
+
+func TestContextCancellationAndComplianceFailClosed(t *testing.T) {
+	t.Run("context_canceled", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(started)
+			<-release
+		}))
+		defer func() {
+			close(release)
+			srv.Close()
+		}()
+
+		cli := New("secret-key", "secret-val", srv.URL, 5000, 50)
+		cli.UseTestTransport()
+		cli.syncTime = false
+		defer cli.CloseIdleConnections()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := cli.AccountUID(ctx)
+			errCh <- err
+		}()
+		<-started
+		cancel()
+		err := <-errCh
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled to be preserved, got %v", err)
+		}
+		if strings.Contains(err.Error(), srv.URL) || strings.Contains(err.Error(), "secret-") {
+			t.Fatalf("canceled error leaked endpoint or credentials: %v", err)
+		}
+	})
+
+	t.Run("compliance_fail_closed", func(t *testing.T) {
+		start := time.UnixMilli(1700000000000)
+		end := time.UnixMilli(1700003600000)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v5/market/time":
+				_ = json.NewEncoder(w).Encode(map[string]any{"retCode": 0, "time": end.UnixMilli(), "result": map[string]any{}})
+			case "/v5/user/query-api":
+				_ = json.NewEncoder(w).Encode(map[string]any{"retCode": 0, "result": map[string]any{"userID": 123456, "isMaster": true}})
+			case "/v5/asset/deposit/query-internal-record":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"retCode": 0,
+					"result": map[string]any{
+						"nextPageCursor": "",
+						"rows": []map[string]any{
+							{"id": "201", "type": 1, "coin": "USDT", "amount": "5.00", "status": 2, "createdTime": "1700000001000", "txID": "tx-201", "complianceStatus": 0},
+							{"id": "202", "type": 1, "coin": "USDT", "amount": "5.00", "status": 2, "createdTime": "1700000002000", "txID": "tx-202", "complianceStatus": 3},
+							{"id": "203", "type": 1, "coin": "USDT", "amount": "5.00", "status": 2, "createdTime": "1700000003000", "txID": "tx-203", "complianceStatus": 4},
+						},
+					},
+				})
+			}
+		}))
+		defer srv.Close()
+
+		cli := New("k", "s", srv.URL, 5000, 50)
+		cli.UseTestTransport()
+		defer cli.CloseIdleConnections()
+		rows, err := cli.History(context.Background(), start, end)
+		if err != nil || len(rows) != 3 {
+			t.Fatalf("History failed: rows=%+v err=%v", rows, err)
+		}
+		if rows[0].State != model.Confirmed || rows[1].State != model.Confirmed {
+			t.Fatalf("expected compliance 0 and 3 to confirm, got %+v %+v", rows[0], rows[1])
+		}
+		if rows[2].State != model.Unconfirmed || rows[2].Reason != "compliance_pending" {
+			t.Fatalf("expected unknown compliance status to fail closed, got %+v", rows[2])
 		}
 	})
 }

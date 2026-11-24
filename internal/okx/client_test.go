@@ -3,6 +3,7 @@ package okx
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -184,5 +185,39 @@ func TestTimestampExpiredResyncsAndRetriesOnce(t *testing.T) {
 	}
 	if timeCalls.Load() != 2 || accountCalls.Load() != 2 {
 		t.Fatalf("unexpected call counts: time=%d account=%d", timeCalls.Load(), accountCalls.Load())
+	}
+}
+
+func TestContextCancellationPreservedOnInFlightRequest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	}))
+	defer func() {
+		close(release)
+		srv.Close()
+	}()
+
+	c := New("secret-key", "secret-val", "secret-pass", srv.URL, 100)
+	c.UseTestTransport()
+	c.syncTime = false
+	defer c.CloseIdleConnections()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.AccountUID(ctx)
+		errCh <- err
+	}()
+	<-started
+	cancel()
+	err := <-errCh
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled to be preserved, got %v", err)
+	}
+	if strings.Contains(err.Error(), srv.URL) || strings.Contains(err.Error(), "secret-") {
+		t.Fatalf("canceled error leaked endpoint or credentials: %v", err)
 	}
 }

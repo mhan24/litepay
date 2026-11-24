@@ -238,3 +238,92 @@ func TestEnablingProviderViaCurrencyVerifiesAccountAndValidatesTONLookback(t *te
 		t.Fatalf("expected Load with nil store to be a no-op without panic, got: %v", err)
 	}
 }
+
+func TestSnapshotCopiesSlicesAndPreservesCurrenciesAndRetryDelays(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.BEpusdt.APIToken = "0123456789abcdef0123456789abcdef"
+	cfg.Checkout.Currencies = []string{"USDT", "USDC"}
+	cfg.Checkout.BinanceCurrencies = []string{"USDT"}
+	cfg.Checkout.OKXCurrencies = []string{"USDC"}
+	cfg.Checkout.ProviderOrder = []string{config.ProviderOKX, config.ProviderBinance, config.ProviderBybit, config.ProviderBitget}
+	cfg.Notify.RetryDelays = []int{5, 15, 60}
+	normalize(cfg)
+
+	snap := Snapshot(cfg)
+	if snap.CheckoutCurrencies == nil || !reflect.DeepEqual(*snap.CheckoutCurrencies, cfg.Checkout.Currencies) {
+		t.Fatalf("Snapshot dropped CheckoutCurrencies: %+v", snap.CheckoutCurrencies)
+	}
+	if snap.NotifyRetryDelays == nil || !reflect.DeepEqual(*snap.NotifyRetryDelays, []int{5, 15, 60}) {
+		t.Fatalf("Snapshot dropped NotifyRetryDelays: %+v", snap.NotifyRetryDelays)
+	}
+
+	// Mutating slices returned by Snapshot must not alias or corrupt cfg.
+	(*snap.CheckoutCurrencies)[0] = "MUTATED"
+	(*snap.BinanceCurrencies)[0] = "MUTATED"
+	(*snap.ProviderOrder)[0] = "MUTATED"
+	(*snap.NotifyRetryDelays)[0] = 999
+	if cfg.Checkout.Currencies[0] != "USDT" || cfg.Checkout.BinanceCurrencies[0] != "USDT" ||
+		cfg.Checkout.ProviderOrder[0] != config.ProviderOKX || cfg.Notify.RetryDelays[0] != 5 {
+		t.Fatalf("Snapshot aliased backing config slices: %+v %+v", cfg.Checkout, cfg.Notify)
+	}
+
+	// Round-tripping a fresh Snapshot through Patch.Apply must remain valid.
+	roundTrip := config.Default()
+	roundTrip.Server.Production = false
+	roundTrip.BEpusdt.APIToken = cfg.BEpusdt.APIToken
+	Snapshot(cfg).Apply(roundTrip)
+	normalize(roundTrip)
+	if err := Validate(roundTrip); err != nil {
+		t.Fatalf("Snapshot round-trip failed Validate: %v", err)
+	}
+
+	step := " 0.01 "
+	minAmt := " 0.05 "
+	Patch{OrderAmountStep: &step, OrderMinAmount: &minAmt}.Apply(roundTrip)
+	if roundTrip.Order.AmountStep != "0.01" || roundTrip.Order.MinAmount != "0.05" {
+		t.Fatalf("expected trimmed order amounts, got step=%q min=%q", roundTrip.Order.AmountStep, roundTrip.Order.MinAmount)
+	}
+
+	// Unnormalized config.Default() keeps nil per-provider slices so Snapshot round-trip preserves inherited currencies.
+	defaultCfg := config.Default()
+	defaultCfg.Server.Production = false
+	defaultCfg.BEpusdt.APIToken = cfg.BEpusdt.APIToken
+	defaultSnap := Snapshot(defaultCfg)
+	if defaultSnap.BinanceCurrencies != nil || defaultSnap.OKXCurrencies != nil || defaultSnap.BybitCurrencies != nil || defaultSnap.BitgetCurrencies != nil {
+		t.Fatalf("expected nil per-provider slices for unnormalized config, got %+v", defaultSnap)
+	}
+	dst := config.Default()
+	dst.Server.Production = false
+	dst.BEpusdt.APIToken = cfg.BEpusdt.APIToken
+	defaultSnap.Apply(dst)
+	normalize(dst)
+	if !reflect.DeepEqual(dst.Checkout.Currencies, []string{"USDT", "USDC"}) || !reflect.DeepEqual(dst.ProviderCurrencies(config.ProviderBinance), []string{"USDT", "USDC"}) {
+		t.Fatalf("Snapshot(config.Default()) round-trip lost inherited currencies: %+v", dst.Checkout)
+	}
+}
+
+func TestValidateRegisterURLRejectsTabsAndBackslashHost(t *testing.T) {
+	for _, bad := range []string{
+		"https://example.com/\tpath",
+		"https://example.com\r\n/path",
+		"https://evil.com\\@example.com/register",
+		"https://user:pass@example.com/register",
+		"javascript:alert(1)",
+	} {
+		cfg := config.Default()
+		cfg.Server.Production = false
+		cfg.BEpusdt.APIToken = "0123456789abcdef0123456789abcdef"
+		cfg.Checkout.Binance.RegisterURL = bad
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("expected invalid register URL %q to be rejected", bad)
+		}
+	}
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.BEpusdt.APIToken = "0123456789abcdef0123456789abcdef"
+	cfg.Checkout.Binance.RegisterURL = "https://accounts.binance.com/register?ref=12345"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("valid register URL rejected: %v", err)
+	}
+}

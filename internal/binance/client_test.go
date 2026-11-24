@@ -2,6 +2,7 @@ package binance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -163,5 +164,38 @@ func TestRequestBudgetCannotOverflowOrBecomeNegative(t *testing.T) {
 	}
 	if _, err := whitespace.History(context.Background(), time.UnixMilli(90000), time.UnixMilli(110000)); err == nil {
 		t.Fatal("expected History to reject whitespace-only API key/secret")
+	}
+}
+
+func TestTransportErrorClassificationAndPayCodePreserved(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantKind   ErrorKind
+		wantStatus int
+		wantCode   int
+	}{
+		{"bad_api_id", http.StatusBadRequest, `{"code":-2008,"msg":"Invalid Api-Key ID."}`, ErrorAuth, http.StatusBadRequest, -2008},
+		{"disconnected", http.StatusBadRequest, `{"code":-1001,"msg":"Internal error"}`, ErrorExchange, http.StatusBadRequest, -1001},
+		{"server_busy", http.StatusBadRequest, `{"code":-1008,"msg":"Server busy"}`, ErrorExchange, http.StatusBadRequest, -1008},
+		{"pay_business", http.StatusOK, `{"code":"400004","message":"err","success":false,"data":[]}`, ErrorBusiness, http.StatusOK, 400004},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+			c := New("key", "secret", srv.URL, 5000, 100)
+			c.UseTestTransport()
+			defer c.CloseIdleConnections()
+			_, err := c.History(context.Background(), time.UnixMilli(90000), time.UnixMilli(110000))
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Kind != tc.wantKind || apiErr.Status != tc.wantStatus || apiErr.Code != tc.wantCode {
+				t.Fatalf("got err=%v, want kind=%s status=%d code=%d", err, tc.wantKind, tc.wantStatus, tc.wantCode)
+			}
+		})
 	}
 }

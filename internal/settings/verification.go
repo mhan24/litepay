@@ -47,6 +47,7 @@ func verifyCollectionAccount(ctx context.Context, c *config.Config, provider str
 	switch provider {
 	case config.ProviderBinance:
 		cli := binance.New(c.Binance.APIKey, c.Binance.APISecret, c.Binance.BaseURL, c.Binance.RecvWindow, c.Binance.Limit)
+		defer cli.CloseIdleConnections()
 		uid, err := cli.AccountUID(ctx)
 		if err != nil {
 			return fmt.Errorf("Binance 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
@@ -56,6 +57,7 @@ func verifyCollectionAccount(ctx context.Context, c *config.Config, provider str
 		}
 	case config.ProviderOKX:
 		cli := okx.New(c.OKX.APIKey, c.OKX.APISecret, c.OKX.Passphrase, c.OKX.BaseURL, c.OKX.Limit)
+		defer cli.CloseIdleConnections()
 		uid, err := cli.AccountUID(ctx)
 		if err != nil {
 			return fmt.Errorf("OKX 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
@@ -65,6 +67,7 @@ func verifyCollectionAccount(ctx context.Context, c *config.Config, provider str
 		}
 	case config.ProviderBybit:
 		cli := bybit.New(c.Bybit.APIKey, c.Bybit.APISecret, c.Bybit.BaseURL, c.Bybit.RecvWindow, c.Bybit.Limit)
+		defer cli.CloseIdleConnections()
 		uid, err := cli.AccountUID(ctx)
 		if err != nil {
 			return fmt.Errorf("Bybit 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)
@@ -74,6 +77,7 @@ func verifyCollectionAccount(ctx context.Context, c *config.Config, provider str
 		}
 	case config.ProviderBitget:
 		cli := bitget.New(c.Bitget.APIKey, c.Bitget.APISecret, c.Bitget.Passphrase, c.Bitget.BaseURL, c.Bitget.Limit)
+		defer cli.CloseIdleConnections()
 		uid, err := cli.AccountUID(ctx)
 		if err != nil {
 			return fmt.Errorf("Bitget 账户核验失败: %w，请检查 API 凭据、读取权限、IP 白名单和网络", err)

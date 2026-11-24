@@ -175,13 +175,13 @@ func (p Patch) Apply(c *config.Config) {
 		c.Order.ExpireMinutes = *p.OrderExpireMinutes
 	}
 	if p.OrderAmountStep != nil {
-		c.Order.AmountStep = *p.OrderAmountStep
+		c.Order.AmountStep = strings.TrimSpace(*p.OrderAmountStep)
 	}
 	if p.OrderMaxOffset != nil {
 		c.Order.MaxOffset = *p.OrderMaxOffset
 	}
 	if p.OrderMinAmount != nil {
-		c.Order.MinAmount = *p.OrderMinAmount
+		c.Order.MinAmount = strings.TrimSpace(*p.OrderMinAmount)
 	}
 	if p.OrderSlotGrace != nil {
 		c.Order.SlotGraceSeconds = *p.OrderSlotGrace
@@ -260,17 +260,35 @@ func (p Patch) Apply(c *config.Config) {
 func Snapshot(c *config.Config) Patch {
 	s := func(v string) *string { return &v }
 	i := func(v int) *int { return &v }
-
 	b := func(v bool) *bool { return &v }
+	ss := func(v []string) *[]string {
+		if v == nil {
+			return nil
+		}
+		cp := make([]string, len(v))
+		copy(cp, v)
+		return &cp
+	}
+	is := func(v []int) *[]int {
+		if v == nil {
+			return nil
+		}
+		cp := make([]int, len(v))
+		copy(cp, v)
+		return &cp
+	}
 
 	return Patch{
 		AdminPath:          s(c.AdminPath()),
 		StoreURL:           s(c.Server.StoreURL),
 		AdminUsername:      s(c.Admin.Username),
 		BEpusdtReselect:    b(c.BEpusdt.Reselect),
-		CheckoutCurrencies: &[]string{},
-		ProviderOrder:      &c.Checkout.ProviderOrder,
-		BinanceCurrencies:  &c.Checkout.BinanceCurrencies, OKXCurrencies: &c.Checkout.OKXCurrencies, BybitCurrencies: &c.Checkout.BybitCurrencies, BitgetCurrencies: &c.Checkout.BitgetCurrencies,
+		CheckoutCurrencies: ss(c.Checkout.Currencies),
+		ProviderOrder:      ss(c.Checkout.ProviderOrder),
+		BinanceCurrencies:  ss(c.Checkout.BinanceCurrencies),
+		OKXCurrencies:      ss(c.Checkout.OKXCurrencies),
+		BybitCurrencies:    ss(c.Checkout.BybitCurrencies),
+		BitgetCurrencies:   ss(c.Checkout.BitgetCurrencies),
 		CheckoutNote:       s(c.Checkout.Note),
 		BinanceUID:         s(c.Checkout.Binance.UID),
 		OKXUID:             s(c.Checkout.OKX.UID),
@@ -310,7 +328,7 @@ func Snapshot(c *config.Config) Patch {
 		BitgetPollInterval: i(c.Bitget.PollInterval),
 		BitgetLookback:     i(c.Bitget.LookbackBuffer),
 
-		NotifyRetryDelays: &[]int{},
+		NotifyRetryDelays: is(c.Notify.RetryDelays),
 		NotifyMaxAttempts: i(c.Notify.MaxAttempts),
 		NotifyTimeout:     i(c.Notify.TimeoutSeconds),
 	}
@@ -344,6 +362,8 @@ func (m *Manager) Load(ctx context.Context) error {
 	if m == nil || m.st == nil {
 		return nil
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.st.HasMasterKey() {
 		key, err := store.ResolveMasterKey(m.Get().Server.MasterKeyFile, m.Get().Server.Production)
 		if err != nil {
@@ -521,8 +541,6 @@ func (m *Manager) update(ctx context.Context, p Patch, operator string, report *
 		v := next.Admin.Password
 		snap.AdminPasswordHash = &v
 	}
-	snap.CheckoutCurrencies = &next.Checkout.Currencies
-	snap.NotifyRetryDelays = &next.Notify.RetryDelays
 
 	payload, err := json.Marshal(snap)
 	if err != nil {
@@ -557,11 +575,14 @@ func validateRegisterURL(name, raw string) error {
 	if raw == "" {
 		return nil
 	}
-	if len(raw) > 512 || strings.ContainsAny(raw, "\r\n") {
+	if len(raw) > 512 {
 		return fmt.Errorf("%s 注册链接长度不能超过 512 个字符", name)
 	}
+	if strings.ContainsAny(raw, "\r\n\t") {
+		return fmt.Errorf("%s 注册链接必须是有效的 HTTP(S) 地址", name)
+	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || strings.Contains(u.Host, "\\") {
 		return fmt.Errorf("%s 注册链接必须是有效的 HTTP(S) 地址", name)
 	}
 	return nil

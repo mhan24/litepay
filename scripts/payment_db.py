@@ -158,7 +158,7 @@ def snapshot(source, output):
             os.fsync(file.fileno())
         fsync_dir(output.parent)
         return result
-    except Exception:
+    except BaseException:
         output.unlink(missing_ok=True)
         if sidecar_created:
             sidecar.unlink(missing_ok=True)

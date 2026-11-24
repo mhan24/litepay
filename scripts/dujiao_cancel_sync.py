@@ -322,6 +322,8 @@ def discover(source, state, gateway, now):
 
 
 def cancel(gateway, trade_id, order_id, token):
+    if not isinstance(trade_id, str) or not trade_id.strip() or not isinstance(order_id, str) or not order_id.strip() or not isinstance(token, str) or not token.strip():
+        raise ValueError('cancellation identifiers and token are required')
     body = {'trade_id': trade_id, 'order_id': order_id}
     signing = '&'.join(k + '=' + body[k] for k in sorted(body)) + token
     body['signature'] = hashlib.md5(signing.encode()).hexdigest()
@@ -331,7 +333,10 @@ def cancel(gateway, trade_id, order_id, token):
                                           'User-Agent': 'Mozilla/5.0 LitePay-CancelSync/1.0'})
     try:
         with urllib.request.build_opener(NoRedirect).open(req, timeout=10) as response:
-            result = json.loads(response.read(65536))
+            raw = response.read(65537)
+            if len(raw) > 65536:
+                raise ValueError('gateway response too large')
+            result = json.loads(raw)
     except urllib.error.HTTPError as error:
         error.close()
         raise
@@ -520,7 +525,10 @@ def signed_post(gateway, path, body, token):
                                  headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 LitePay-CancelSync/1.0'})
     try:
         with urllib.request.build_opener(NoRedirect).open(req, timeout=3) as response:
-            result = json.loads(response.read(4096))
+            raw = response.read(4097)
+            if len(raw) > 4096:
+                raise ValueError('gateway response too large')
+            result = json.loads(raw)
             if not isinstance(result, dict) or result.get('status_code') != 200:
                 raise ValueError('signed request rejected')
             return result
@@ -572,18 +580,24 @@ def review_missing(database, state, gateway, trade_id, reason):
         source.close()
     if len(valid)!=1 or valid[0][:3]!=(pid,tid,oid):
         raise ValueError('merchant cancellation no longer matches; recheck merchant state')
+    epoch = state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
+    generation = epoch[0] if epoch else ''
     result=cancel(gateway,tid,oid,valid[0][3])
     if result not in ('missing_gateway','closed'):
         raise ValueError('gateway result changed; recheck payment before review')
     outcome='reviewed_missing' if result=='missing_gateway' else 'closed'
-    epoch=state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?',(gateway,)).fetchone()
-    generation=epoch[0] if epoch else ''
     now = time.time()
     with immediate_tx(state):
-        state.execute('INSERT INTO missing_reviews(gateway,payment_id,trade_id,order_id,generation,operator,reason,created_at) VALUES(?,?,?,?,?,?,?,?)',(gateway,pid,tid,oid,generation,operator_name(),reason,now))
-        state.execute("UPDATE cancellations SET outcome=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",(outcome,now,gateway,pid,tid,oid))
+        current = state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
+        current_generation = current[0] if current else ''
+        if current_generation != generation:
+            raise ValueError('gateway generation changed during review')
+        updated = state.execute("UPDATE cancellations SET outcome=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=? AND outcome='missing_gateway'", (outcome, now, gateway, pid, tid, oid))
+        if updated.rowcount != 1:
+            raise ValueError('missing cancellation state changed during review')
+        state.execute('INSERT INTO missing_reviews(gateway,payment_id,trade_id,order_id,generation,operator,reason,created_at) VALUES(?,?,?,?,?,?,?,?)', (gateway, pid, tid, oid, generation, operator_name(), reason, now))
         if generation:
-            state.execute("INSERT OR REPLACE INTO epoch_receipts VALUES(?,?,?,?,?,?,?)",(gateway,pid,tid,oid,generation,outcome,now))
+            state.execute("INSERT OR REPLACE INTO epoch_receipts VALUES(?,?,?,?,?,?,?)", (gateway, pid, tid, oid, generation, outcome, now))
 
 
 def review_conflict(database, state, gateway, trade_id, reason):
