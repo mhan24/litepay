@@ -307,7 +307,7 @@ func currencyOptionsFor(cfg *config.Config, o *model.Order, provider string) []c
 	var out []currencyOption
 	for _, currency := range cfg.Checkout.Currencies {
 		if cfg.ProviderCurrency(provider, currency) && orderCurrencyAllowed(cfg, o, currency) {
-			out = append(out, currencyOption{Currency: currency, Icon: currencyIcon(currency), Enabled: cfg.ProviderEnabled(provider), Selected: o.Currency == currency})
+			out = append(out, currencyOption{Currency: currency, Icon: currencyIcon(currency), Enabled: cfg.ProviderEnabled(provider), Selected: strings.EqualFold(o.Provider, provider) && o.Currency == currency})
 		}
 	}
 	return out
@@ -553,7 +553,12 @@ func (h *Handlers) Ready(c *gin.Context) {
 			respondUnready("商城取消同步异常或心跳过期", nil)
 			return
 		}
-	} else if health, err := h.st.IntegrationHealth(ctx); err == nil && health.Conflicts > 0 {
+	} else if health, err := h.st.IntegrationHealth(ctx); err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			respondUnready("取消同步健康状态暂不可用", nil)
+			return
+		}
+	} else if health.Conflicts > 0 {
 		respondUnready("商城取消同步存在未解决的已支付冲突", nil)
 		return
 	}

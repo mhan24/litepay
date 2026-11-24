@@ -1,24 +1,57 @@
 {{define "status_poll_script"}}<script nonce="{{.Nonce}}">
 window.pollOrderStatus=function(no,receive,stopped){
-  var runs=0,failures=0,timer,running=false;
+  var runs=0,failures=0,timer=null,running=false,disposed=false,retryUntil=0,activeController=null;
+  function cleanup(){
+    if(disposed)return;
+    disposed=true;
+    clearTimeout(timer);timer=null;
+    if(activeController){activeController.abort();activeController=null}
+    document.removeEventListener('visibilitychange',onVisibility);
+    window.removeEventListener('pagehide',cleanup);
+  }
+  function schedule(ms){
+    clearTimeout(timer);
+    timer=setTimeout(poll,ms);
+  }
   function poll(){
-    if(running||stopped())return;
+    if(disposed||stopped()){cleanup();return}
+    if(running)return;
+    var wait=retryUntil-Date.now();
+    if(wait>0){schedule(wait);return}
     running=true;
-    var retry=0,controller=new AbortController();
-    var timeout=setTimeout(function(){controller.abort()},8000);
-    fetch('/api/order/status?order_id='+encodeURIComponent(no),{cache:'no-store',signal:controller.signal})
+    var retry=0,controller=new AbortController(),timeout=null,signal=controller.signal;
+    activeController=controller;
+    if(typeof AbortSignal!=='undefined'&&typeof AbortSignal.timeout==='function'&&typeof AbortSignal.any==='function'){
+      signal=AbortSignal.any([controller.signal,AbortSignal.timeout(8000)]);
+    }else{
+      timeout=setTimeout(function(){controller.abort()},8000);
+    }
+    fetch('/api/order/status?order_id='+encodeURIComponent(no),{cache:'no-store',signal:signal})
       .then(function(r){if(!r.ok){retry=Math.min(120000,Math.max(0,Number(r.headers.get('Retry-After'))*1000||0));throw Error('status unavailable')}return r.json()})
-      .then(function(r){if(r.code!==0)throw Error('status unavailable');failures=0;runs++;receive(r.data)})
-      .catch(function(){failures=Math.min(failures+1,5)})
+      .then(function(r){if(!r||r.code!==0||!r.data)throw Error('status unavailable');failures=0;retryUntil=0;runs++;receive(r.data)})
+      .catch(function(){if(disposed)return;failures=Math.min(failures+1,5);if(retry>0)retryUntil=Math.max(retryUntil,Date.now()+retry)})
       .finally(function(){
-        clearTimeout(timeout);running=false;
-        if(stopped())return;
+        if(timeout)clearTimeout(timeout);
+        if(activeController===controller)activeController=null;
+        running=false;
+        if(disposed||stopped()){cleanup();return}
         var delay=document.hidden?15000:(runs<15?2000:5000);
         if(failures)delay=Math.max(delay,Math.min(30000,2000*Math.pow(2,failures)));
-        timer=setTimeout(poll,Math.max(delay,retry)+Math.random()*500);
+        var waitRetry=Math.max(0,retryUntil-Date.now());
+        schedule(Math.max(delay,waitRetry)+Math.random()*500);
       });
   }
-  document.addEventListener('visibilitychange',function(){if(!document.hidden&&!running){clearTimeout(timer);poll()}});
+  function onVisibility(){
+    if(disposed||stopped()){cleanup();return}
+    if(!document.hidden&&!running){
+      var wait=retryUntil-Date.now();
+      if(wait>0){schedule(wait);return}
+      clearTimeout(timer);timer=null;poll();
+    }
+  }
+  document.addEventListener('visibilitychange',onVisibility);
+  window.addEventListener('pagehide',cleanup);
   poll();
+  return cleanup;
 };
 </script>{{end}}

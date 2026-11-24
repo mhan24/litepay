@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -65,6 +66,14 @@ func (l *selectionLimiter) blocked(key string, limit int, now time.Time) (bool, 
 	}
 	return true, max(1, int(v.until.Sub(now).Seconds())+1)
 }
+func parseRequestForm(c *gin.Context, maxMemory int64) error {
+	ct := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		return c.Request.ParseMultipartForm(maxMemory)
+	}
+	return c.Request.ParseForm()
+}
+
 func (h *Handlers) LimitPaymentSelection(c *gin.Context) {
 	reject := func(seconds int) {
 		c.Header("Retry-After", strconv.Itoa(seconds))
@@ -79,12 +88,17 @@ func (h *Handlers) LimitPaymentSelection(c *gin.Context) {
 	if c.Request.Body != nil {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	}
-	if err := c.Request.ParseForm(); err != nil {
+	if err := parseRequestForm(c, 64<<10); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"code": 1, "msg": "付款方式请求体积过大，请刷新页面后重试"})
+			return
+		}
 		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "付款方式请求格式无效，请刷新页面后重试"})
 		return
 	}
 	no := strings.TrimSpace(c.PostForm("trade_no"))
-	if len(no) > 128 {
+	if no == "" || len(no) > 128 {
 		c.AbortWithStatusJSON(400, gin.H{"code": 1, "msg": "订单号格式无效，请返回商户页面核对"})
 		return
 	}

@@ -134,6 +134,11 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 	}
 	o, err := h.st.CancelReference(c.Request.Context(), req.TradeID, req.OrderID)
 	if err != nil {
+		if isInternalDBError(err) {
+			h.logger().Error("BEpusdt 取消订单数据库错误", "err", err)
+			h.bepusdtFail(c, "database temporarily unavailable")
+			return
+		}
 		h.bepusdtFail(c, err.Error())
 		return
 	}
@@ -252,6 +257,11 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 	}
 	order, err := h.st.Create(c.Request.Context(), model.Order{SigningKeyID: cfg.BEpusdt.TokenVersion, TradeNo: tradeNo, OutTradeNo: req.OrderID, Name: req.Name, OriginUnits: units, NotifyURL: req.NotifyURL, ReturnURL: req.RedirectURL, ExpiresAt: time.Now().Add(ttl), CurrencyLimit: req.Currencies, Reselect: reselect})
 	if err != nil {
+		if isInternalDBError(err) {
+			h.logger().Error("BEpusdt 创建订单数据库错误", "err", err)
+			h.bepusdtFail(c, "database temporarily unavailable")
+			return
+		}
 		h.bepusdtFail(c, "order create failed: "+err.Error())
 		return
 	}

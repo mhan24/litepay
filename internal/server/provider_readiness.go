@@ -111,19 +111,20 @@ func (h *Handlers) providerHealths(c *gin.Context) []providerHealth {
 }
 func (h *Handlers) ProviderReady(c *gin.Context) {
 	detailed := h.canReadReadinessDetails(c)
-	for _, state := range h.providerHealths(c) {
-		if state.Provider == c.Param("provider") {
-			status := 200
-			if !state.Ready {
-				status = 503
-			}
-			if !detailed {
-				c.JSON(status, gin.H{"ready": state.Ready})
-				return
-			}
-			c.JSON(status, state)
+	provider := c.Param("provider")
+	switch provider {
+	case config.ProviderBinance, config.ProviderOKX, config.ProviderBybit, config.ProviderBitget:
+		state := h.providerState(c, h.C(), provider)
+		status := 200
+		if !state.Ready {
+			status = 503
+		}
+		if !detailed {
+			c.JSON(status, gin.H{"ready": state.Ready})
 			return
 		}
+		c.JSON(status, state)
+		return
 	}
 	if !detailed {
 		c.JSON(503, gin.H{"ready": false})

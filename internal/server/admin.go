@@ -221,9 +221,12 @@ func (a *adminAuth) reauthLimiter() *adminAuth {
 func (a *adminAuth) isExhausted(ip, user string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	now := time.Now()
 	_, key := adminAttemptKeys(ip, user)
 	attempt := a.attempts[key]
-	return (attempt != nil && attempt.count >= adminUserAttemptLimit) || a.globalCount >= adminGlobalAttemptLimit
+	userExhausted := attempt != nil && !now.After(attempt.until) && attempt.count >= adminUserAttemptLimit
+	globalExhausted := !now.After(a.globalUntil) && a.globalCount >= adminGlobalAttemptLimit
+	return userExhausted || globalExhausted
 }
 
 // issue 生成新会话 token 与 CSRF token。
@@ -329,18 +332,17 @@ func (a *adminAuth) allow(ip string, users ...string) bool {
 
 	now := time.Now()
 	for key, attempt := range a.attempts {
-		if now.After(attempt.until) {
+		if now.After(attempt.until) && attempt.inflight == 0 {
 			delete(a.attempts, key)
 		}
 	}
 	for key, attempt := range a.ipAttempts {
-		if now.After(attempt.until) {
+		if now.After(attempt.until) && attempt.inflight == 0 {
 			delete(a.ipAttempts, key)
 		}
 	}
 	if now.After(a.globalUntil) {
-		a.globalCount = 0
-		a.globalInflight = 0
+		a.globalCount = a.globalInflight
 		a.globalUntil = now.Add(adminAttemptWindow)
 	}
 	if a.hardLimits && a.globalCount >= adminGlobalAttemptLimit {
@@ -363,22 +365,42 @@ func (a *adminAuth) allow(ip string, users ...string) bool {
 	}
 
 	ipAt, ipOK := a.ipAttempts[ipKey]
-	if a.hardLimits && ipOK && !now.After(ipAt.until) && ipAt.count >= adminIPAttemptLimit {
-		return false
+	if a.hardLimits && ipOK {
+		ipCount := ipAt.count
+		if now.After(ipAt.until) {
+			ipCount = ipAt.inflight
+		}
+		if ipCount >= adminIPAttemptLimit {
+			return false
+		}
 	}
 	uAt, uOK := a.attempts[userKey]
-	if uOK && !now.After(uAt.until) && uAt.count >= adminUserAttemptLimit {
-		return false
+	if uOK {
+		uCount := uAt.count
+		if now.After(uAt.until) {
+			uCount = uAt.inflight
+		}
+		if uCount >= adminUserAttemptLimit {
+			return false
+		}
 	}
 
-	if !ipOK || now.After(ipAt.until) {
+	if !ipOK {
 		a.ipAttempts[ipKey] = &loginAttempt{count: 1, inflight: 1, until: now.Add(adminAttemptWindow)}
+	} else if now.After(ipAt.until) {
+		ipAt.count = ipAt.inflight + 1
+		ipAt.inflight++
+		ipAt.until = now.Add(adminAttemptWindow)
 	} else {
 		ipAt.count++
 		ipAt.inflight++
 	}
-	if !uOK || now.After(uAt.until) {
+	if !uOK {
 		a.attempts[userKey] = &loginAttempt{count: 1, inflight: 1, until: now.Add(adminAttemptWindow)}
+	} else if now.After(uAt.until) {
+		uAt.count = uAt.inflight + 1
+		uAt.inflight++
+		uAt.until = now.Add(adminAttemptWindow)
 	} else {
 		uAt.count++
 		uAt.inflight++
@@ -513,6 +535,16 @@ func (h *Handlers) AdminAuth() gin.HandlerFunc {
 
 		// CSRF：所有写操作必须携带会话内的 token
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions {
+			if c.Request.Body != nil {
+				if err := parseRequestForm(c, 1<<20); err != nil {
+					var maxErr *http.MaxBytesError
+					if errors.As(err, &maxErr) {
+						c.Abort()
+						c.String(http.StatusRequestEntityTooLarge, "请求内容过大，请精简后重试")
+						return
+					}
+				}
+			}
 			token := c.PostForm("csrf")
 			if token == "" {
 				token = c.GetHeader("X-CSRF-Token")
@@ -594,6 +626,15 @@ func (h *Handlers) AdminLoginPage(c *gin.Context) {
 
 // AdminLoginSubmit POST /admin/login
 func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
+	if c.Request.Body != nil {
+		if err := parseRequestForm(c, 1<<20); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				c.String(http.StatusRequestEntityTooLarge, "请求内容过大，请重试")
+				return
+			}
+		}
+	}
 	auth := h.currentAdmin()
 	ip := c.ClientIP()
 	user := strings.TrimSpace(c.PostForm("username"))
@@ -611,7 +652,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 			return
 		}
 	} else if !auth.allow(ip, user) {
-		h.logger().Warn("后台登录触发频控限制", "username", user, "ip", ip)
+		h.logger().Warn("后台登录触发频控限制", "username", boundedLogText(user, 64), "ip", ip)
 		c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login?err=")+url.QueryEscape("登录尝试过于频繁，请 10 分钟后再试"))
 		return
 	}
@@ -630,7 +671,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 			// Attempts are reserved atomically in allow, including concurrent requests.
 			auth.failed(ip, user)
 		}
-		h.logger().Warn("后台登录失败", "username", user, "ip", ip, "has_session", hasSession)
+		h.logger().Warn("后台登录失败", "username", boundedLogText(user, 64), "ip", ip, "has_session", hasSession)
 		errTarget := h.adminURL("/admin/login?err=") + url.QueryEscape("管理员账号或密码错误，请核对后重试")
 		if safeAdminNext(next, h.C().AdminPath()) {
 			errTarget += "&next=" + url.QueryEscape(next)
@@ -653,7 +694,7 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 		return
 	}
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(adminCookieName, token, int(auth.ttl.Seconds()), h.C().AdminPath(), "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
+	c.SetCookie(adminCookieName, token, int(auth.ttl.Seconds()), h.C().AdminPath(), "", isHTTPS(c, h.C()), true)
 	h.logger().Info("管理员登录成功", "operator", user, "ip", ip)
 
 	if !safeAdminNext(next, h.C().AdminPath()) {
@@ -672,7 +713,7 @@ func (h *Handlers) logoutAdmin(c *gin.Context, cookiePath string) {
 		cookiePath = h.C().AdminPath()
 	}
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(adminCookieName, "", -1, cookiePath, "", strings.HasPrefix(h.C().Server.BaseURL, "https://"), true)
+	c.SetCookie(adminCookieName, "", -1, cookiePath, "", isHTTPS(c, h.C()), true)
 	c.Redirect(http.StatusSeeOther, h.adminURL("/admin/login"))
 }
 
@@ -855,7 +896,7 @@ func (h *Handlers) AdminSiteSave(c *gin.Context) {
 		fail(err.Error())
 		return
 	}
-	h.logger().Warn("后台访问入口或跳转地址已更新", "operator", operator, "old_admin_path", oldRoot, "new_admin_path", root, "ip", c.ClientIP())
+	h.logger().Warn("后台访问入口或跳转地址已更新", "operator", operator, "admin_path_changed", oldRoot != root, "ip", c.ClientIP())
 	h.logoutAdmin(c, oldRoot)
 }
 
@@ -1028,13 +1069,23 @@ func parseSettingsForm(c *gin.Context) (settings.Patch, []string) {
 		raw := strings.TrimSpace(c.PostForm("notify_retry_delays"))
 		if raw != "" {
 			var delays []int
+			invalid := false
 			for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '，' || r == ' ' }) {
 				n, err := strconv.Atoi(part)
 				if err != nil || n < 0 || n > 3600 {
 					errs = append(errs, "重试间隔需为 0~3600 的整数，用逗号分隔")
+					invalid = true
 					break
 				}
 				delays = append(delays, n)
+				if len(delays) > 20 {
+					errs = append(errs, "重试间隔最多配置 20 项")
+					invalid = true
+					break
+				}
+			}
+			if !invalid && len(delays) == 0 {
+				errs = append(errs, "重试间隔需为 0~3600 的整数，用逗号分隔")
 			}
 			p.NotifyRetryDelays = &delays
 		}
@@ -1066,8 +1117,29 @@ func joinInts(v []int) string {
 // 工具
 // -----------------------------------------------------------------------------
 
+func isHTTPS(c *gin.Context, cfg *config.Config) bool {
+	if cfg != nil && strings.HasPrefix(strings.ToLower(cfg.Server.BaseURL), "https://") {
+		return true
+	}
+	return c != nil && c.Request != nil && c.Request.TLS != nil
+}
+
+func boundedLogText(s string, maxRunes int) string {
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes]) + "...(truncated)"
+}
+
 func (h *Handlers) renderAdminError(c *gin.Context, err error) {
-	renderHTML(c, http.StatusOK, "admin_error.html", gin.H{
+	status := http.StatusInternalServerError
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		status = http.StatusNotFound
+	} else if isInternalDBError(err) {
+		status = http.StatusServiceUnavailable
+	}
+	renderHTML(c, status, "admin_error.html", gin.H{
 		"Base":  h.adminBase(c, "orders", "操作失败"),
 		"Error": err.Error(),
 	})
@@ -1345,8 +1417,12 @@ func (h *Handlers) AdminRecordRefund(c *gin.Context) {
 func (a *adminAuth) loginDelay(ip string) time.Duration {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	excess := max(0, a.globalCount-adminGlobalAttemptLimit+1)
-	if at := a.ipAttempts[strings.TrimSpace(ip)]; at != nil {
+	now := time.Now()
+	excess := 0
+	if !now.After(a.globalUntil) {
+		excess = max(0, a.globalCount-adminGlobalAttemptLimit+1)
+	}
+	if at := a.ipAttempts[strings.TrimSpace(ip)]; at != nil && !now.After(at.until) {
 		excess = max(excess, at.count-adminIPAttemptLimit+1)
 	}
 	return time.Duration(min(excess, 50)) * 10 * time.Millisecond

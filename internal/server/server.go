@@ -76,7 +76,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 		c.Header("X-Frame-Options", "DENY")
 		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 		c.Header("Cache-Control", "no-store")
-		if strings.HasPrefix(mgr.Get().Server.BaseURL, "https://") {
+		if isHTTPS(c, mgr.Get()) {
 			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		if c.Request.Body != nil {
