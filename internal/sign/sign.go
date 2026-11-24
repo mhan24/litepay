@@ -55,6 +55,8 @@ func BEpusdtVerifyGeneric(params map[string]interface{}, token string) bool {
 
 func genericValue(v interface{}) string {
 	switch value := v.(type) {
+	case nil:
+		return ""
 	case string:
 		return value
 	case bool:
@@ -74,6 +76,9 @@ func genericValue(v interface{}) string {
 		return ""
 	default:
 		rv := reflect.ValueOf(value)
+		if !rv.IsValid() {
+			return ""
+		}
 		switch rv.Kind() {
 		case reflect.Map, reflect.Slice, reflect.Array:
 			return ""

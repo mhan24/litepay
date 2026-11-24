@@ -91,6 +91,9 @@ func TestHmacSHA256Hex(t *testing.T) {
 func TestBEpusdtSignSkipsNestedStructures(t *testing.T) {
 	const token = "0123456789abcdef0123456789abcdef"
 	flat := BEpusdtSignGeneric(map[string]interface{}{"order_id": "A-1"}, token)
+	var nilIface any
+	var nilStr *string
+	var ifaceHoldingNilPtr any = nilStr
 	for _, nested := range []interface{}{
 		map[string]interface{}{"x": "y"},
 		[]interface{}{"a", "b"},
@@ -98,6 +101,8 @@ func TestBEpusdtSignSkipsNestedStructures(t *testing.T) {
 		[]string{"a", "b"},
 		[2]int{1, 2},
 		(*string)(nil),
+		&nilIface,
+		&ifaceHoldingNilPtr,
 	} {
 		with := BEpusdtSignGeneric(map[string]interface{}{"order_id": "A-1", "nested": nested}, token)
 		if with != flat {

@@ -83,14 +83,21 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 	}
 	save, done := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
 	defer done()
-	filtered := make([]model.Transaction, 0, len(rows))
+	sameAccount := make([]model.Transaction, 0, len(rows))
 	for _, row := range rows {
-		if row.Provider != job.Provider || row.Receiver != job.Receiver || row.OccurredAt.Before(job.From) || row.OccurredAt.After(job.To) {
+		if row.Provider != job.Provider || row.Receiver != job.Receiver {
+			continue
+		}
+		sameAccount = append(sameAccount, row)
+	}
+	markAmbiguous(sameAccount)
+	filtered := make([]model.Transaction, 0, len(sameAccount))
+	for _, row := range sameAccount {
+		if row.OccurredAt.Before(job.From) || row.OccurredAt.After(job.To) {
 			continue
 		}
 		filtered = append(filtered, row)
 	}
-	markAmbiguous(filtered)
 	if !after.Cursor.Before(job.To) {
 		after.State = "completed"
 	}

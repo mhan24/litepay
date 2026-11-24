@@ -338,36 +338,57 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 		p.mu.Unlock()
 	}()
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
+	var firstErr error
 	for _, at := range times {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if !at.Before(from) && !at.After(to) {
 			processed++
 			continue // 本轮增量扫描已经读过这条记录
 		}
 		radius := lookback
 		var rows []model.Transaction
+		var itemErr error
 		for {
 			start, stop := at.Add(-radius), at.Add(radius)
-			rows, err = cli.History(ctx, start, stop)
-			if err == nil {
+			rows, itemErr = cli.History(ctx, start, stop)
+			if itemErr == nil {
 				break
 			}
-			if !scanOverflow(err) || radius <= time.Second {
-				return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if !scanOverflow(itemErr) || radius <= time.Second {
+				break
 			}
 			radius /= 2
 			if radius < time.Second {
 				radius = time.Second
 			}
 		}
+		if itemErr != nil {
+			if firstErr == nil {
+				firstErr = itemErr
+			}
+			processed++
+			continue
+		}
 		markAmbiguous(rows)
 		for _, t := range rows {
-			if _, err = p.st.Process(ctx, t, ""); err != nil {
-				return err
+			if _, procErr := p.st.Process(ctx, t, ""); procErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if firstErr == nil {
+					firstErr = procErr
+				}
+				break
 			}
 		}
 		processed++
 	}
-	return nil
+	return firstErr
 }
 
 // Run 每秒推进付款窗口，并按各平台的查询间隔调度扫描。是否需要请求交易所由 Scan

@@ -187,25 +187,126 @@ func TestPollerClientCacheIsolatedPerProvider(t *testing.T) {
 	}
 }
 
-type failOnceSource struct {
-	uid        string
-	failFirst  bool
-	calls      int
-	seenRanges [][2]time.Time
+type poisonRecheckSource struct {
+	uid      string
+	poisonAt time.Time
+	rows     []model.Transaction
 }
 
-func (f *failOnceSource) AccountUID(context.Context) (string, error) { return f.uid, nil }
-func (f *failOnceSource) History(_ context.Context, start, end time.Time) ([]model.Transaction, error) {
-	f.calls++
-	if f.failFirst && f.calls == 1 {
-		return nil, errors.New("transient error")
+func (p *poisonRecheckSource) AccountUID(context.Context) (string, error) { return p.uid, nil }
+func (p *poisonRecheckSource) History(_ context.Context, start, end time.Time) ([]model.Transaction, error) {
+	if !p.poisonAt.Before(start) && !p.poisonAt.After(end) {
+		return nil, errors.New("persistent poison window error")
 	}
-	f.seenRanges = append(f.seenRanges, [2]time.Time{start, end})
-	return nil, nil
+	var out []model.Transaction
+	for _, r := range p.rows {
+		if !r.OccurredAt.Before(start) && !r.OccurredAt.After(end) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
-func TestPendingRecheckFailureDoesNotSkipFailedRecords(t *testing.T) {
+func TestPendingRecheckContinuesPastPoisonRecordWithoutStarvation(t *testing.T) {
 	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Binance.LookbackBuffer = 1
+	cfg.Checkout.Binance.UID = "receiver"
+	cfg.Order.ExpireMinutes = 240
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Now().Add(-180 * time.Minute)
+	// Create 2 real READY orders whose pending deposits sit at index 1 (same page) and index 11 (next page).
+	makeReadyOrder := func(name string, at time.Time) *model.Order {
+		t.Helper()
+		if _, err := st.Create(ctx, model.Order{TradeNo: name, OutTradeNo: name, OriginUnits: 10_000_000, NotifyURL: "https://shop.example/notify", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		o, err := st.Select(ctx, name, "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sel := at.Add(-time.Minute)
+		exp := at.Add(30 * time.Minute)
+		if err := st.DB().Model(o).Updates(map[string]any{"selected_at": sel, "expires_at": exp}).Error; err != nil {
+			t.Fatal(err)
+		}
+		syncAttemptFixture(t, st)
+		return o
+	}
+
+	var confirmedRows []model.Transaction
+	var poisonAt time.Time
+	var orderSamePage, orderNextPage *model.Order
+	for i := 0; i < 12; i++ {
+		at := base.Add(time.Duration(i*10) * time.Minute)
+		if i == 0 {
+			poisonAt = at
+		}
+		units := int64(1_000_000 + i*10000)
+		if i == 1 {
+			orderSamePage = makeReadyOrder("same-page-order", at)
+			units = orderSamePage.PayUnits
+		}
+		if i == 11 {
+			orderNextPage = makeReadyOrder("next-page-order", at)
+			units = orderNextPage.PayUnits
+		}
+		tx := model.Transaction{
+			Provider:   "binance",
+			EventID:    fmt.Sprintf("p-starve-%02d", i),
+			Reference:  fmt.Sprintf("r-starve-%02d", i),
+			Receiver:   "receiver",
+			Currency:   "USDT",
+			Units:      units,
+			OccurredAt: at,
+			State:      model.Unconfirmed,
+		}
+		if _, err = st.Process(ctx, tx, ""); err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 || i == 11 {
+			tx.State = model.Confirmed
+			confirmedRows = append(confirmedRows, tx)
+		}
+	}
+
+	p := NewPoller(mgr, st)
+	src := &poisonRecheckSource{uid: "receiver", poisonAt: poisonAt, rows: confirmedRows}
+	now := time.Now()
+
+	// Round 1: record 0 persistently fails, yet record 1 in the same batch must still be rechecked and paid.
+	if err = p.recheckPending(ctx, mgr.Get(), "binance", src, now.Add(-time.Minute), now); err == nil {
+		t.Fatal("expected error reported for poison record 0")
+	}
+	o1, err := st.GetByTradeNo(ctx, orderSamePage.TradeNo)
+	if err != nil || o1.Status != model.Paid {
+		t.Fatalf("same-batch order starved behind poison record: status=%s err=%v", o1.Status, err)
+	}
+
+	// Round 2: offset must advance to the second page and settle record 11.
+	if err = p.recheckPending(ctx, mgr.Get(), "binance", src, now.Add(-time.Minute), now); err != nil {
+		t.Fatalf("second page recheck unexpectedly failed: %v", err)
+	}
+	o11, err := st.GetByTradeNo(ctx, orderNextPage.TradeNo)
+	if err != nil || o11.Status != model.Paid {
+		t.Fatalf("next-page order starved behind poison record: status=%s err=%v", o11.Status, err)
+	}
+}
+
+func TestPendingRecheckCancelAbortsWithoutSkippingUnattempted(t *testing.T) {
+	baseCtx := context.Background()
 	st, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -218,17 +319,17 @@ func TestPendingRecheckFailureDoesNotSkipFailedRecords(t *testing.T) {
 	cfg.Checkout.Binance.UID = "receiver"
 	cfg.Order.ExpireMinutes = 120
 	mgr := settings.New(cfg, st)
-	if err = mgr.Load(ctx); err != nil {
+	if err = mgr.Load(baseCtx); err != nil {
 		t.Fatal(err)
 	}
 	var times []time.Time
 	for i := 0; i < 3; i++ {
 		at := time.Now().Add(-time.Duration(90-10*i) * time.Minute)
 		times = append(times, at)
-		if _, err = st.Process(ctx, model.Transaction{
+		if _, err = st.Process(baseCtx, model.Transaction{
 			Provider:   "binance",
-			EventID:    fmt.Sprintf("p-fail-%d", i),
-			Reference:  fmt.Sprintf("r-fail-%d", i),
+			EventID:    fmt.Sprintf("p-cancel-%d", i),
+			Reference:  fmt.Sprintf("r-cancel-%d", i),
 			Receiver:   "receiver",
 			Currency:   "USDT",
 			Units:      1_000_000,
@@ -239,20 +340,76 @@ func TestPendingRecheckFailureDoesNotSkipFailedRecords(t *testing.T) {
 		}
 	}
 	p := NewPoller(mgr, st)
-	src := &failOnceSource{uid: "receiver", failFirst: true}
+	runCtx, cancel := context.WithCancel(baseCtx)
+	defer cancel()
+	cancelSrc := &cancelOpaqueSource{uid: "receiver", cancel: cancel, onCall: 1, failMsg: "canceled"}
 	now := time.Now()
-	if err = p.recheckPending(ctx, mgr.Get(), "binance", src, now.Add(-time.Minute), now); err == nil {
-		t.Fatal("expected first recheckPending call to fail on item 0")
+	if err = p.recheckPending(runCtx, mgr.Get(), "binance", cancelSrc, now.Add(-time.Minute), now); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	// Offset must remain at 0 so the next call retries item 0 instead of skipping all 3 items.
-	if err = p.recheckPending(ctx, mgr.Get(), "binance", src, now.Add(-time.Minute), now); err != nil {
+	if cancelSrc.calls != 1 {
+		t.Fatalf("expected recheckPending to abort immediately on context cancel, got %d calls", cancelSrc.calls)
+	}
+	// Offset must remain at 0 so the next healthy call retries starting from record 0.
+	healthySrc := &fixture{}
+	if err = p.recheckPending(baseCtx, mgr.Get(), "binance", healthySrc, now.Add(-time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
-	if len(src.seenRanges) != 3 {
-		t.Fatalf("expected all 3 records retried after failure on item 0, got %d calls", len(src.seenRanges))
+	if len(healthySrc.windows) != 3 || healthySrc.windows[0][0].After(times[0]) || healthySrc.windows[0][1].Before(times[0]) {
+		t.Fatalf("canceled recheck skipped unattempted record 0: windows=%v", healthySrc.windows)
 	}
-	if src.seenRanges[0][0].After(times[0]) || src.seenRanges[0][1].Before(times[0]) {
-		t.Fatalf("first retried window did not cover record 0: window=%v at=%v", src.seenRanges[0], times[0])
+}
+
+func TestHistoricalScanMarksAmbiguousAgainstOutOfWindowDuplicateReference(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey = "key"
+	cfg.Binance.APISecret = "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.Create(ctx, model.Order{TradeNo: "hist-dup-ref", OutTradeNo: "hist-dup-ref", OriginUnits: 1_000_000, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Select(ctx, "hist-dup-ref", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := time.Now().Add(-3 * time.Hour)
+	expires := selected.Add(10 * time.Minute)
+	st.DB().Model(o).Updates(map[string]any{"selected_at": selected, "expires_at": expires})
+	st.DB().Model(&model.PaymentAttempt{}).Where("order_id=?", o.ID).Updates(map[string]any{"selected_at": selected, "expires_at": expires, "settle_until": expires.Add(store.LateVisibilityWindow)})
+	if err = st.RequestHistoricalScan(ctx, o.TradeNo, "operator", "verify duplicate ref across window boundary"); err != nil {
+		t.Fatal(err)
+	}
+
+	inWindow := model.Transaction{Provider: "binance", EventID: "dup-in-window", Reference: "shared-ref", Receiver: "receiver", Currency: "USDT", Units: o.PayUnits, OccurredAt: selected.Add(2 * time.Minute), State: model.Confirmed}
+	outOfWindow := model.Transaction{Provider: "binance", EventID: "dup-out-window", Reference: "shared-ref", Receiver: "receiver", Currency: "USDT", Units: o.PayUnits, OccurredAt: selected.Add(-5 * time.Minute), State: model.Confirmed}
+	p := NewPoller(mgr, st)
+	p.clients["binance"] = &connection{config: *mgr.Get(), source: &unfilteredHistory{rows: []model.Transaction{outOfWindow, inWindow}}, uid: "receiver"}
+
+	if err = p.scanHistorical(ctx, mgr.Get(), "binance"); err != nil {
+		t.Fatalf("scanHistorical failed: %v", err)
+	}
+	var stored model.Transaction
+	if err = st.DB().First(&stored, "event_id = ?", inWindow.EventID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != model.Ambiguous || stored.Reason != "duplicate_reference" || stored.OrderID != nil {
+		t.Fatalf("expected in-window duplicate_reference marked ambiguous and unclaimed, got state=%s reason=%s order_id=%v", stored.State, stored.Reason, stored.OrderID)
+	}
+	fresh, err := st.GetByTradeNo(ctx, o.TradeNo)
+	if err != nil || fresh.Status != model.Ready {
+		t.Fatalf("order should not be paid by ambiguous duplicate reference, got status=%s err=%v", fresh.Status, err)
 	}
 }
 
