@@ -451,3 +451,96 @@ func TestCashierAndStatusPollTemplateFixesAndCSP(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminRateLimitWindowRolloverPreservesInflightAndChecksExpiry(t *testing.T) {
+	auth := &adminAuth{
+		user:       "admin",
+		hardLimits: true,
+		attempts:   make(map[string]*loginAttempt),
+		ipAttempts: make(map[string]*loginAttempt),
+	}
+	ip, user := "203.0.113.5", "admin"
+	ipKey, userKey := adminAttemptKeys(ip, user)
+
+	// 1. Request A enters and stays in flight while the 10-minute window expires.
+	if !auth.allow(ip, user) {
+		t.Fatal("request A unexpectedly blocked")
+	}
+	past := time.Now().Add(-time.Second)
+	auth.mu.Lock()
+	auth.attempts[userKey].count = 4 // simulate earlier failures in the old window
+	auth.attempts[userKey].until = past
+	auth.ipAttempts[ipKey].count = 10
+	auth.ipAttempts[ipKey].until = past
+	auth.globalCount = 20
+	auth.globalUntil = past
+	auth.mu.Unlock()
+
+	// Request B arrives in the new window while A is still in flight.
+	if !auth.allow(ip, user) {
+		t.Fatal("request B unexpectedly blocked after rollover")
+	}
+	auth.mu.Lock()
+	uAt, ipAt := auth.attempts[userKey], auth.ipAttempts[ipKey]
+	if uAt == nil || uAt.inflight != 2 || uAt.count != 2 || ipAt == nil || ipAt.inflight != 2 || ipAt.count != 2 || auth.globalInflight != 2 || auth.globalCount != 2 {
+		auth.mu.Unlock()
+		t.Fatalf("rollover lost inflight accounting: uAt=%+v ipAt=%+v global=(%d,%d)", uAt, ipAt, auth.globalCount, auth.globalInflight)
+	}
+	auth.mu.Unlock()
+
+	// Request A completes with succeeded(): request B's inflight reservation must remain intact.
+	auth.succeeded(ip, user)
+	auth.mu.Lock()
+	uAt, ipAt = auth.attempts[userKey], auth.ipAttempts[ipKey]
+	if uAt == nil || uAt.inflight != 1 || uAt.count != 1 || ipAt == nil || ipAt.inflight != 1 || ipAt.count != 1 || auth.globalInflight != 1 || auth.globalCount != 1 {
+		auth.mu.Unlock()
+		t.Fatalf("completing old request A corrupted active request B: uAt=%+v ipAt=%+v global=(%d,%d)", uAt, ipAt, auth.globalCount, auth.globalInflight)
+	}
+	auth.mu.Unlock()
+
+	// Request B completes with failed().
+	auth.failed(ip, user)
+	auth.mu.Lock()
+	if auth.attempts[userKey].inflight != 0 || auth.attempts[userKey].count != 1 || auth.globalInflight != 0 {
+		auth.mu.Unlock()
+		t.Fatalf("unexpected post-B state: uAt=%+v global=(%d,%d)", auth.attempts[userKey], auth.globalCount, auth.globalInflight)
+	}
+	auth.mu.Unlock()
+
+	// 2. When adminUserAttemptLimit requests are all in flight across window rollover, a 7th is still blocked.
+	auth2 := &adminAuth{
+		user:       "admin",
+		hardLimits: true,
+		attempts:   make(map[string]*loginAttempt),
+		ipAttempts: make(map[string]*loginAttempt),
+	}
+	for i := range adminUserAttemptLimit {
+		if !auth2.allow(ip, user) {
+			t.Fatalf("concurrent inflight request %d unexpectedly blocked", i)
+		}
+	}
+	auth2.mu.Lock()
+	auth2.attempts[userKey].until = past
+	auth2.ipAttempts[ipKey].until = past
+	auth2.globalUntil = past
+	auth2.mu.Unlock()
+	if auth2.allow(ip, user) {
+		t.Fatal("window rollover allowed bypassing concurrent inflight limit")
+	}
+
+	// 3. Expired uncleaned entries must not trigger isExhausted() or loginDelay().
+	auth3 := &adminAuth{
+		user:        "admin",
+		hardLimits:  true,
+		attempts:    map[string]*loginAttempt{userKey: {count: adminUserAttemptLimit, until: past}},
+		ipAttempts:  map[string]*loginAttempt{ipKey: {count: adminIPAttemptLimit + 10, until: past}},
+		globalCount: adminGlobalAttemptLimit + 10,
+		globalUntil: past,
+	}
+	if auth3.isExhausted(ip, user) {
+		t.Fatal("expired uncleaned attempt triggered isExhausted")
+	}
+	if d := auth3.loginDelay(ip); d != 0 {
+		t.Fatalf("expired uncleaned attempt triggered loginDelay=%v", d)
+	}
+}

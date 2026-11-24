@@ -221,9 +221,12 @@ func (a *adminAuth) reauthLimiter() *adminAuth {
 func (a *adminAuth) isExhausted(ip, user string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	now := time.Now()
 	_, key := adminAttemptKeys(ip, user)
 	attempt := a.attempts[key]
-	return (attempt != nil && attempt.count >= adminUserAttemptLimit) || a.globalCount >= adminGlobalAttemptLimit
+	userExhausted := attempt != nil && !now.After(attempt.until) && attempt.count >= adminUserAttemptLimit
+	globalExhausted := !now.After(a.globalUntil) && a.globalCount >= adminGlobalAttemptLimit
+	return userExhausted || globalExhausted
 }
 
 // issue 生成新会话 token 与 CSRF token。
@@ -329,18 +332,17 @@ func (a *adminAuth) allow(ip string, users ...string) bool {
 
 	now := time.Now()
 	for key, attempt := range a.attempts {
-		if now.After(attempt.until) {
+		if now.After(attempt.until) && attempt.inflight == 0 {
 			delete(a.attempts, key)
 		}
 	}
 	for key, attempt := range a.ipAttempts {
-		if now.After(attempt.until) {
+		if now.After(attempt.until) && attempt.inflight == 0 {
 			delete(a.ipAttempts, key)
 		}
 	}
 	if now.After(a.globalUntil) {
-		a.globalCount = 0
-		a.globalInflight = 0
+		a.globalCount = a.globalInflight
 		a.globalUntil = now.Add(adminAttemptWindow)
 	}
 	if a.hardLimits && a.globalCount >= adminGlobalAttemptLimit {
@@ -363,22 +365,42 @@ func (a *adminAuth) allow(ip string, users ...string) bool {
 	}
 
 	ipAt, ipOK := a.ipAttempts[ipKey]
-	if a.hardLimits && ipOK && !now.After(ipAt.until) && ipAt.count >= adminIPAttemptLimit {
-		return false
+	if a.hardLimits && ipOK {
+		ipCount := ipAt.count
+		if now.After(ipAt.until) {
+			ipCount = ipAt.inflight
+		}
+		if ipCount >= adminIPAttemptLimit {
+			return false
+		}
 	}
 	uAt, uOK := a.attempts[userKey]
-	if uOK && !now.After(uAt.until) && uAt.count >= adminUserAttemptLimit {
-		return false
+	if uOK {
+		uCount := uAt.count
+		if now.After(uAt.until) {
+			uCount = uAt.inflight
+		}
+		if uCount >= adminUserAttemptLimit {
+			return false
+		}
 	}
 
-	if !ipOK || now.After(ipAt.until) {
+	if !ipOK {
 		a.ipAttempts[ipKey] = &loginAttempt{count: 1, inflight: 1, until: now.Add(adminAttemptWindow)}
+	} else if now.After(ipAt.until) {
+		ipAt.count = ipAt.inflight + 1
+		ipAt.inflight++
+		ipAt.until = now.Add(adminAttemptWindow)
 	} else {
 		ipAt.count++
 		ipAt.inflight++
 	}
-	if !uOK || now.After(uAt.until) {
+	if !uOK {
 		a.attempts[userKey] = &loginAttempt{count: 1, inflight: 1, until: now.Add(adminAttemptWindow)}
+	} else if now.After(uAt.until) {
+		uAt.count = uAt.inflight + 1
+		uAt.inflight++
+		uAt.until = now.Add(adminAttemptWindow)
 	} else {
 		uAt.count++
 		uAt.inflight++
@@ -1395,8 +1417,12 @@ func (h *Handlers) AdminRecordRefund(c *gin.Context) {
 func (a *adminAuth) loginDelay(ip string) time.Duration {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	excess := max(0, a.globalCount-adminGlobalAttemptLimit+1)
-	if at := a.ipAttempts[strings.TrimSpace(ip)]; at != nil {
+	now := time.Now()
+	excess := 0
+	if !now.After(a.globalUntil) {
+		excess = max(0, a.globalCount-adminGlobalAttemptLimit+1)
+	}
+	if at := a.ipAttempts[strings.TrimSpace(ip)]; at != nil && !now.After(at.until) {
 		excess = max(excess, at.count-adminIPAttemptLimit+1)
 	}
 	return time.Duration(min(excess, 50)) * 10 * time.Millisecond
