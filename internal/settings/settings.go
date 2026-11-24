@@ -262,11 +262,17 @@ func Snapshot(c *config.Config) Patch {
 	i := func(v int) *int { return &v }
 	b := func(v bool) *bool { return &v }
 	ss := func(v []string) *[]string {
+		if v == nil {
+			return nil
+		}
 		cp := make([]string, len(v))
 		copy(cp, v)
 		return &cp
 	}
 	is := func(v []int) *[]int {
+		if v == nil {
+			return nil
+		}
 		cp := make([]int, len(v))
 		copy(cp, v)
 		return &cp
@@ -569,11 +575,14 @@ func validateRegisterURL(name, raw string) error {
 	if raw == "" {
 		return nil
 	}
-	if len(raw) > 512 || strings.ContainsAny(raw, "\r\n") {
+	if len(raw) > 512 {
 		return fmt.Errorf("%s 注册链接长度不能超过 512 个字符", name)
 	}
+	if strings.ContainsAny(raw, "\r\n\t") {
+		return fmt.Errorf("%s 注册链接必须是有效的 HTTP(S) 地址", name)
+	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || strings.Contains(u.Host, "\\") {
 		return fmt.Errorf("%s 注册链接必须是有效的 HTTP(S) 地址", name)
 	}
 	return nil
