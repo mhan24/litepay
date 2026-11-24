@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,6 +73,16 @@ func genericValue(v interface{}) string {
 		// 保持同等价类签名，避免 Go map 遍历顺序使嵌套结构的签名变得不稳定。
 		return ""
 	default:
+		rv := reflect.ValueOf(value)
+		switch rv.Kind() {
+		case reflect.Map, reflect.Slice, reflect.Array:
+			return ""
+		case reflect.Pointer:
+			if rv.IsNil() {
+				return ""
+			}
+			return genericValue(rv.Elem().Interface())
+		}
 		return fmt.Sprint(value)
 	}
 }

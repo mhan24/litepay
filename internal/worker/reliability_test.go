@@ -310,8 +310,14 @@ func TestFirstVisibleDepositBehindIncrementalCursorIsFoundByWindowRescan(t *test
 	source := &fixture{rows: []model.Transaction{event}}
 	p := NewPoller(mgr, st)
 	p.clients["okx"] = &connection{config: *mgr.Get(), source: source}
-	if err = p.Scan(ctx, "okx"); err != nil {
-		t.Fatal(err)
+	// An order selected at minute :59 spans two 1-hour historical chunks ([H-1:00, H:00] and [H:00, expires]).
+	for range 2 {
+		if err = p.Scan(ctx, "okx"); err != nil {
+			t.Fatal(err)
+		}
+		if fresh, _ := st.GetByTradeNo(ctx, o.TradeNo); fresh.Status == model.Paid {
+			break
+		}
 	}
 	if len(source.windows) < 2 || !source.windows[0][0].After(event.OccurredAt) || source.windows[1][0].After(event.OccurredAt) {
 		t.Fatal("history window was not reopened", source.windows)

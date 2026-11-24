@@ -57,6 +57,56 @@ func (p *Poller) UseTestTransports() {
 	p.scannedScope = map[string]string{}
 	p.mu.Unlock()
 }
+func providerUID(cfg *config.Config, provider string) string {
+	switch provider {
+	case config.ProviderBinance:
+		return cfg.Checkout.Binance.UID
+	case config.ProviderOKX:
+		return cfg.Checkout.OKX.UID
+	case config.ProviderBybit:
+		return cfg.Checkout.Bybit.UID
+	case config.ProviderBitget:
+		return cfg.Checkout.Bitget.UID
+	default:
+		return ""
+	}
+}
+
+func sameProviderClientConfig(provider string, a, b config.Config) bool {
+	switch provider {
+	case config.ProviderBinance:
+		return a.Binance.APIKey == b.Binance.APIKey &&
+			a.Binance.APISecret == b.Binance.APISecret &&
+			a.Binance.BaseURL == b.Binance.BaseURL &&
+			a.Binance.RecvWindow == b.Binance.RecvWindow &&
+			a.Binance.Limit == b.Binance.Limit &&
+			a.Checkout.Binance.UID == b.Checkout.Binance.UID
+	case config.ProviderOKX:
+		return a.OKX.APIKey == b.OKX.APIKey &&
+			a.OKX.APISecret == b.OKX.APISecret &&
+			a.OKX.Passphrase == b.OKX.Passphrase &&
+			a.OKX.BaseURL == b.OKX.BaseURL &&
+			a.OKX.Limit == b.OKX.Limit &&
+			a.Checkout.OKX.UID == b.Checkout.OKX.UID
+	case config.ProviderBybit:
+		return a.Bybit.APIKey == b.Bybit.APIKey &&
+			a.Bybit.APISecret == b.Bybit.APISecret &&
+			a.Bybit.BaseURL == b.Bybit.BaseURL &&
+			a.Bybit.RecvWindow == b.Bybit.RecvWindow &&
+			a.Bybit.Limit == b.Bybit.Limit &&
+			a.Checkout.Bybit.UID == b.Checkout.Bybit.UID
+	case config.ProviderBitget:
+		return a.Bitget.APIKey == b.Bitget.APIKey &&
+			a.Bitget.APISecret == b.Bitget.APISecret &&
+			a.Bitget.Passphrase == b.Bitget.Passphrase &&
+			a.Bitget.BaseURL == b.Bitget.BaseURL &&
+			a.Bitget.Limit == b.Bitget.Limit &&
+			a.Checkout.Bitget.UID == b.Checkout.Bitget.UID
+	default:
+		return false
+	}
+}
+
 func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string) (source, error) {
 	if !cfg.ProviderEnabled(provider) {
 		return nil, errors.New("付款平台不可用")
@@ -64,16 +114,20 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 
 	p.mu.Lock()
 	cached := p.clients[provider]
-	if cached == nil || cached.config.Binance != cfg.Binance || cached.config.OKX != cfg.OKX || cached.config.Bybit != cfg.Bybit || cached.config.Bitget != cfg.Bitget || cached.config.Checkout.Binance != cfg.Checkout.Binance || cached.config.Checkout.OKX != cfg.Checkout.OKX || cached.config.Checkout.Bybit != cfg.Checkout.Bybit || cached.config.Checkout.Bitget != cfg.Checkout.Bitget {
+	if cached == nil || !sameProviderClientConfig(provider, cached.config, *cfg) {
 		var cli source
-		if provider == config.ProviderBinance {
+		switch provider {
+		case config.ProviderBinance:
 			cli = binance.New(cfg.Binance.APIKey, cfg.Binance.APISecret, cfg.Binance.BaseURL, cfg.Binance.RecvWindow, cfg.Binance.Limit)
-		} else if provider == config.ProviderBybit {
+		case config.ProviderBybit:
 			cli = bybit.New(cfg.Bybit.APIKey, cfg.Bybit.APISecret, cfg.Bybit.BaseURL, cfg.Bybit.RecvWindow, cfg.Bybit.Limit)
-		} else if provider == config.ProviderBitget {
+		case config.ProviderBitget:
 			cli = bitget.New(cfg.Bitget.APIKey, cfg.Bitget.APISecret, cfg.Bitget.Passphrase, cfg.Bitget.BaseURL, cfg.Bitget.Limit)
-		} else {
+		case config.ProviderOKX:
 			cli = okx.New(cfg.OKX.APIKey, cfg.OKX.APISecret, cfg.OKX.Passphrase, cfg.OKX.BaseURL, cfg.OKX.Limit)
+		default:
+			p.mu.Unlock()
+			return nil, errors.New("付款平台不可用")
 		}
 		cached = &connection{config: *cfg, source: cli}
 		if p.testTransports {
@@ -91,16 +145,7 @@ func (p *Poller) client(ctx context.Context, cfg *config.Config, provider string
 		if err != nil {
 			return nil, err
 		}
-		want := cfg.Checkout.Binance.UID
-		if provider == config.ProviderOKX {
-			want = cfg.Checkout.OKX.UID
-		}
-		if provider == config.ProviderBybit {
-			want = cfg.Checkout.Bybit.UID
-		}
-		if provider == config.ProviderBitget {
-			want = cfg.Checkout.Bitget.UID
-		}
+		want := providerUID(cfg, provider)
 		if uid != want {
 			return nil, errors.New("API 账户与收款 UID 不一致")
 		}
@@ -150,8 +195,12 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 		if historyParent.Err() != nil {
 			return
 		}
-		if err := p.scanHistorical(historyParent, cfg, provider); err != nil && historyParent.Err() == nil {
-			slog.Warn("管理员历史补扫未完成", "provider", provider)
+		latest := p.cfg.Get()
+		if !latest.ProviderEnabled(provider) {
+			return
+		}
+		if err := p.scanHistorical(historyParent, latest, provider); err != nil && historyParent.Err() == nil {
+			slog.Warn("管理员历史补扫未完成", "provider", provider, "error", err)
 		}
 	}()
 	// Active orders and durable confirmation tasks scan frequently; idle accounts still reconcile.
@@ -183,7 +232,7 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 	if rechecked {
 		pendingErr = p.recheckPending(ctx, cfg, provider, cli, coveredFrom, end)
 	}
-	if parentErr := historyParent.Err(); parentErr != nil && (errors.Is(err, parentErr) || errors.Is(pendingErr, parentErr)) {
+	if parentErr := historyParent.Err(); parentErr != nil && err != nil {
 		return parentErr
 	}
 	// Use the parent deadline-independent write to retain a safe diagnostic even after API timeout.
@@ -196,6 +245,9 @@ func (p *Poller) Scan(ctx context.Context, provider string) error {
 		p.recordScanScope(cfg, provider)
 	}
 	if rechecked {
+		if parentErr := historyParent.Err(); parentErr != nil && pendingErr != nil {
+			return parentErr
+		}
 		// 补查是独立的一路：结果单独记录，不影响扫描游标与订单过期判断。
 		if e := p.st.PendingResult(saveCtx, provider, pendingErr); e != nil {
 			return e
@@ -279,18 +331,33 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 			return err
 		}
 	}
-	p.mu.Lock()
-	p.pendingOffset[provider] = offset + len(times)
-	p.mu.Unlock()
+	processed := 0
+	defer func() {
+		p.mu.Lock()
+		p.pendingOffset[provider] = offset + processed
+		p.mu.Unlock()
+	}()
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	for _, at := range times {
 		if !at.Before(from) && !at.After(to) {
+			processed++
 			continue // 本轮增量扫描已经读过这条记录
 		}
-		start, stop := at.Add(-lookback), at.Add(lookback)
-		rows, err := cli.History(ctx, start, stop)
-		if err != nil {
-			return err
+		radius := lookback
+		var rows []model.Transaction
+		for {
+			start, stop := at.Add(-radius), at.Add(radius)
+			rows, err = cli.History(ctx, start, stop)
+			if err == nil {
+				break
+			}
+			if !scanOverflow(err) || radius <= time.Second {
+				return err
+			}
+			radius /= 2
+			if radius < time.Second {
+				radius = time.Second
+			}
 		}
 		markAmbiguous(rows)
 		for _, t := range rows {
@@ -298,6 +365,7 @@ func (p *Poller) recheckPending(ctx context.Context, cfg *config.Config, provide
 				return err
 			}
 		}
+		processed++
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,5 +101,32 @@ func TestRotateAndRecoverFlagsAreMutuallyExclusive(t *testing.T) {
 	os.Args = []string{"litepay", "-config", configFile, "-rotate-master-key-from", oldFile, "-recover-reason", "manual copy"}
 	if err := run(); err == nil || !strings.Contains(err.Error(), "不能同时使用") {
 		t.Fatalf("expected mutually exclusive flag error, got: %v", err)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("mutually exclusive CLI flags should fail before opening/creating DB, statErr=%v", statErr)
+	}
+}
+
+func TestRunFailsFastOnOccupiedPortBeforeStartingWorkers(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "litepay.db")
+	configFile := filepath.Join(dir, "config.yaml")
+	configText := "server:\n  production: false\n  addr: \"" + ln.Addr().String() + "\"\ndatabase:\n  path: \"" + dbPath + "\"\n"
+	if err := os.WriteFile(configFile, []byte(configText), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	previousFlags, previousArgs := flag.CommandLine, os.Args
+	t.Cleanup(func() { flag.CommandLine, os.Args = previousFlags, previousArgs })
+	flag.CommandLine = flag.NewFlagSet("litepay", flag.ContinueOnError)
+	os.Args = []string{"litepay", "-config", configFile}
+	if err := run(); err == nil {
+		t.Fatal("expected run() to fail when server.addr is already occupied")
 	}
 }

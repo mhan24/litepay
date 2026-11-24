@@ -51,7 +51,7 @@ type Order struct {
 
 func (o Order) Original() string { return amount.String(o.OriginUnits) }
 func (o Order) PayAmount() string {
-	if o.Precision <= 0 {
+	if o.Precision <= 0 || o.Precision > 6 || o.PayUnits%amount.Quantum(o.Precision) != 0 {
 		return amount.String(o.PayUnits)
 	}
 	return amount.Text(o.PayUnits, o.Precision)
@@ -277,7 +277,7 @@ type HistoryCoverage struct {
 }
 
 func (a PaymentAttempt) Amount() string {
-	if a.Precision <= 0 {
+	if a.Precision <= 0 || a.Precision > 6 || a.Units%amount.Quantum(a.Precision) != 0 {
 		return amount.String(a.Units)
 	}
 	return amount.Text(a.Units, a.Precision)

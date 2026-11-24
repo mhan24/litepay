@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,6 +33,9 @@ func run() error {
 	recoverReason := flag.String("recover-reason", "", "手工恢复数据库后填写原因，生成新的取消核对代际")
 	rotateFrom := flag.String("rotate-master-key-from", "", "离线轮换主密钥：旧密钥文件；新密钥通过正常配置提供，成功后退出")
 	flag.Parse()
+	if strings.TrimSpace(*rotateFrom) != "" && strings.TrimSpace(*recoverReason) != "" {
+		return errors.New("-rotate-master-key-from 与 -recover-reason 不能同时使用")
+	}
 	// SQLite and configuration files created by this process are private by default.
 	syscall.Umask(0077)
 	cfg, err := config.Load(*cfgPath)
@@ -53,9 +57,6 @@ func run() error {
 		return err
 	}
 	defer st.Close()
-	if strings.TrimSpace(*rotateFrom) != "" && strings.TrimSpace(*recoverReason) != "" {
-		return errors.New("-rotate-master-key-from 与 -recover-reason 不能同时使用")
-	}
 	if strings.TrimSpace(*rotateFrom) != "" {
 		oldKey, err := store.LoadMasterKeyFromFile(strings.TrimSpace(*rotateFrom), cfg.Server.Production)
 		if err != nil {
@@ -86,6 +87,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	ln, err := net.Listen("tcp", cfg.Server.Addr)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var workers sync.WaitGroup
@@ -94,8 +99,10 @@ func run() error {
 	}
 	srv := &http.Server{Addr: cfg.Server.Addr, Handler: engine, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
 	failures := make(chan error, 1)
+	serverDone := make(chan struct{})
 	go func() {
-		err := srv.ListenAndServe()
+		defer close(serverDone)
+		err := srv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			failures <- err
 		}
@@ -105,6 +112,10 @@ func run() error {
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err = srv.Shutdown(shutdown)
+	if err != nil {
+		_ = srv.Close()
+	}
+	<-serverDone
 	workers.Wait()
 	select {
 	case failure := <-failures:
