@@ -68,6 +68,13 @@ func (c *Client) UseTestTransport() {
 	c.requestInterval = 0
 }
 
+// CloseIdleConnections 关闭底层 HTTP 客户端的空闲连接。
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+}
+
 // AccountUID 通过只读接口 /v5/user/query-api 核验当前 API Key 所属账户。
 // 外部 Bybit 用户发起的站内转账只能进入主账号，因此显式拒绝子账号 API Key。
 func (c *Client) AccountUID(ctx context.Context) (string, error) {
@@ -220,8 +227,8 @@ func (c *Client) page(ctx context.Context, startMs, endMs int64, cursor string) 
 		case status != "2":
 			// 文档状态表：1 = Processing，2 = Success，3 = Deposit failed。
 			t.State, t.Reason = model.Unconfirmed, "deposit_not_completed"
-		case compliance == "1" || compliance == "2":
-			// 地区合规采集尚未完成（如土耳其站 1=Pending collection, 2=Collected），不核销。
+		case compliance != "" && compliance != "0" && compliance != "3":
+			// 地区合规采集尚未完成（如土耳其站 0=无需采集, 1=Pending collection, 2=Collected, 3=Completed），非明确完成一律不核销。
 			t.State, t.Reason = model.Unconfirmed, "compliance_pending"
 		}
 		out = append(out, t)
@@ -296,6 +303,9 @@ func (c *Client) getOnce(ctx context.Context, path string, q url.Values) (json.R
 
 	status, body, err := c.http.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("Bybit network request failed: %w", ctxErr)
+		}
 		return nil, fmt.Errorf("Bybit network request failed")
 	}
 	var envelope struct {

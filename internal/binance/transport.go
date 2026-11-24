@@ -196,10 +196,10 @@ func (c *Client) request(ctx context.Context, path string, q url.Values, signed 
 	if code == -1021 {
 		return failure(ErrorTimestamp)
 	}
-	if status == 401 || status == 403 || code == -2014 || code == -2015 || code == -1022 {
+	if status == 401 || status == 403 || code == -2008 || code == -2014 || code == -2015 || code == -1022 {
 		return failure(ErrorAuth)
 	}
-	if status >= 500 {
+	if status >= 500 || code == -1001 || code == -1008 {
 		return failure(ErrorExchange)
 	}
 	if status != 200 {

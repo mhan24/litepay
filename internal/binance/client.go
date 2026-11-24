@@ -63,6 +63,13 @@ func (c *Client) UseTestTransport() {
 	c.requestInterval = 0
 }
 
+// CloseIdleConnections 关闭底层 HTTP 客户端的空闲连接。
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+}
+
 func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	if strings.TrimSpace(c.apiKey) == "" || strings.TrimSpace(c.apiSecret) == "" {
 		return "", fmt.Errorf("未配置币安 API Key/Secret")
@@ -151,7 +158,8 @@ func (c *Client) fetchWindow(ctx context.Context, start, end int64) ([]model.Tra
 		return nil, 0, &APIError{Kind: ErrorParse}
 	}
 	if p.Code != "000000" || !p.Success {
-		return nil, 0, &APIError{Kind: ErrorBusiness}
+		code, _ := strconv.Atoi(string(p.Code))
+		return nil, 0, &APIError{Kind: ErrorBusiness, Status: 200, Code: code}
 	}
 	// 官方 OpenAPI 契约（binance/binance-api-swagger）要求 data 必须存在且为数组。
 	// 缺失、null、非数组都不是文档化的空窗口形态：放行任何一种都可能把不完整响应

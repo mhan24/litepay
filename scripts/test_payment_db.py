@@ -326,6 +326,15 @@ class CompleteCancellationReviewDBTest(CancellationReviewDBTest):
         with self.assertRaises(ValueError):
             tool.validate(self.path)
 
+    def test_snapshot_cleans_up_on_keyboard_interrupt(self):
+        from unittest.mock import patch
+        out = self.root / 'interrupted.db'
+        with patch.object(tool, 'validate', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                tool.snapshot(self.path, out)
+        self.assertFalse(out.exists())
+        self.assertFalse(Path(str(out) + '.json').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

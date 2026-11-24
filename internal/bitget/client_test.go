@@ -3,9 +3,11 @@ package bitget
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -269,4 +271,84 @@ func TestTimestampErrorResyncsAndRetriesOnce(t *testing.T) {
 	if timeCalls.Load() != 2 || accountCalls.Load() != 2 {
 		t.Fatalf("unexpected call counts: time=%d account=%d", timeCalls.Load(), accountCalls.Load())
 	}
+}
+
+func TestContextCancellationAndTerminalFailureStatuses(t *testing.T) {
+	t.Run("context_canceled", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(started)
+			<-release
+		}))
+		defer func() {
+			close(release)
+			srv.Close()
+		}()
+
+		cli := New("secret-key", "secret-val", "secret-pass", srv.URL, 100)
+		cli.UseTestTransport()
+		cli.syncTime = false
+		defer cli.CloseIdleConnections()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := cli.AccountUID(ctx)
+			errCh <- err
+		}()
+		<-started
+		cancel()
+		err := <-errCh
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled to be preserved, got %v", err)
+		}
+		if strings.Contains(err.Error(), srv.URL) || strings.Contains(err.Error(), "secret-") {
+			t.Fatalf("canceled error leaked endpoint or credentials: %v", err)
+		}
+	})
+
+	t.Run("terminal_failure_statuses", func(t *testing.T) {
+		start := time.UnixMilli(1700000000000)
+		end := time.UnixMilli(1700003600000)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v3/public/time":
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": "00000", "data": map[string]any{"serverTime": "1700003600000"}})
+			case "/api/v3/account/info":
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": "00000", "data": map[string]any{"userId": "90001"}})
+			case "/api/v3/account/deposit-records":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code": "00000",
+					"data": map[string]any{
+						"cursor": "",
+						"list": []map[string]any{
+							{"orderId": "401", "tradeId": "tr-401", "coin": "USDT", "amount": "5", "status": "pending_fail", "dest": "internal_transfer", "ts": "1700000001000"},
+							{"orderId": "402", "tradeId": "tr-402", "coin": "USDT", "amount": "5", "status": "pending_review_fail", "dest": "internal_transfer", "ts": "1700000002000"},
+							{"orderId": "403", "tradeId": "tr-403", "coin": "USDT", "amount": "5", "status": "reject", "dest": "internal_transfer", "ts": "1700000003000"},
+							{"orderId": "404", "tradeId": "tr-404", "coin": "USDT", "amount": "5", "status": "wallet_fail", "dest": "internal_transfer", "ts": "1700000004000"},
+							{"orderId": "405", "tradeId": "tr-405", "coin": "USDT", "amount": "5", "status": "pending_review", "dest": "internal_transfer", "ts": "1700000005000"},
+						},
+					},
+				})
+			}
+		}))
+		defer srv.Close()
+
+		cli := New("k", "s", "p", srv.URL, 100)
+		cli.UseTestTransport()
+		defer cli.CloseIdleConnections()
+		rows, err := cli.History(context.Background(), start, end)
+		if err != nil || len(rows) != 5 {
+			t.Fatalf("History failed: rows=%+v err=%v", rows, err)
+		}
+		for i := range 4 {
+			if rows[i].State != model.Rejected || rows[i].Reason != "deposit_failed" {
+				t.Fatalf("row[%d] want Rejected/deposit_failed, got %+v", i, rows[i])
+			}
+		}
+		if rows[4].State != model.Unconfirmed || rows[4].Reason != "deposit_not_completed" {
+			t.Fatalf("row[4] want Unconfirmed/deposit_not_completed, got %+v", rows[4])
+		}
+	})
 }

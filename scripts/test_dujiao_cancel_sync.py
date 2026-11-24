@@ -702,6 +702,62 @@ class SyncTest(unittest.TestCase):
                 sync.main()
         self.assertEqual(status.exception.code, 2)
 
+    def test_review_missing_rejects_concurrent_generation_or_state_change(self):
+        self.add(1)
+        self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)', (self.gateway, 'a'*32))
+        self.state.commit()
+        for at in (10, 15, 25):
+            sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'missing_gateway', now=at)
+
+        def rotate_during_cancel(*args):
+            with self.state:
+                self.state.execute('UPDATE gateway_epochs SET generation=? WHERE gateway=?', ('b'*32, self.gateway))
+            return 'missing_gateway'
+
+        with patch.object(sync, 'cancel', side_effect=rotate_during_cancel):
+            with self.assertRaises(ValueError):
+                sync.review_missing(self.path, self.state, self.gateway, 'trade1', 'concurrent rotation')
+        self.assertEqual(self.state.execute('SELECT count(*) FROM missing_reviews').fetchone()[0], 0)
+        self.assertEqual(self.state.execute('SELECT outcome FROM cancellations').fetchone()[0], 'missing_gateway')
+
+        def requeue_during_cancel(*args):
+            with self.state:
+                self.state.execute("UPDATE cancellations SET outcome='queued' WHERE gateway=?", (self.gateway,))
+            return 'missing_gateway'
+
+        with patch.object(sync, 'cancel', side_effect=requeue_during_cancel):
+            with self.assertRaises(ValueError):
+                sync.review_missing(self.path, self.state, self.gateway, 'trade1', 'concurrent requeue')
+        self.assertEqual(self.state.execute('SELECT count(*) FROM missing_reviews').fetchone()[0], 0)
+        self.assertEqual(self.state.execute('SELECT outcome FROM cancellations').fetchone()[0], 'queued')
+
+    def test_cancel_and_signed_post_reject_oversized_responses_and_empty_ids(self):
+        with self.assertRaises(ValueError):
+            sync.cancel(self.gateway, '', 'order1', 'private')
+        with self.assertRaises(ValueError):
+            sync.cancel(self.gateway, 'trade1', '   ', 'private')
+
+        class OversizedResponse:
+            def __init__(self, size):
+                self.data = b' ' * size
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self, limit):
+                return self.data[:limit]
+
+        opener = Mock()
+        opener.open.return_value = OversizedResponse(65537)
+        with patch.object(sync.urllib.request, 'build_opener', return_value=opener):
+            with self.assertRaises(ValueError):
+                sync.cancel(self.gateway, 'trade1', 'order1', 'private')
+
+        opener.open.return_value = OversizedResponse(4097)
+        with patch.object(sync.urllib.request, 'build_opener', return_value=opener):
+            with self.assertRaises(ValueError):
+                sync.signed_post(self.gateway, '/api/v1/order/cancel-sync-generation', {'timestamp': '1700000000'}, 'private')
+
 
 if __name__ == '__main__':
     unittest.main()

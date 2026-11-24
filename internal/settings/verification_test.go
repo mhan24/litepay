@@ -238,3 +238,50 @@ func TestEnablingProviderViaCurrencyVerifiesAccountAndValidatesTONLookback(t *te
 		t.Fatalf("expected Load with nil store to be a no-op without panic, got: %v", err)
 	}
 }
+
+func TestSnapshotCopiesSlicesAndPreservesCurrenciesAndRetryDelays(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.BEpusdt.APIToken = "0123456789abcdef0123456789abcdef"
+	cfg.Checkout.Currencies = []string{"USDT", "USDC"}
+	cfg.Checkout.BinanceCurrencies = []string{"USDT"}
+	cfg.Checkout.OKXCurrencies = []string{"USDC"}
+	cfg.Checkout.ProviderOrder = []string{config.ProviderOKX, config.ProviderBinance, config.ProviderBybit, config.ProviderBitget}
+	cfg.Notify.RetryDelays = []int{5, 15, 60}
+	normalize(cfg)
+
+	snap := Snapshot(cfg)
+	if snap.CheckoutCurrencies == nil || !reflect.DeepEqual(*snap.CheckoutCurrencies, cfg.Checkout.Currencies) {
+		t.Fatalf("Snapshot dropped CheckoutCurrencies: %+v", snap.CheckoutCurrencies)
+	}
+	if snap.NotifyRetryDelays == nil || !reflect.DeepEqual(*snap.NotifyRetryDelays, []int{5, 15, 60}) {
+		t.Fatalf("Snapshot dropped NotifyRetryDelays: %+v", snap.NotifyRetryDelays)
+	}
+
+	// Mutating slices returned by Snapshot must not alias or corrupt cfg.
+	(*snap.CheckoutCurrencies)[0] = "MUTATED"
+	(*snap.BinanceCurrencies)[0] = "MUTATED"
+	(*snap.ProviderOrder)[0] = "MUTATED"
+	(*snap.NotifyRetryDelays)[0] = 999
+	if cfg.Checkout.Currencies[0] != "USDT" || cfg.Checkout.BinanceCurrencies[0] != "USDT" ||
+		cfg.Checkout.ProviderOrder[0] != config.ProviderOKX || cfg.Notify.RetryDelays[0] != 5 {
+		t.Fatalf("Snapshot aliased backing config slices: %+v %+v", cfg.Checkout, cfg.Notify)
+	}
+
+	// Round-tripping a fresh Snapshot through Patch.Apply must remain valid.
+	roundTrip := config.Default()
+	roundTrip.Server.Production = false
+	roundTrip.BEpusdt.APIToken = cfg.BEpusdt.APIToken
+	Snapshot(cfg).Apply(roundTrip)
+	normalize(roundTrip)
+	if err := Validate(roundTrip); err != nil {
+		t.Fatalf("Snapshot round-trip failed Validate: %v", err)
+	}
+
+	step := " 0.01 "
+	minAmt := " 0.05 "
+	Patch{OrderAmountStep: &step, OrderMinAmount: &minAmt}.Apply(roundTrip)
+	if roundTrip.Order.AmountStep != "0.01" || roundTrip.Order.MinAmount != "0.05" {
+		t.Fatalf("expected trimmed order amounts, got step=%q min=%q", roundTrip.Order.AmountStep, roundTrip.Order.MinAmount)
+	}
+}

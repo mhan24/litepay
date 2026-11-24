@@ -65,6 +65,13 @@ func (c *Client) UseTestTransport() {
 	c.requestInterval = 0
 }
 
+// CloseIdleConnections 关闭底层 HTTP 客户端的空闲连接。
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+}
+
 // AccountUID 优先调用 UTA V3 /api/v3/account/info 核验主账号 UID，
 // 若账户仍为经典模式（404）则回退 /api/v2/spot/account/info。
 // 外部站内转账仅支持转入主账号，因此显式拒绝子账号 API Key。
@@ -286,7 +293,7 @@ func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cur
 			t.State, t.Reason = model.Unconfirmed, "internal_transfer_unverified"
 		case dest != "internal_transfer" && dest != "internal":
 			t.State, t.Reason = model.Rejected, "not_internal_deposit"
-		case status == "fail" || status == "failed":
+		case isFailedDepositStatus(status):
 			t.State, t.Reason = model.Rejected, "deposit_failed"
 		case status != "success":
 			t.State, t.Reason = model.Unconfirmed, "deposit_not_completed"
@@ -366,6 +373,9 @@ func (c *Client) getOnce(ctx context.Context, path string, q url.Values) (json.R
 
 	status, body, err := c.http.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("Bitget network request failed: %w", ctxErr)
+		}
 		return nil, fmt.Errorf("Bitget network request failed")
 	}
 	var envelope struct {
@@ -425,4 +435,14 @@ func (c *Client) syncServerTime(ctx context.Context) error {
 		return nil
 	}
 	return fmt.Errorf("Bitget 时间接口响应无效")
+}
+
+func isFailedDepositStatus(status string) bool {
+	switch status {
+	case "fail", "failed", "reject", "rejected", "cancel", "canceled", "cancelled",
+		"pending_fail", "pending_review_fail", "wallet_fail", "deposit_check_fail":
+		return true
+	default:
+		return false
+	}
 }

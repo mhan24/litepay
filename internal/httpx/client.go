@@ -39,6 +39,13 @@ func NewClient(timeout time.Duration, testsOnly bool) *Client {
 	}}
 }
 
+// CloseIdleConnections 关闭当前客户端连接池中的空闲连接。
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.inner != nil {
+		c.inner.CloseIdleConnections()
+	}
+}
+
 // Do 执行请求，并完整读取不超过 4 MiB 的响应正文。
 func (c *Client) Do(req *http.Request) (int, []byte, error) {
 	resp, err := c.inner.Do(req) // #nosec G704 -- Production uses publicDialer to reject non-public DNS results and dial validated IPs directly; proxies and redirects are disabled.
@@ -76,6 +83,9 @@ func publicDialer(ctx context.Context, network, address string) (net.Conn, error
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	var lastErr error
 	for _, ip := range ips {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		if dialErr == nil {
 			return conn, nil
@@ -83,6 +93,26 @@ func publicDialer(ctx context.Context, network, address string) (net.Conn, error
 		lastErr = dialErr
 	}
 	return nil, lastErr
+}
+
+var reservedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/96"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("fec0::/10"),
 }
 
 func publicIP(ip netip.Addr) bool {
@@ -93,12 +123,8 @@ func publicIP(ip netip.Addr) bool {
 	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 		return false
 	}
-	for _, raw := range []string{
-		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24",
-		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
-		"::/96", "100::/64", "2001::/23", "2001:db8::/32", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "fec0::/10",
-	} {
-		if netip.MustParsePrefix(raw).Contains(ip) {
+	for _, prefix := range reservedPrefixes {
+		if prefix.Contains(ip) {
 			return false
 		}
 	}

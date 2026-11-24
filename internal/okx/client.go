@@ -49,6 +49,11 @@ func (c *Client) UseTestTransport() {
 	c.http = httpx.NewClient(15*time.Second, true)
 	c.requestInterval = 0
 }
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+}
 func (c *Client) AccountUID(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -238,6 +243,9 @@ func (c *Client) getOnce(ctx context.Context, path string, q url.Values) (json.R
 
 	status, body, err := c.http.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("OKX network request failed: %w", ctxErr)
+		}
 		return nil, fmt.Errorf("OKX network request failed")
 	}
 	var envelope struct {

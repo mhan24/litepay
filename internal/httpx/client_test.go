@@ -1,8 +1,12 @@
 package httpx
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"testing"
+	"time"
 )
 
 func TestPublicIPRejectsInternalAndReservedRanges(t *testing.T) {
@@ -20,4 +24,45 @@ func TestPublicIPRejectsInternalAndReservedRanges(t *testing.T) {
 			t.Fatalf("rejected public address %s", raw)
 		}
 	}
+}
+
+func TestClientRejectsOversizedResponseAndDoesNotFollowRedirects(t *testing.T) {
+	var redirected bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			http.Redirect(w, r, "/target", http.StatusFound)
+		case "/target":
+			redirected = true
+			w.WriteHeader(http.StatusOK)
+		case "/oversized":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(bytes.Repeat([]byte("a"), maxResponseBytes+1))
+		}
+	}))
+	defer srv.Close()
+
+	cli := NewClient(5*time.Second, true)
+	defer cli.CloseIdleConnections()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/redirect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer secret-token")
+	status, _, err := cli.Do(req)
+	if err != nil || status != http.StatusFound || redirected {
+		t.Fatalf("expected 302 without following redirect, got status=%d redirected=%v err=%v", status, redirected, err)
+	}
+
+	bigReq, err := http.NewRequest(http.MethodGet, srv.URL+"/oversized", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := cli.Do(bigReq); err == nil {
+		t.Fatal("expected oversized response > 4 MiB to be rejected")
+	}
+
+	var nilClient *Client
+	nilClient.CloseIdleConnections()
 }
