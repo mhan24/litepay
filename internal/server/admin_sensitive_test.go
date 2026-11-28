@@ -268,6 +268,9 @@ func TestAdminAccountRejectsWhitespacePasswordAndNormalizesRefundAndLogsAudits(t
 		t.Fatalf("site update failed: code=%d loc=%s", w.Code, w.Header().Get("Location"))
 	}
 	logs := logBuf.String()
+	if strings.Contains(logs, o.TradeNo) || !strings.Contains(logs, tradeLogRef(o.TradeNo)) {
+		t.Fatal("order audit log must use the non-secret reference")
+	}
 	if !strings.Contains(logs, "管理员登记取消到账的外部退款凭证") || !strings.Contains(logs, "后台访问入口或跳转地址已更新") {
 		t.Fatalf("missing expected audit logs, got:\n%s", logs)
 	}

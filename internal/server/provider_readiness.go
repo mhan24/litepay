@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"litepay/internal/amount"
 	"litepay/internal/config"
 	"litepay/internal/model"
 )
@@ -27,8 +28,6 @@ func (h *Handlers) canReadReadinessDetails(c *gin.Context) bool {
 		auth := strings.TrimSpace(c.GetHeader("Authorization"))
 		if len(auth) >= 7 && strings.EqualFold(auth[:7], "bearer ") {
 			got = strings.TrimSpace(auth[7:])
-		} else {
-			got = auth
 		}
 	}
 	if got == "" {
@@ -53,6 +52,9 @@ func (h *Handlers) anyProviderAccepting(c *gin.Context, cfg *config.Config, o *m
 }
 
 func (h *Handlers) orderProviderAccepting(c *gin.Context, cfg *config.Config, o *model.Order) bool {
+	if o.Status == model.Ready && !amount.MallCompatible(o.PayUnits) {
+		return false
+	}
 	if o.Provider == "" {
 		return h.anyProviderAccepting(c, cfg, o)
 	}

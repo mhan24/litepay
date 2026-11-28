@@ -3,8 +3,8 @@ package worker
 import (
 	"context"
 	"fmt"
-	"litepay/internal/binance"
 	"litepay/internal/config"
+	"litepay/internal/exchange"
 	"litepay/internal/model"
 	"litepay/internal/settings"
 	"litepay/internal/store"
@@ -16,7 +16,7 @@ type denseHistory struct{ fixture }
 
 func (d *denseHistory) History(ctx context.Context, from, to time.Time) ([]model.Transaction, error) {
 	if to.Sub(from) > 10*time.Minute {
-		return nil, &binance.APIError{Kind: binance.ErrorBudget}
+		return nil, fmt.Errorf("dense pages: %w", exchange.ErrHistoryLimit)
 	}
 	return d.fixture.History(ctx, from, to)
 }

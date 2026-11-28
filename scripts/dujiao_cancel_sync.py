@@ -33,6 +33,19 @@ def immediate_tx(state):
         raise
 
 
+def journal_generation(state, gateway):
+    row = state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
+    return row[0] if row else ''
+
+
+@contextlib.contextmanager
+def generation_tx(state, gateway, expected):
+    with immediate_tx(state):
+        if journal_generation(state, gateway) != expected:
+            raise ValueError('gateway generation changed before recording the result')
+        yield
+
+
 def parse_timestamp(value):
     if isinstance(value, datetime.datetime):
         at = value
@@ -184,7 +197,7 @@ def due_anomalies(source,state,gateway,now):
     return due,active
 
 
-def send_anomalies(state,gateway,now,due,active,sender):
+def send_anomalies(state,gateway,now,due,active,sender,generation):
     processed=0
     deadline=time.monotonic()+5
     for pid,tid,oid,previous in due:
@@ -192,8 +205,8 @@ def send_anomalies(state,gateway,now,due,active,sender):
         if key not in active:
             # A previously observed successful payment is not silently cleared because
             # a source record changed or disappeared. Keep a durable human-visible conflict.
-            with state:
-                state.execute("UPDATE payment_anomalies SET outcome='source_review',updated_at=?,checked_generation=COALESCE((SELECT generation FROM gateway_epochs WHERE gateway=?),'') WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",(now,gateway)+key)
+            with generation_tx(state, gateway, generation):
+                state.execute("UPDATE payment_anomalies SET outcome='source_review',updated_at=?,checked_generation=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=? AND attempts=? AND outcome IN ('queued','retry','awaiting_funds')",(now,generation)+key+(previous,))
             continue
         attempts=previous+1
         try:
@@ -203,9 +216,11 @@ def send_anomalies(state,gateway,now,due,active,sender):
         except Exception as error:
             outcome='retry'
             logging.warning('payment_id=%s anomaly retry error_type=%s',pid,type(error).__name__)
-        with state:
-            state.execute("UPDATE payment_anomalies SET outcome=?,attempts=?,next_at=?,updated_at=?,checked_generation=COALESCE((SELECT generation FROM gateway_epochs WHERE gateway=?),'') WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",
-                          (outcome,attempts,now+min(300,5*2**min(attempts-1,6)),now,gateway)+key)
+        with generation_tx(state, gateway, generation):
+            updated = state.execute("UPDATE payment_anomalies SET outcome=?,attempts=?,next_at=?,updated_at=?,checked_generation=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=? AND attempts=? AND outcome IN ('queued','retry','awaiting_funds')",
+                                    (outcome,attempts,now+min(300,5*2**min(attempts-1,6)),now,generation)+key+(previous,))
+            if not updated.rowcount:
+                continue
         logging.warning('payment_id=%s anomaly outcome=%s',pid,outcome)
         processed+=1
         if time.monotonic()>=deadline:
@@ -234,7 +249,7 @@ def eligible(rows, gateway):
 def enqueue(state, rows, gateway, now):
     for payment_id, trade_id, order_id, _ in eligible(rows, gateway):
         # Keys contain identities only. API credentials are fetched again before sending.
-        state.execute("INSERT INTO cancellations VALUES(?,?,?,?,'queued',0,?,?) ON CONFLICT(gateway,payment_id,trade_id,order_id) DO UPDATE SET outcome='queued',attempts=0,next_at=excluded.next_at,updated_at=excluded.updated_at WHERE cancellations.outcome='merchant_changed' OR (cancellations.outcome IN ('closed','reviewed_missing','reviewed_conflict','missing_gateway','paid_conflict') AND EXISTS(SELECT 1 FROM gateway_epochs e WHERE e.gateway=cancellations.gateway AND NOT EXISTS(SELECT 1 FROM epoch_receipts r WHERE r.gateway=cancellations.gateway AND r.payment_id=cancellations.payment_id AND r.trade_id=cancellations.trade_id AND r.order_id=cancellations.order_id AND r.generation=e.generation)))",
+        state.execute("INSERT INTO cancellations(gateway,payment_id,trade_id,order_id,outcome,attempts,next_at,updated_at) VALUES(?,?,?,?,'queued',0,?,?) ON CONFLICT(gateway,payment_id,trade_id,order_id) DO UPDATE SET outcome='queued',attempts=0,next_at=excluded.next_at,updated_at=excluded.updated_at,missing_streak=0 WHERE cancellations.outcome='merchant_changed' OR (cancellations.outcome IN ('closed','reviewed_missing','reviewed_conflict','missing_gateway','paid_conflict') AND EXISTS(SELECT 1 FROM gateway_epochs e WHERE e.gateway=cancellations.gateway AND NOT EXISTS(SELECT 1 FROM epoch_receipts r WHERE r.gateway=cancellations.gateway AND r.payment_id=cancellations.payment_id AND r.trade_id=cancellations.trade_id AND r.order_id=cancellations.order_id AND r.generation=e.generation)))",
                       (gateway, payment_id, trade_id, order_id, now, now))
 
 
@@ -392,6 +407,10 @@ def journal(path):
                 max_payment_id INTEGER NOT NULL DEFAULT 0,pending INTEGER NOT NULL DEFAULT 1,oldest_unread_at REAL NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS health(id INTEGER PRIMARY KEY,last_attempt REAL,last_success REAL);
         """)
+        with immediate_tx(db):
+            columns = {row[1] for row in db.execute('PRAGMA table_info(cancellations)')}
+            if 'missing_streak' not in columns:
+                db.execute('ALTER TABLE cancellations ADD COLUMN missing_streak INTEGER NOT NULL DEFAULT 0')
         return db
     except Exception:
         db.close()
@@ -428,7 +447,7 @@ def replay_generation(source, state, gateway, now):
     ids = [r[0] for r in source_query(source, 'SELECT id FROM payments WHERE id>? ORDER BY id LIMIT ?', (epoch[1], AUDIT_PAYMENT_BATCH)).fetchall()]
     rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
     anomalies=anomaly_rows(source,'p.id IN ('+','.join('?' for _ in ids)+')',tuple(ids)) if ids else []
-    with state:
+    with generation_tx(state, gateway, epoch[0]):
         enqueue(state, rows, gateway, now)
         enqueue_anomalies(state,anomalies,gateway,now)
         if len(ids) < AUDIT_PAYMENT_BATCH:
@@ -440,6 +459,7 @@ def replay_generation(source, state, gateway, now):
 
 def sync_once(database, state, gateway, sender=cancel, now=None, anomaly_sender=inspect_anomaly):
     now = time.time() if now is None else now
+    generation = journal_generation(state, gateway)
     with state:
         state.execute('INSERT OR IGNORE INTO discovery(gateway) VALUES(?)', (gateway,))
     source = source_connect(database)
@@ -448,7 +468,7 @@ def sync_once(database, state, gateway, sender=cancel, now=None, anomaly_sender=
         discover(source, state, gateway, now)
         discover_anomalies(source,state,gateway,now)
         anomaly_due,anomaly_active=due_anomalies(source,state,gateway,now)
-        due = state.execute("SELECT payment_id,trade_id,order_id,attempts FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry') AND next_at<=? ORDER BY next_at,updated_at,payment_id LIMIT ?",
+        due = state.execute("SELECT payment_id,trade_id,order_id,attempts,missing_streak FROM cancellations WHERE gateway=? AND outcome IN ('queued','retry') AND next_at<=? ORDER BY next_at,updated_at,payment_id LIMIT ?",
                             (gateway, now, SEND_BATCH)).fetchall()
         ids = [r[0] for r in due]
         rows = payment_rows(source, 'p.id IN ('+','.join('?' for _ in ids)+')', tuple(ids)) if ids else []
@@ -457,26 +477,31 @@ def sync_once(database, state, gateway, sender=cancel, now=None, anomaly_sender=
         source.close()
     processed = 0
     deadline = time.monotonic() + 5
-    for payment_id, trade_id, order_id, previous_attempts in due:
+    for payment_id, trade_id, order_id, previous_attempts, previous_missing in due:
         key = (gateway, payment_id, trade_id, order_id)
         if key not in active:
-            with state:
-                state.execute("UPDATE cancellations SET outcome='merchant_changed',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?", (now,) + key)
+            with generation_tx(state, gateway, generation):
+                state.execute("UPDATE cancellations SET outcome='merchant_changed',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=? AND attempts=? AND outcome IN ('queued','retry')", (now,) + key + (previous_attempts,))
             continue
         attempts = previous_attempts + 1
+        missing_streak = 0
         try:
             outcome = sender(gateway, trade_id, order_id, active[key])
             if outcome not in ('closed', 'paid_conflict', 'missing_gateway'):
                 raise ValueError('invalid cancellation outcome')
-            if outcome == 'missing_gateway' and attempts < 3:
-                outcome = 'retry'
+            if outcome == 'missing_gateway':
+                missing_streak = previous_missing + 1
+                if missing_streak < 3:
+                    outcome = 'retry'
         except Exception as error:
             outcome = 'retry'
             logging.warning('payment_id=%s cancellation retry error_type=%s', payment_id, type(error).__name__)
         next_at = now + min(300, 5 * 2 ** min(attempts - 1, 6))
-        with state:
-            state.execute('UPDATE cancellations SET outcome=?,attempts=?,next_at=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?',
-                          (outcome, attempts, next_at, now) + key)
+        with generation_tx(state, gateway, generation):
+            updated = state.execute("UPDATE cancellations SET outcome=?,attempts=?,missing_streak=?,next_at=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=? AND attempts=? AND outcome IN ('queued','retry')",
+                                    (outcome, attempts, missing_streak, next_at, now) + key + (previous_attempts,))
+            if not updated.rowcount:
+                continue
             if outcome in ('closed', 'missing_gateway', 'paid_conflict'):
                 state.execute("INSERT OR REPLACE INTO epoch_receipts SELECT ?,?,?,?,generation,?,? FROM gateway_epochs WHERE gateway=?", key+(outcome,now,gateway))
         if outcome != 'retry':
@@ -485,7 +510,7 @@ def sync_once(database, state, gateway, sender=cancel, now=None, anomaly_sender=
         processed += 1
         if time.monotonic() >= deadline:
             break
-    return processed+send_anomalies(state,gateway,now,anomaly_due,anomaly_active,anomaly_sender)
+    return processed+send_anomalies(state,gateway,now,anomaly_due,anomaly_active,anomaly_sender,generation)
 
 
 def gateway_token(database, gateway):
@@ -538,12 +563,13 @@ def signed_post(gateway, path, body, token):
 
 
 def check_generation(database, state, gateway):
+    previous = journal_generation(state, gateway)
     result = signed_post(gateway, '/api/v1/order/cancel-sync-generation', {'timestamp': str(int(time.time()))}, gateway_token(database, gateway))
     data = (result.get('data') if isinstance(result, dict) else None) or {}
     generation = data.get('generation', '') if isinstance(data, dict) else ''
     if not isinstance(generation, str) or len(generation) != 32 or any(c not in '0123456789abcdef' for c in generation):
         raise ValueError('invalid recovery generation')
-    with state:
+    with generation_tx(state, gateway, previous):
         state.execute("INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?) ON CONFLICT(gateway) DO UPDATE SET generation=excluded.generation,audit_id=0,scanned=0 WHERE gateway_epochs.generation<>excluded.generation", (gateway, generation))
 
 
@@ -580,18 +606,13 @@ def review_missing(database, state, gateway, trade_id, reason):
         source.close()
     if len(valid)!=1 or valid[0][:3]!=(pid,tid,oid):
         raise ValueError('merchant cancellation no longer matches; recheck merchant state')
-    epoch = state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
-    generation = epoch[0] if epoch else ''
+    generation = journal_generation(state, gateway)
     result=cancel(gateway,tid,oid,valid[0][3])
     if result not in ('missing_gateway','closed'):
         raise ValueError('gateway result changed; recheck payment before review')
     outcome='reviewed_missing' if result=='missing_gateway' else 'closed'
     now = time.time()
-    with immediate_tx(state):
-        current = state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?', (gateway,)).fetchone()
-        current_generation = current[0] if current else ''
-        if current_generation != generation:
-            raise ValueError('gateway generation changed during review')
+    with generation_tx(state, gateway, generation):
         updated = state.execute("UPDATE cancellations SET outcome=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=? AND outcome='missing_gateway'", (outcome, now, gateway, pid, tid, oid))
         if updated.rowcount != 1:
             raise ValueError('missing cancellation state changed during review')
@@ -627,10 +648,7 @@ def review_conflict(database, state, gateway, trade_id, reason):
         raise ValueError('gateway has no current audited refund record')
     generation=epoch[0]
     now = time.time()
-    with immediate_tx(state):
-        current=state.execute('SELECT generation FROM gateway_epochs WHERE gateway=?',(gateway,)).fetchone()
-        if not current or current[0]!=generation:
-            raise ValueError('gateway generation changed during review')
+    with generation_tx(state, gateway, generation):
         state.execute('INSERT INTO conflict_reviews(gateway,payment_id,trade_id,order_id,generation,operator,reason,created_at) VALUES(?,?,?,?,?,?,?,?)',(gateway,pid,tid,oid,generation,operator_name(),reason,now))
         state.execute("UPDATE cancellations SET outcome='reviewed_conflict',updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=? AND outcome='paid_conflict'",(now,gateway,pid,tid,oid))
         state.execute("UPDATE payment_anomalies SET outcome='reviewed_conflict',review_generation=?,checked_generation=?,updated_at=? WHERE gateway=? AND payment_id=? AND trade_id=? AND order_id=?",(generation,generation,now,gateway,pid,tid,oid))
@@ -703,6 +721,13 @@ def main():
     if url.scheme != 'https' or not url.hostname or url.username or url.password or url.port not in (None, 443) or url.path or url.query or url.fragment:
         parser.error('--gateway must be an HTTPS origin')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    if not str(database).startswith(('postgresql://', 'postgres://')) and args.state != ':memory:':
+        source = Path(database).resolve()
+        state_path = Path(args.state).resolve()
+        for suffix in ('', '-wal', '-shm', '-journal'):
+            reserved = Path(str(source) + suffix)
+            if state_path == reserved or (state_path.exists() and reserved.exists() and state_path.samefile(reserved)):
+                parser.error('--state must be separate from the commerce database and its SQLite side files')
     state = journal(args.state)
     try:
         if args.rescan_history:

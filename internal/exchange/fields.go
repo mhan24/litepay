@@ -1,4 +1,4 @@
-// Package exchange contains only shared wire decoding, not payment policy.
+// Package exchange contains shared exchange API decoding and errors.
 package exchange
 
 import (
@@ -9,6 +9,9 @@ import (
 
 	"litepay/internal/amount"
 )
+
+// ErrHistoryLimit means only a shorter time window can prove complete coverage.
+var ErrHistoryLimit = errors.New("history pagination limit reached")
 
 type Text string
 

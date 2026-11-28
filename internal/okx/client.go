@@ -118,11 +118,11 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 		}
 		next := oldest + 1
 		if next >= after {
-			return nil, fmt.Errorf("OKX incomplete timestamp boundary")
+			return nil, fmt.Errorf("OKX incomplete timestamp boundary: %w", exchange.ErrHistoryLimit)
 		}
 		after = next
 	}
-	return nil, fmt.Errorf("OKX incomplete history: page limit")
+	return nil, fmt.Errorf("OKX: %w", exchange.ErrHistoryLimit)
 }
 func (c *Client) page(ctx context.Context, after int64) ([]model.Transaction, error) {
 	// 文档只定义了 type 请求参数（3=站内转账，4=链上充值），响应里没有 type 字段，

@@ -3,6 +3,7 @@ import http.server
 import threading
 import importlib.util
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -102,6 +103,30 @@ class SyncTest(unittest.TestCase):
             self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, sender, now=now), 1)
         self.assertEqual(self.state.execute('SELECT outcome,attempts FROM cancellations').fetchone(), ('missing_gateway', 3))
         self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, sender, now=1000), 0)
+
+    def test_missing_results_must_be_consecutive_across_restart(self):
+        self.add(1)
+        path = Path(self.tmp.name) / 'state.db'
+        sender = Mock(side_effect=['missing_gateway', TimeoutError(), 'missing_gateway',
+                                   'missing_gateway', 'missing_gateway'])
+        for attempt, expected in enumerate(['retry', 'retry', 'retry', 'retry', 'missing_gateway']):
+            state = sync.journal(path)
+            try:
+                sync.sync_once(self.path, state, self.gateway, sender, now=1000 * (attempt + 1))
+                self.assertEqual(state.execute('SELECT outcome FROM cancellations').fetchone()[0], expected)
+            finally:
+                state.close()
+
+    def test_cli_keeps_journal_out_of_source_database(self):
+        alias = Path(self.tmp.name) / 'alias.db'
+        os.link(self.path, alias)
+        for destination in (self.path, alias, str(self.path) + '-wal'):
+            args = ['sync', '--database', str(self.path), '--state', str(destination),
+                    '--gateway', self.gateway, '--once']
+            with patch.object(sys, 'argv', args), self.assertRaises(SystemExit) as status:
+                sync.main()
+            self.assertEqual(status.exception.code, 2)
+        self.assertIsNone(self.db.execute("SELECT name FROM sqlite_master WHERE name='cancellations'").fetchone())
 
     def test_postgresql_connections_are_read_only_and_bounded(self):
         driver = Mock()
@@ -223,7 +248,7 @@ class SyncTest(unittest.TestCase):
         self.db.executemany("INSERT INTO payments(id,order_id,channel_id,provider_type,status,paid_at,deleted_at,provider_ref,gateway_order_no,pay_url) VALUES(?,?,1,'bepusdt','expired',NULL,NULL,?,?,?)",
                             ((i, i, 't'+str(i), 'o'+str(i), self.gateway+'/pay/a') for i in range(1, n+1)))
         self.db.commit()
-        self.state.executemany("INSERT INTO cancellations VALUES(?,?,?,?,'closed',1,0,0)",
+        self.state.executemany("INSERT INTO cancellations(gateway,payment_id,trade_id,order_id,outcome,attempts,next_at,updated_at) VALUES(?,?,?,?,'closed',1,0,0)",
                                ((self.gateway, i, 't'+str(i), 'o'+str(i)) for i in range(1, n+1)))
         self.state.execute("INSERT INTO discovery VALUES(?,'2026-01-01',?,0,?,0)", (self.gateway, n, n))
         self.state.commit()
@@ -372,6 +397,38 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(status['discovery_lag_seconds'],0)
         self.assertTrue(status['replay_complete'])
 
+    def test_slow_generation_probe_cannot_replace_a_newer_recovery(self):
+        self.db.commit()  # Make the configured payment channel visible to the probe.
+        def late_response(*args):
+            with self.state:
+                self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)',
+                                   (self.gateway, 'b'*32))
+            return {'data': {'generation': 'a'*32}}
+
+        with patch.object(sync, 'signed_post', side_effect=late_response):
+            with self.assertRaisesRegex(ValueError, 'generation changed'):
+                sync.check_generation(self.path, self.state, self.gateway)
+        self.assertEqual(sync.journal_generation(self.state, self.gateway), 'b'*32)
+
+    def test_in_flight_cancellation_must_retry_after_generation_changes(self):
+        self.add(1)
+        with self.state:
+            self.state.execute('INSERT INTO gateway_epochs(gateway,generation) VALUES(?,?)',
+                               (self.gateway, 'a'*32))
+
+        def restore_while_sending(*args):
+            with self.state:
+                self.state.execute('UPDATE gateway_epochs SET generation=?,scanned=0 WHERE gateway=?',
+                                   ('b'*32, self.gateway))
+            return 'closed'
+
+        with self.assertRaisesRegex(ValueError, 'generation changed'):
+            sync.sync_once(self.path, self.state, self.gateway, restore_while_sending, now=10)
+        self.assertEqual(self.state.execute('SELECT count(*) FROM epoch_receipts').fetchone()[0], 0)
+        self.assertEqual(self.state.execute('SELECT outcome FROM cancellations').fetchone()[0], 'queued')
+        self.assertEqual(sync.sync_once(self.path, self.state, self.gateway, lambda *a: 'closed', now=15), 1)
+        self.assertEqual(self.state.execute('SELECT generation FROM epoch_receipts').fetchone()[0], 'b'*32)
+
     def test_gateway_generation_replays_closed_receipts_and_survives_restart(self):
         self.add(1)
         sync.sync_once(self.path,self.state,self.gateway,lambda *a:'closed',now=10)
@@ -517,6 +574,19 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(self.state.execute('SELECT count(*) FROM cancellations').fetchone()[0],0)
         self.assertEqual(self.state.execute('SELECT payment_id,exception_code,outcome FROM payment_anomalies').fetchone(),(1,'closed_order_payment_succeeded','paid_conflict'))
         self.assertEqual(sync.queue_status(self.state,self.gateway)['conflicts'],1)
+
+    def test_in_flight_anomaly_check_preserves_a_completed_review(self):
+        self.add(1)
+        self.mark_anomaly(1)
+
+        def review_while_checking(*args):
+            with self.state:
+                self.state.execute("UPDATE payment_anomalies SET outcome='reviewed_conflict' WHERE payment_id=1")
+            return 'paid_conflict'
+
+        sync.sync_once(self.path, self.state, self.gateway, now=10, anomaly_sender=review_while_checking)
+        self.assertEqual(self.state.execute('SELECT outcome FROM payment_anomalies').fetchone()[0],
+                         'reviewed_conflict')
 
     def test_old_payment_late_callback_is_found_without_new_order_or_id_or_audit(self):
         self.add(1)

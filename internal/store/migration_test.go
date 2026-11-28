@@ -102,6 +102,56 @@ func TestMigrationRecoversPreexistingTaskSelectionWithoutGuessing(t *testing.T) 
 	}
 }
 
+func TestVersion8ConfirmationUsesOriginalOrderDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-confirmation.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "old-confirmation")
+	event := evidence(o, "old-unconfirmed")
+	event.State = model.Unconfirmed
+	if err := s.DB().Create(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{"DROP TABLE payment_attempts", "DROP TABLE confirmation_tasks", "PRAGMA user_version=8"} {
+		if err := s.DB().Exec(sql).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkTask := func() {
+		t.Helper()
+		var q model.ConfirmationTask
+		if err := s.DB().Where("provider=? AND event_id=?", event.Provider, event.EventID).First(&q).Error; err != nil {
+			t.Fatal(err)
+		}
+		if q.OrderID == nil || *q.OrderID != o.ID || q.State != "pending" || !q.Deadline.Equal(o.ExpiresAt.Add(LateVisibilityWindow)) {
+			t.Fatalf("unconfirmed receipt lost its order or settlement deadline: %+v", q)
+		}
+	}
+	checkTask()
+	// A database upgraded by an earlier binary already contains the short, unlinked task.
+	if err := s.DB().Model(&model.ConfirmationTask{}).Where("provider=? AND event_id=?", event.Provider, event.EventID).Updates(map[string]any{"order_id": nil, "deadline": event.OccurredAt.Add(ConfirmationWait)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	checkTask()
+}
+
 func TestVersion10ExpiryScheduleAndSelectionLimitsSurviveRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "schema10.db")
 	s, err := Open(path)
@@ -533,5 +583,38 @@ func TestCurrentSchemaRestartRepairsMissingConfirmationAndPaymentState(t *testin
 		if err := s.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestRestartRestoresCurrentSelectionBesideOlderAttempts(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "partial-restore.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := readyOrder(t, s, "two-attempts")
+	allowSelectionFixture(t, s, o.TradeNo)
+	current, err := s.Select(ctx, o.TradeNo, "okx", "USDC", "second-account", 2, 10000, 10000, 99, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().Where("order_id=? AND provider=?", o.ID, current.Provider).Delete(&model.PaymentAttempt{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if result, err := s.Process(ctx, evidence(current, "current-deposit"), ""); err != nil || result != "paid" {
+		t.Fatal(result, err)
+	}
+	var count int64
+	if err := s.DB().Model(&model.PaymentAttempt{}).Where("order_id=?", o.ID).Count(&count).Error; err != nil || count != 2 {
+		t.Fatal(count, err)
 	}
 }

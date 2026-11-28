@@ -99,7 +99,7 @@ go run . -config config.yaml
 ### 健康检查与状态观测
 
 - `/healthz`：验证底层 SQLite 数据库连通性。
-- `/readyz` 与 `/readyz/providers/:provider`（支持 `binance`、`okx`、`bybit`、`bitget`）：检查数据库与商城取消同步状态，并要求已配置的支付平台最近扫描成功且进度无积压（无待付款订单的空闲期不要求游标绝对新鲜）。未鉴权调用仅返回 `{"ready":bool}`；详细 `providers`、`degraded` 与失败 `reason` 仅对已登录后台管理员或携带 `server.readiness_token` 只读探针令牌的请求返回。令牌配置后至少 16 字节，仅支持 `X-Readiness-Token`、`X-Probe-Token` 或 `Authorization: Bearer ...` Header；不接受 URL 查询参数。
+- `/readyz` 与 `/readyz/providers/:provider`（支持 `binance`、`okx`、`bybit`、`bitget`）：检查数据库与商城取消同步状态，并要求已配置的支付平台最近扫描成功且进度无积压（无待付款订单的空闲期不要求游标绝对新鲜）。未鉴权调用仅返回 `{"ready":bool}`。探针请求携带 `server.readiness_token` 可查看 `providers`、`degraded` 和失败 `reason`。浏览器登录后台后，可在后台入口的 `/operations` 查看各平台状态。令牌配置后至少 16 字节，仅支持 `X-Readiness-Token`、`X-Probe-Token` 或 `Authorization: Bearer ...` Header；不接受 URL 查询参数。
 - 后台可实时查看未归属事件、扫描错误及未确认回调；对存在歧义或订单最终关闭后的到账，系统完整保留证据并交由人工在商城与交易所间核对。
 
 ---
@@ -129,7 +129,7 @@ Binance Pay（USDT / USDC）与 OKX 站内转账（USDT）已在生产服务器�
 - **文件挂载方式**：将配置完成的文件只读挂载至 `/app/config.yaml`，数据持久化目录挂载至 `/app/data`。`config.example.yaml` 仅用于显式的本地开发。
 - **运维演练工具**：仓库提供 `scripts/payment_db.py` 用于一致性备份、完整性检查、数据恢复与离线演练；生产部署与版本回滚请严格参照 [支付运维](docs/operations.md) 执行。
 
-主密钥须为随机 32 字节的 64 位 hex 或 Base64 编码，不接受 32 字符口令。可用 `openssl rand -hex 32 > master.key` 生成，再执行 `chmod 600 master.key`。生产模式拒绝 group/other 有权限的密钥文件，开发模式会警告；容器挂载文件需允许 UID 10001 作为所有者读取。
+主密钥须为随机 32 字节的 64 位 hex 或 Base64 编码，不接受 32 字符口令。在新路径执行 `(umask 077 && openssl rand -hex 32 > master.key)`，即可创建仅所有者可读写的密钥文件。生产模式拒绝 group/other 有权限的密钥文件，开发模式会警告；容器挂载文件需允许 UID 10001 作为所有者读取。
 
 首次迁移会把明文与旧版密文升级为 `enc:v2:`，以字段名绑定 GCM AAD，并执行 WAL 截断和 VACUUM 清理旧页；启动时仍兼容读取 `enc:v1:`。
 

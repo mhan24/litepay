@@ -72,8 +72,7 @@ func (p *Poller) scanHistorical(parent context.Context, cfg *config.Config, prov
 		}
 		save, done := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
 		defer done()
-		var apiErr *binance.APIError
-		if errors.As(err, &apiErr) && (apiErr.Kind == binance.ErrorIncomplete || apiErr.Kind == binance.ErrorBudget) {
+		if scanOverflow(err) {
 			return p.st.ShrinkHistoricalChunk(save, job, after.ChunkTo)
 		}
 		if e := p.st.HistoricalScanFailure(save, job, false); e != nil {

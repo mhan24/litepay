@@ -41,7 +41,11 @@ func (s *Store) PaymentOperationsReady(ctx context.Context) (bool, error) {
 	}
 	r := s.db.WithContext(ctx).Raw(`SELECT r.acknowledged,r.generation,h.generation health_generation,h.healthy,h.pending,h.failures,h.missing,h.conflicts,h.discovery_pending,h.received_at,h.last_success_at FROM gateway_recoveries r LEFT JOIN integration_healths h ON h.name='dujiao_cancel_sync' WHERE r.id=1`).Scan(&state)
 	now := time.Now()
-	return r.RowsAffected == 1 && state.Acknowledged && state.Generation != "" && state.Generation == state.HealthGeneration && state.Healthy && state.Pending == 0 && state.Failures == 0 && state.Missing == 0 && state.Conflicts == 0 && state.DiscoveryPending == 0 && !state.ReceivedAt.IsZero() && now.Sub(state.ReceivedAt) <= 45*time.Second && !state.LastSuccessAt.IsZero() && now.Sub(state.LastSuccessAt) <= time.Minute, r.Error
+	receivedAge, successAge := now.Sub(state.ReceivedAt), now.Sub(state.LastSuccessAt)
+	ready := r.RowsAffected == 1 && state.Acknowledged && state.Generation != "" && state.Generation == state.HealthGeneration &&
+		state.Healthy && state.Pending == 0 && state.Failures == 0 && state.Missing == 0 && state.Conflicts == 0 && state.DiscoveryPending == 0 &&
+		receivedAge >= 0 && receivedAge <= 45*time.Second && successAge >= 0 && successAge <= time.Minute
+	return ready, r.Error
 }
 
 func (s *Store) AcknowledgeRecovery(ctx context.Context, generation string, complete bool, h model.IntegrationHealth) error {
@@ -61,7 +65,7 @@ func (s *Store) AcknowledgeRecovery(ctx context.Context, generation string, comp
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		if err == nil && (h.ReportedAt < old.ReportedAt || (h.Generation == old.Generation && h.ReportedAt == old.ReportedAt)) {
+		if err == nil && h.Generation == old.Generation && h.ReportedAt <= old.ReportedAt {
 			return nil
 		}
 		// A fresh source heartbeat alone cannot release delivery while cancellation

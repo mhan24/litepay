@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,12 +54,12 @@ func (n *Notifier) Deliver(ctx context.Context) (bool, error) {
 	return did, err
 }
 
-func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
+func (n *Notifier) deliver(ctx context.Context) (bool, uint, error) {
 	cfg := n.cfg.Get()
 	if cfg.Server.CancelSyncRequired {
 		ready, err := n.st.PaymentOperationsReady(ctx)
 		if err != nil || !ready {
-			return false, "", err
+			return false, 0, err
 		}
 	}
 	maxAttempts := cfg.Notify.MaxAttempts
@@ -71,27 +72,37 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 	}
 	task, o, err := n.st.ReserveCallback(ctx, maxAttempts, timeoutSeconds)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, "", nil
+		return false, 0, nil
 	}
 	if err != nil {
-		return false, "", err
+		return false, 0, err
 	}
-	tradeID := o.TradeNo
+	orderID := o.ID
 	var tx model.Transaction
 	if err = n.st.DB().WithContext(ctx).First(&tx, "order_id = ? AND state = ?", o.ID, model.Confirmed).Error; err != nil {
-		return false, tradeID, n.releaseCallback(ctx, *task, err)
+		return false, orderID, n.releaseCallback(ctx, *task, err)
 	}
-	payload := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "amount": json.Number(o.Original()), "actual_amount": json.Number(amount.String(o.PayUnits)), "token": o.Receiver, "block_transaction_id": tx.EventID, "status": 2}
+	original := o.Original()
+	if o.OriginUnits > 0 && o.OriginUnits < amount.MinMall {
+		// Older orders may have a tiny original price even when the allocated payment is valid.
+		// Dujiao renders these JSON numbers in scientific notation when verifying the signature.
+		original = strconv.FormatFloat(float64(o.OriginUnits)/float64(amount.Scale), 'g', -1, 64)
+	}
+	payload := map[string]any{"trade_id": o.TradeNo, "order_id": o.OutTradeNo, "amount": json.Number(original), "actual_amount": json.Number(amount.String(o.PayUnits)), "token": o.Receiver, "block_transaction_id": tx.EventID, "status": 2}
 	key, err := n.st.CallbackKey(ctx, *task)
 	if err != nil {
-		return false, tradeID, n.releaseCallback(ctx, *task, err)
+		return false, orderID, n.releaseCallback(ctx, *task, err)
 	}
 	payload["signature"] = sign.BEpusdtSignGeneric(payload, key)
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return false, tradeID, n.releaseCallback(ctx, *task, err)
+		return false, orderID, n.releaseCallback(ctx, *task, err)
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+	if task.LeaseUntil.Before(deadline) {
+		deadline = task.LeaseUntil
+	}
+	requestCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, o.NotifyURL, bytes.NewReader(body))
 	status := 0
@@ -108,28 +119,28 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 		if n.cfg.Get().Server.CancelSyncRequired {
 			ready, guardErr := n.st.PaymentOperationsReady(ctx)
 			if guardErr != nil {
-				return false, tradeID, n.releaseCallback(ctx, *task, guardErr)
+				return false, orderID, n.releaseCallback(ctx, *task, guardErr)
 			}
 			if !ready {
 				save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 				defer done()
-				return false, tradeID, n.st.ReleaseCallback(save, *task)
+				return false, orderID, n.st.ReleaseCallback(save, *task)
 			}
 		}
 		allowed, guardErr := n.st.CallbackCanSend(ctx, *task)
 		if guardErr != nil {
-			return false, tradeID, n.releaseCallback(ctx, *task, guardErr)
+			return false, orderID, n.releaseCallback(ctx, *task, guardErr)
 		}
 		if !allowed {
 			save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			defer done()
-			return false, tradeID, n.st.ReleaseCallback(save, *task)
+			return false, orderID, n.st.ReleaseCallback(save, *task)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		var response []byte
 		status, response, err = n.http.Do(req)
 		if err != nil && status == 0 && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
-			return false, tradeID, n.releaseCallback(ctx, *task, err)
+			return false, orderID, n.releaseCallback(ctx, *task, err)
 		}
 		if err == nil {
 			ack := strings.TrimSpace(string(response))
@@ -149,25 +160,30 @@ func (n *Notifier) deliver(ctx context.Context) (bool, string, error) {
 	defer done()
 	err = n.st.FinishCallback(save, *task, status, ok, message, time.Duration(delay)*time.Second)
 	if err == nil && !ok && task.Attempts >= task.AttemptLimit {
-		slog.Error("商户通知重试已耗尽，需核对商城后重新通知", "trade_id", o.TradeNo)
+		slog.Error("商户通知重试已耗尽，需核对商城后重新通知", "internal_order_id", o.ID)
 	}
-	return true, tradeID, err
+	return true, orderID, err
 }
 
 // releaseCallback 归还一次未发出的预约，避免白白消耗商户重试额度；原始 cause 原样返回供上层记录日志。
 func (n *Notifier) releaseCallback(ctx context.Context, task model.Callback, cause error) error {
 	save, done := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer done()
-	if err := n.st.ReleaseCallback(save, task); err != nil {
+	next := time.Now()
+	if ctx.Err() == nil {
+		delay := retryDelaySeconds(n.cfg.Get().Notify.RetryDelays, 1)
+		next = next.Add(time.Duration(delay) * time.Second)
+	}
+	if err := n.st.ReleaseCallbackAt(save, task, next); err != nil {
 		return errors.Join(cause, err)
 	}
 	return cause
 }
 
-func (n *Notifier) deliverSafe(ctx context.Context) (did bool, tradeID string, err error) {
+func (n *Notifier) deliverSafe(ctx context.Context) (did bool, orderID uint, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("回调任务发生异常", "trade_id", tradeID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			slog.Error("回调任务发生异常", "internal_order_id", orderID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 			did = false
 			err = fmt.Errorf("deliver panic: %v", r)
 		}
@@ -185,7 +201,7 @@ func (n *Notifier) Run(ctx context.Context) {
 	for range workers {
 		group.Go(func() {
 			for ctx.Err() == nil {
-				did, tradeID, err := n.deliverSafe(ctx)
+				did, orderID, err := n.deliverSafe(ctx)
 				if did && err == nil {
 					continue
 				}
@@ -193,7 +209,7 @@ func (n *Notifier) Run(ctx context.Context) {
 				if err != nil {
 					delay = time.Second
 					if ctx.Err() == nil {
-						slog.Error("回调任务处理失败", "trade_id", tradeID, "error", err)
+						slog.Error("回调任务处理失败", "internal_order_id", orderID, "error", err)
 					}
 				}
 				timer := time.NewTimer(delay)

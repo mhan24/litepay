@@ -118,6 +118,28 @@ func TestProviderAdmissionRequiresCurrentAccountAndScanAndRecovers(t *testing.T)
 	if w := getProbeRequest(engine, "/readyz/providers/unknown", "test-probe-token-long"); w.Code != 404 {
 		t.Fatal(w.Code)
 	}
+	originalUnits := old.PayUnits
+	if err := st.DB().Model(old).Update("pay_units", 1_000_000_000_000).Error; err != nil {
+		t.Fatal(err)
+	}
+	if w := getRequest(engine, "/pay/old-instruction"); w.Code != 409 || strings.Contains(w.Body.String(), "复制金额") {
+		t.Fatalf("cashier offered uncollectable historical amount, status=%d", w.Code)
+	}
+	if w := getRequest(engine, "/api/order/status?order_id=old-instruction"); !strings.Contains(w.Body.String(), `"accepting_payment":false`) || !strings.Contains(w.Body.String(), `"amount":""`) {
+		t.Fatal("public status offered uncollectable historical amount", w.Body.String())
+	}
+	invalidOrder, err := st.GetByTradeNo(ctx, old.TradeNo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range bepusdtPaymentMethods(mgr.Get(), invalidOrder) {
+		if method["network"] == "Binance" && method["currency"] == "USDT" {
+			t.Fatal("create-order reply offered uncollectable historical amount", method)
+		}
+	}
+	if err := st.DB().Model(old).Update("pay_units", originalUnits).Error; err != nil {
+		t.Fatal(err)
+	}
 	no := createOrderViaBEpusdt(t, engine, mgr.Get().BEpusdt.APIToken, "https://shop.example")
 	if got := submit(no, "binance"); got != 200 {
 		t.Fatal(got)
@@ -262,6 +284,18 @@ func TestReadinessAuthThreeCallers(t *testing.T) {
 	}
 
 	// 2. Read-only probe token caller receives full providers, degraded flag, and failure reasons.
+	for auth, authorized := range map[string]bool{
+		"Bearer readonly-probe-secret": true,
+		"readonly-probe-secret":        false,
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		req.Header.Set("Authorization", auth)
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+		if strings.Contains(rec.Body.String(), `"providers"`) != authorized {
+			t.Fatalf("unexpected readiness details for Authorization header: %s", rec.Body.String())
+		}
+	}
 	w := getProbeRequest(engine, "/readyz", "readonly-probe-secret")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"degraded":true`) || !strings.Contains(w.Body.String(), `"providers"`) {
 		t.Fatalf("probe token caller missing details on /readyz: %s", w.Body.String())

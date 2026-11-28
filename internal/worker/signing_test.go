@@ -34,8 +34,17 @@ func TestTokenRotationPinsHistoricalCallbacks(t *testing.T) {
 	merchant := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		decoder := json.NewDecoder(r.Body)
-		decoder.UseNumber()
-		decoder.Decode(&body)
+		if err := decoder.Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		// The merchant decodes JSON numbers as float64 and includes their %v text in the signature.
+		for _, field := range []string{"amount", "actual_amount"} {
+			body[field] = fmt.Sprint(body[field])
+		}
+		if body["amount"] != "5e-05" || body["actual_amount"] != "0.0001" {
+			t.Errorf("unexpected legacy callback amounts: %v, %v", body["amount"], body["actual_amount"])
+		}
 		if !sign.BEpusdtVerifyGeneric(body, old.APIToken) || sign.BEpusdtVerifyGeneric(body, mgr.Get().BEpusdt.APIToken) {
 			t.Error("historical signing key changed")
 		}
@@ -43,11 +52,11 @@ func TestTokenRotationPinsHistoricalCallbacks(t *testing.T) {
 		fmt.Fprint(w, "success")
 	}))
 	defer merchant.Close()
-	_, err = st.Create(ctx, model.Order{TradeNo: "key-old", OutTradeNo: "key-old", OriginUnits: 1000000, ExpiresAt: time.Now().Add(time.Hour), NotifyURL: merchant.URL})
+	_, err = st.Create(ctx, model.Order{TradeNo: "key-old", OutTradeNo: "key-old", OriginUnits: 50, ExpiresAt: time.Now().Add(time.Hour), NotifyURL: merchant.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	o, err := st.Select(ctx, "key-old", "binance", "USDT", "receiver", 2, 10000, 10000, 99, 120)
+	o, err := st.Select(ctx, "key-old", "binance", "USDT", "receiver", 6, 10, 1, 5, 120)
 	if err != nil {
 		t.Fatal(err)
 	}

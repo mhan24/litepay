@@ -77,6 +77,29 @@ func TestSignedCashierAndAdminPages(t *testing.T) {
 	if e != nil || o.PayAmount() != "10.01" {
 		t.Fatal(o, e)
 	}
+	retry := signedCreateRequest(t, engine, mgr.Get(), payload)
+	var retried struct {
+		Data struct {
+			TradeID string `json:"trade_id"`
+			Network []struct {
+				Network      string `json:"network"`
+				Currency     string `json:"currency"`
+				ActualAmount string `json:"actual_amount"`
+			} `json:"network"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(retry.Body.Bytes(), &retried); err != nil || retried.Data.TradeID != no {
+		t.Fatalf("retry did not return the original order: %s", retry.Body.String())
+	}
+	var selectedAmount string
+	for _, method := range retried.Data.Network {
+		if method.Network == "Binance" && method.Currency == "USDT" {
+			selectedAmount = method.ActualAmount
+		}
+	}
+	if selectedAmount != o.PayAmount() {
+		t.Fatalf("retry returned %q for the reserved payment amount %q", selectedAmount, o.PayAmount())
+	}
 	w = httptest.NewRecorder()
 	engine.ServeHTTP(w, httptest.NewRequest("GET", "/pay/"+no, nil))
 	if !strings.Contains(w.Body.String(), "10.01") || strings.Contains(w.Body.String(), "四舍五入") {

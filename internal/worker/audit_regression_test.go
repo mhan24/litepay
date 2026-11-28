@@ -147,6 +147,15 @@ func TestPollerClientCacheIsolatedPerProvider(t *testing.T) {
 	defer st.Close()
 	cfg := config.Default()
 	cfg.Server.Production = false
+	acct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/account" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"uid":"b-uid"}`)
+	}))
+	defer acct.Close()
+	cfg.Binance.BaseURL = acct.URL
 	cfg.Binance.APIKey = "b-key"
 	cfg.Binance.APISecret = "b-secret"
 	cfg.Checkout.Binance.UID = "b-uid"
@@ -182,8 +191,8 @@ func TestPollerClientCacheIsolatedPerProvider(t *testing.T) {
 	p.UseTestTransports()
 	p.clients[config.ProviderBinance] = &connection{config: *mgr.Get(), source: bSrc, uid: "b-uid"}
 	got2, err := p.client(ctx, &secretChanged, config.ProviderBinance)
-	if err == nil && got2 == bSrc {
-		t.Fatal("rotated Binance secret reused stale cached client")
+	if err != nil || got2 == bSrc {
+		t.Fatalf("rotated secret failed to establish a fresh verified client: %v", err)
 	}
 }
 
@@ -697,6 +706,9 @@ func TestNotifierRequiresConfirmedTransactionForCallback(t *testing.T) {
 	n.UseTestTransport()
 	if did, err := n.Deliver(ctx); err == nil || did {
 		t.Fatalf("expected error for non-confirmed transaction, got did=%v err=%v", did, err)
+	}
+	if did, err := n.Deliver(ctx); err != nil || did {
+		t.Fatalf("incomplete evidence was immediately reserved again: did=%v err=%v", did, err)
 	}
 	if calls.Load() != 0 {
 		t.Fatal("callback was sent for a non-confirmed transaction")

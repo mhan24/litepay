@@ -52,7 +52,9 @@ func (p *Poller) ProviderReady(ctx context.Context, cfg *config.Config, provider
 	}
 	cursor, err := p.st.Cursor(ctx, provider)
 	now := time.Now()
-	return err == nil && cursor.LastError == "" && !cursor.LastSuccess.IsZero() && now.Sub(cursor.LastSuccess) <= ScanFreshness && !cursor.ScannedUntil.IsZero() && now.Sub(cursor.ScannedUntil) <= ScanCoverageFreshness, err
+	successAge, coverageAge := now.Sub(cursor.LastSuccess), now.Sub(cursor.ScannedUntil)
+	return err == nil && cursor.LastError == "" && successAge >= 0 && successAge <= ScanFreshness &&
+		coverageAge >= 0 && coverageAge <= ScanCoverageFreshness, err
 }
 
 // UseTestSource substitutes a read-only exchange fixture for end-to-end tests.

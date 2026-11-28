@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('dbtool', Path(__file__).with_name('payment_db.py'))
 tool = importlib.util.module_from_spec(spec)
@@ -334,6 +335,61 @@ class CompleteCancellationReviewDBTest(CancellationReviewDBTest):
                 tool.snapshot(self.path, out)
         self.assertFalse(out.exists())
         self.assertFalse(Path(str(out) + '.json').exists())
+
+
+
+
+class BackupPublicationTest(unittest.TestCase):
+    def test_final_path_stays_free_until_validation_and_preserves_concurrent_file(self):
+        fixture = PaymentDBTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        backup = fixture.root / 'backup.db'
+        validate = tool.validate
+
+        def finish_another_job(staged):
+            result = validate(staged)
+            with backup.open('xb') as other:
+                other.write(b'already published')
+            return result
+
+        with patch.object(tool, 'validate', side_effect=finish_another_job):
+            with self.assertRaises(FileExistsError):
+                tool.snapshot(fixture.path, backup)
+        self.assertEqual(backup.read_bytes(), b'already published')
+        self.assertFalse(Path(str(backup) + '.json').exists())
+        self.assertFalse(Path(str(backup) + '-shm').exists())
+
+    def test_restore_rejects_backup_side_files(self):
+        fixture = PaymentDBTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        backup = fixture.root / 'backup.db'
+        tool.snapshot(fixture.path, backup)
+        for suffix in ('-wal', '-shm', '-journal', '.lock'):
+            target = Path(str(backup) + suffix)
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                tool.restore(backup, target)
+            self.assertFalse(target.exists())
+
+    def test_restore_verifies_the_bytes_it_actually_stages(self):
+        fixture = PaymentDBTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        backup = fixture.root / 'backup.db'
+        target = fixture.root / 'restored.db'
+        tool.snapshot(fixture.path, backup)
+        original_lock = fcntl.flock
+
+        def lock_and_change_source(fd, operation):
+            original_lock(fd, operation)
+            with sqlite3.connect(backup) as db:
+                db.execute("INSERT INTO notify_logs VALUES(99)")
+
+        with patch.object(tool.fcntl, 'flock', side_effect=lock_and_change_source):
+            with self.assertRaisesRegex(ValueError, 'checksum'):
+                tool.restore(backup, target)
+        self.assertFalse(target.exists())
 
 
 if __name__ == '__main__':

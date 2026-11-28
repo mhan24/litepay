@@ -60,22 +60,17 @@ func Text(units int64, precision int) string {
 	if precision < 0 || precision > 6 {
 		precision = 6
 	}
-	neg := units < 0
-	var u uint64
-	if neg {
-		u = uint64(-(units + 1)) + 1
-	} else {
-		u = uint64(units)
+	integer, remainder := units/Scale, units%Scale
+	sign := ""
+	if units < 0 {
+		sign = "-"
+		integer, remainder = -integer, -remainder
 	}
-	scale := uint64(Scale)
-	whole := strconv.FormatUint(u/scale, 10)
-	if neg {
-		whole = "-" + whole
-	}
+	whole := sign + strconv.FormatInt(integer, 10)
 	if precision == 0 {
 		return whole
 	}
-	frac := strconv.FormatUint(scale+u%scale, 10)[1:]
+	frac := strconv.FormatInt(Scale+remainder, 10)[1:]
 	return whole + "." + frac[:precision]
 }
 func String(units int64) string {

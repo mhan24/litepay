@@ -623,6 +623,47 @@ func TestScanAdvancesCursorWithMaxLookbackBuffer(t *testing.T) {
 	}
 }
 
+func TestFutureScanTimestampsRequireFreshCoverage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Binance.APIKey, cfg.Binance.APISecret = "key", "secret"
+	cfg.Checkout.Binance.UID = "receiver"
+	mgr := settings.New(cfg, st)
+	if err = mgr.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPoller(mgr, st)
+	p.UseTestSource("binance", &fixture{})
+	if err = p.Scan(ctx, "binance"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, column := range []string{"last_success", "scanned_until"} {
+		stamp := st.DB().Model(&model.ScanCursor{}).Where("provider = ?", "binance")
+		if err := stamp.Update(column, now.Add(time.Hour)).Error; err != nil {
+			t.Fatal(err)
+		}
+		if ready, err := p.ProviderReady(ctx, mgr.Get(), "binance"); err != nil || ready {
+			t.Fatalf("%s in the future: ready=%t, err=%v", column, ready, err)
+		}
+		if column == "scanned_until" {
+			from, _, previous, err := p.scanBounds(ctx, mgr.Get(), "binance", now)
+			if err != nil || !previous.IsZero() || !from.Equal(now.Add(-mgr.Get().InitialScanLookback())) {
+				t.Fatalf("did not rebuild coverage after clock rollback: from=%v previous=%v err=%v", from, previous, err)
+			}
+		}
+		if err := stamp.Update(column, now).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 type overlapOverflowSource struct {
 	denseBefore time.Time
 	windows     [][2]time.Time

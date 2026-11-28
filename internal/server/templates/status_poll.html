@@ -1,3 +1,9 @@
+{{define "refresh_order_on_restore"}}<script nonce="{{.Nonce}}">
+window.addEventListener('pageshow', function(event) {
+  if (event.persisted) window.location.reload();
+});
+</script>{{end}}
+
 {{define "status_poll_script"}}<script nonce="{{.Nonce}}">
 window.pollOrderStatus=function(no,receive,stopped){
   var runs=0,failures=0,timer=null,running=false,disposed=false,retryUntil=0,activeController=null;

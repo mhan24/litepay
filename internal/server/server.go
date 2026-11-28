@@ -2,7 +2,9 @@
 package server
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"html/template"
 	"io/fs"
 	"log/slog"
@@ -53,7 +55,7 @@ func New(mgr *settings.Manager, st *store.Store, poller *worker.Poller) (*gin.En
 			}
 			return false
 		},
-		"urlEscape": url.PathEscape,
+		"urlEscape":   url.PathEscape,
 		"queryEscape": url.QueryEscape,
 	}).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
@@ -201,6 +203,12 @@ func externalURL(raw string) string {
 		return ""
 	}
 	return u.String()
+}
+
+// Keep order actions correlatable without recording the cashier access credential.
+func tradeLogRef(tradeNo string) string {
+	sum := sha256.Sum256([]byte(tradeNo))
+	return hex.EncodeToString(sum[:8])
 }
 
 // requestLogger 结构化访问日志。

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -27,6 +28,7 @@ def connect(path):
 def validate(path):
     db = connect(path)
     try:
+        db.execute('BEGIN')  # Keep all checks on one committed snapshot of a live database.
         if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
             raise ValueError('SQLite integrity check failed')
         if db.execute('PRAGMA foreign_key_check').fetchall():
@@ -123,23 +125,34 @@ def fsync_dir(path):
         os.close(fd)
 
 
+def checksum(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as file:
+        for block in iter(lambda: file.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def snapshot(source, output):
     source, output = Path(source).resolve(), Path(output).absolute()
     if source == output:
         raise ValueError('backup destination must differ from live database')
     output.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     output = output.parent.resolve() / output.name
-    if source == output:
-        raise ValueError('backup destination must differ from live database')
+    if output in (Path(str(source) + suffix) for suffix in ('', '-wal', '-shm', '-journal', '.lock')):
+        raise ValueError('backup destination must differ from live database and its side files')
     sidecar = Path(str(output) + '.json')
-    # O_EXCL protects existing snapshots and rejects symlinks.
-    fd = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    os.close(fd)
-    sidecar_created = False
-    try:
+    if os.path.lexists(output) or os.path.lexists(sidecar):
+        raise FileExistsError('backup database or manifest already exists')
+    if any(os.path.lexists(str(output) + suffix) for suffix in ('-wal', '-shm', '-journal')):
+        raise ValueError('backup destination has existing SQLite side files')
+    with tempfile.TemporaryDirectory(prefix='.litepay-backup-', dir=output.parent) as directory:
+        staged = Path(directory) / 'backup.db'
+        staged_manifest = Path(directory) / 'manifest.json'
+        staged.touch(mode=0o600, exist_ok=False)
         src = connect(source)
         try:
-            dest = sqlite3.connect(output)
+            dest = sqlite3.connect(staged)
             try:
                 src.backup(dest, pages=256, sleep=0.01)
                 dest.execute("PRAGMA journal_mode=DELETE")
@@ -147,22 +160,24 @@ def snapshot(source, output):
                 dest.close()
         finally:
             src.close()
-        result = validate(output)
-        fsync_file(output)
-        result['sha256'] = hashlib.sha256(output.read_bytes()).hexdigest()
+        result = validate(staged)
+        fsync_file(staged)
+        result['sha256'] = checksum(staged)
         result['created_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        with open(sidecar, 'x', opener=lambda name, flags: os.open(name, flags, 0o600)) as file:
-            sidecar_created = True
+        with open(staged_manifest, 'x', opener=lambda name, flags: os.open(name, flags, 0o600)) as file:
             json.dump(result, file, indent=2)
             file.flush()
             os.fsync(file.fileno())
+        # Expose the database only after its complete manifest is in place.
+        os.link(staged_manifest, sidecar)
+        try:
+            fsync_dir(output.parent)
+            os.link(staged, output)
+        except OSError:
+            sidecar.unlink()
+            raise
         fsync_dir(output.parent)
         return result
-    except BaseException:
-        output.unlink(missing_ok=True)
-        if sidecar_created:
-            sidecar.unlink(missing_ok=True)
-        raise
 
 
 def restore(source, target):
@@ -174,13 +189,10 @@ def restore(source, target):
     if not isinstance(manifest, dict) or not isinstance(manifest.get('sha256'), str):
         raise ValueError('invalid backup manifest')
     expected = manifest['sha256']
-    if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
-        raise ValueError('backup checksum mismatch')
-    validate(source)
     target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     target = target.parent.resolve() / target.name
-    if source == target:
-        raise ValueError('restore requires a new empty target path; existing data is never overwritten')
+    if target in (Path(str(source) + suffix) for suffix in ('', '-wal', '-shm', '-journal', '.lock')):
+        raise ValueError('restore destination must differ from the backup and its side files')
     lock_fd = os.open(str(target) + '.lock', os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -188,11 +200,13 @@ def restore(source, target):
             raise ValueError('restore requires a new empty target path; existing data is never overwritten')
         with tempfile.TemporaryDirectory(prefix='.litepay-restore-', dir=target.parent) as directory:
             staged = Path(directory) / 'restored.db'
-            result = snapshot(source, staged)
-            if result['sha256'] != expected:
-                # SQLite may legitimately change page organization. Verify logical data instead.
-                if fingerprint(source) != fingerprint(staged):
-                    raise ValueError('restored database differs from backup')
+            # Restore only the exact bytes covered by the manifest.
+            with open(staged, 'xb', opener=lambda name, flags: os.open(name, flags, 0o600)) as dest:
+                with source.open('rb') as backup:
+                    shutil.copyfileobj(backup, dest)
+            if checksum(staged) != expected:
+                raise ValueError('backup checksum mismatch')
+            validate(staged)
             # A restored gateway must revalidate independent merchant cancellation receipts.
             recovered = sqlite3.connect(staged)
             try:
@@ -208,7 +222,7 @@ def restore(source, target):
                 recovered.close()
             validate(staged)
             fsync_file(staged)
-            os.replace(staged, target)
+            os.link(staged, target)
             fsync_dir(target.parent)
         return validate(target)
     finally:

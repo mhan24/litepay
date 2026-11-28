@@ -360,7 +360,7 @@ func TestNotifierRetryDelayLowerBoundAndRunErrorLogging(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a PAID order and callback without a corresponding transaction row so deliver() returns an error with trade_id.
+	// Create a PAID order and callback without a corresponding transaction row so deliver() returns an error with an internal order ID.
 	order := model.Order{
 		SigningKeyID: mgr.Get().BEpusdt.TokenVersion,
 		TradeNo:      "trade-err-log-1",
@@ -395,7 +395,7 @@ func TestNotifierRetryDelayLowerBoundAndRunErrorLogging(t *testing.T) {
 	n.Run(runCtx)
 
 	output := logBuf.String()
-	if !strings.Contains(output, "回调任务处理失败") || !strings.Contains(output, "trade_id=trade-err-log-1") || !strings.Contains(output, "error=") {
-		t.Fatalf("expected Run error log to contain trade_id and error, got: %s", output)
+	if !strings.Contains(output, "回调任务处理失败") || !strings.Contains(output, fmt.Sprintf("internal_order_id=%d", order.ID)) || strings.Contains(output, order.TradeNo) || !strings.Contains(output, "error=") {
+		t.Fatalf("expected Run error log to contain the internal ID and error and omit the checkout credential, got: %s", output)
 	}
 }

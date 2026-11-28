@@ -278,7 +278,7 @@ func backfillAdditionalCancellationReviews(db *gorm.DB) error {
 func (s *Store) CallbackCanSend(ctx context.Context, task model.Callback) (bool, error) {
 	task.LeaseUntil = normalizeTime(task.LeaseUntil)
 	var n int64
-	err := s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id=? AND attempts=? AND state='in_flight' AND lease_until=? AND delivered_at IS NULL", task.OrderID, task.Attempts, task.LeaseUntil).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Count(&n).Error
+	err := s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id=? AND attempts=? AND state='in_flight' AND lease_until=? AND lease_until>? AND delivered_at IS NULL", task.OrderID, task.Attempts, task.LeaseUntil, time.Now()).Where("NOT EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id)").Count(&n).Error
 	return n == 1, err
 }
 

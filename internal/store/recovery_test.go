@@ -40,6 +40,19 @@ func TestRecoveryGenerationStableOnRestartAndRotatesOnRecovery(t *testing.T) {
 	if err = s.AcknowledgeRecovery(ctx, first.Generation, true, old); err == nil {
 		t.Fatal("old heartbeat acknowledged recovered DB")
 	}
+	// A restored snapshot may contain an old generation whose clock ran ahead.
+	if err := s.DB().Create(&old).Error; err != nil {
+		t.Fatal(err)
+	}
+	fresh := old
+	fresh.Generation = restored.Generation
+	fresh.ReportedAt--
+	if err := s.AcknowledgeRecovery(ctx, fresh.Generation, true, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if ready, err := s.PaymentOperationsReady(ctx); err != nil || !ready {
+		t.Fatal("old generation timestamp blocked a fresh replay", ready, err)
+	}
 }
 func TestCancellationBeforeCreationIsDurableAndChecksBothIdentities(t *testing.T) {
 	ctx := context.Background()
@@ -97,7 +110,7 @@ func TestSignedCancellationMakesExpiredOrderIneligibleForManualRecovery(t *testi
 }
 
 func TestPaymentOperationsRequireFreshCompleteCurrentGenerationHealth(t *testing.T) {
-	for _, failure := range []string{"source", "pending", "retry", "missing", "conflict", "discovery", "heartbeat", "last_success", "generation", "incomplete"} {
+	for _, failure := range []string{"source", "pending", "retry", "missing", "conflict", "discovery", "heartbeat", "last_success", "future_heartbeat", "future_last_success", "generation", "incomplete"} {
 		t.Run(failure, func(t *testing.T) {
 			s := testStore(t)
 			ctx := context.Background()
@@ -136,6 +149,10 @@ func TestPaymentOperationsRequireFreshCompleteCurrentGenerationHealth(t *testing
 				update = map[string]any{"received_at": time.Now().Add(-46 * time.Second)}
 			case "last_success":
 				update = map[string]any{"last_success_at": time.Now().Add(-61 * time.Second)}
+			case "future_heartbeat":
+				update = map[string]any{"received_at": time.Now().Add(time.Hour)}
+			case "future_last_success":
+				update = map[string]any{"last_success_at": time.Now().Add(time.Hour)}
 			case "generation":
 				update = map[string]any{"generation": "different"}
 			}

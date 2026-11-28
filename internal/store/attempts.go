@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"litepay/internal/amount"
 	"litepay/internal/model"
 )
 
@@ -21,7 +22,10 @@ func createAttempt(db *gorm.DB, o model.Order) error {
 func migratePaymentAttempts(db *gorm.DB) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		var orders []model.Order
-		if err := tx.Where("provider <> '' AND selected_at IS NOT NULL AND pay_units > 0 AND NOT EXISTS (SELECT 1 FROM payment_attempts a WHERE a.order_id=orders.id)").Find(&orders).Error; err != nil {
+		if err := tx.Where(`provider <> '' AND selected_at IS NOT NULL AND pay_units > 0 AND NOT EXISTS
+			(SELECT 1 FROM payment_attempts a WHERE a.order_id=orders.id AND a.provider=orders.provider
+			AND a.receiver=orders.receiver AND a.currency=orders.currency AND a.units=orders.pay_units
+			AND a.selected_at=orders.selected_at AND a.expires_at=orders.expires_at)`).Find(&orders).Error; err != nil {
 			return err
 		}
 		for _, o := range orders {
@@ -39,7 +43,12 @@ func migratePaymentAttempts(db *gorm.DB) error {
 		// A pre-migration confirmation task is authoritative evidence of an older selection.
 		// Recover only that proven association; detached slots without an account/window are not guessed.
 		var tasks []model.ConfirmationTask
-		if err := tx.Where("order_id IS NOT NULL").Find(&tasks).Error; err != nil {
+		if err := tx.Table("confirmation_tasks q").Select("q.*").
+			Joins("JOIN transactions t ON t.provider=q.provider AND t.event_id=q.event_id").
+			Where(`q.order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payment_attempts a
+				WHERE a.order_id=q.order_id AND a.provider=t.provider AND a.receiver=t.receiver
+				AND a.currency=t.currency AND a.units=t.units AND a.selected_at<=t.occurred_at AND a.expires_at>=t.occurred_at)`).
+			Find(&tasks).Error; err != nil {
 			return err
 		}
 		for _, q := range tasks {
@@ -123,6 +132,9 @@ func matchAttemptAt(db *gorm.DB, t model.Transaction, confirmation bool, now tim
 		return a, o, "order_closed", nil
 	}
 	if !confirmation {
+		if !amount.MallCompatible(a.Units) {
+			return a, o, "invalid_payment", nil
+		}
 		if !now.Before(a.SettleUntil) {
 			return a, o, "late_payment_review_required", nil
 		}

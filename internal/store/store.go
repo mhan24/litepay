@@ -77,13 +77,34 @@ func Open(path string) (*Store, error) {
 		}
 	}()
 
-	if path != ":memory:" {
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			return nil, err
-		}
-	}
 	dsn := path
 	if path != ":memory:" {
+		// SQLite inherits the database mode when it creates WAL and shared-memory files.
+		// Secure any journals left by a previous process before reopening them.
+		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+			flags := os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+			if suffix == "" {
+				flags |= os.O_CREATE
+			}
+			f, err := os.OpenFile(path+suffix, flags, 0600) // #nosec G304 -- Database files are selected by local startup configuration.
+			if suffix != "" && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			info, err := f.Stat()
+			if err == nil {
+				if !info.Mode().IsRegular() {
+					err = errors.New("数据库或日志路径不是普通文件")
+				} else if info.Mode().Perm() != 0600 {
+					err = f.Chmod(0600)
+				}
+			}
+			if err = errors.Join(err, f.Close()); err != nil {
+				return nil, err
+			}
+		}
 		// URI escaping keeps filename characters such as ?, # and % out of DSN options.
 		uri := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
 		options := url.Values{}
@@ -146,11 +167,6 @@ func Open(path string) (*Store, error) {
 	}); err != nil {
 		return fail(err)
 	}
-	if path != ":memory:" {
-		if err = os.Chmod(path, 0600); err != nil {
-			return fail(err)
-		}
-	}
 	success = true
 	return &Store{db: db, lock: lock}, nil
 }
@@ -192,7 +208,8 @@ func autoMigrateSchema(db *gorm.DB) error {
 }
 
 var schemaMigrations = []schemaMigration{
-	{version: 9, apply: backfillConfirmationTasks},
+	// Open backfills confirmation tasks after the version 10 payment attempts exist.
+	{version: 9},
 	{version: 10, apply: migratePaymentAttempts},
 	{version: 11, apply: initializeExpiryAndSelection},
 	{
@@ -679,7 +696,7 @@ func (s *Store) ScanDue(ctx context.Context, provider, receiver string) (bool, e
 	if err != nil {
 		return false, err
 	}
-	if cursor.LastSuccess.IsZero() || time.Since(cursor.LastSuccess) >= IdleReconcileInterval {
+	if age := time.Since(cursor.LastSuccess); age < 0 || age >= IdleReconcileInterval {
 		return true, nil
 	}
 	var n int64
@@ -718,6 +735,24 @@ func ensureConfirmationTask(db *gorm.DB, t model.Transaction) error {
 }
 
 func backfillConfirmationTasks(db *gorm.DB) error {
+	// Earlier version 8 upgrades created unlinked tasks before restoring the
+	// instructions. Repair still-pending tasks only when ownership and the
+	// settlement deadline agree across every matching instruction.
+	now := time.Now()
+	if err := db.Exec(`WITH matches AS (
+		SELECT q.provider,q.event_id,MIN(a.order_id) order_id,MIN(a.settle_until) deadline
+		FROM confirmation_tasks q JOIN transactions t ON t.provider=q.provider AND t.event_id=q.event_id
+		JOIN payment_attempts a ON a.provider=t.provider AND a.receiver=t.receiver AND a.currency=t.currency
+			AND a.units=t.units AND a.selected_at<=t.occurred_at AND a.expires_at>=t.occurred_at
+		JOIN orders o ON o.id=a.order_id
+		WHERE q.state='pending' AND q.order_id IS NULL AND q.deadline>? AND t.state=?
+		GROUP BY q.provider,q.event_id
+		HAVING MIN(a.order_id)=MAX(a.order_id) AND MIN(a.settle_until)=MAX(a.settle_until)
+			AND MIN(a.settle_until)>=q.deadline AND MIN(o.status)=?
+	) UPDATE confirmation_tasks AS q SET order_id=m.order_id,deadline=m.deadline
+		FROM matches m WHERE q.provider=m.provider AND q.event_id=m.event_id`, now, model.Unconfirmed, model.Ready).Error; err != nil {
+		return err
+	}
 	var rows []model.Transaction
 	if err := db.Where("state = ? AND NOT EXISTS (SELECT 1 FROM confirmation_tasks q WHERE q.provider = transactions.provider AND q.event_id = transactions.event_id)", model.Unconfirmed).Find(&rows).Error; err != nil {
 		return err
@@ -736,9 +771,6 @@ func (s *Store) PendingTimes(ctx context.Context, provider string, offset, limit
 	}
 	now := time.Now()
 	db := s.db.WithContext(ctx)
-	if err := db.Model(&model.ConfirmationTask{}).Where("state = ? AND deadline <= ?", "pending", now).Update("state", "manual_review").Error; err != nil {
-		return nil, err
-	}
 	var rows []model.ConfirmationTask
 	err := db.Where("provider = ? AND state = ? AND deadline > ?", provider, "pending", now).Where("EXISTS (SELECT 1 FROM transactions t WHERE t.provider = confirmation_tasks.provider AND t.event_id = confirmation_tasks.event_id AND t.state = ?)", model.Unconfirmed).Order("occurred_at, event_id").Offset(max(offset, 0)).Limit(limit).Find(&rows).Error
 	times := make([]time.Time, 0, len(rows))
@@ -815,8 +847,13 @@ func (s *Store) ReserveCallback(ctx context.Context, maxAttempts, timeout int) (
 // ReleaseCallback returns an unsent reservation without consuming the merchant retry
 // budget. The lease fence prevents an old worker from releasing a newer attempt.
 func (s *Store) ReleaseCallback(ctx context.Context, task model.Callback) error {
+	return s.ReleaseCallbackAt(ctx, task, time.Now())
+}
+
+// ReleaseCallbackAt preserves the retry budget while delaying the next local retry.
+func (s *Store) ReleaseCallbackAt(ctx context.Context, task model.Callback, nextAt time.Time) error {
 	task.LeaseUntil = normalizeTime(task.LeaseUntil)
-	return s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND attempts > attempt_base AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(map[string]any{"attempts": max(task.Attempts-1, 0), "next_at": time.Now(), "lease_until": time.Time{}, "state": gorm.Expr("CASE WHEN EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id) THEN 'merchant_review' ELSE 'queued' END")}).Error
+	return s.db.WithContext(ctx).Model(&model.Callback{}).Where("order_id = ? AND attempts = ? AND attempts > attempt_base AND delivered_at IS NULL AND state = ? AND lease_until = ?", task.OrderID, task.Attempts, "in_flight", task.LeaseUntil).Updates(map[string]any{"attempts": max(task.Attempts-1, 0), "next_at": normalizeTime(nextAt), "lease_until": time.Time{}, "state": gorm.Expr("CASE WHEN EXISTS(SELECT 1 FROM cancellation_reviews r WHERE r.order_id=callbacks.order_id) THEN 'merchant_review' ELSE 'queued' END")}).Error
 }
 
 func (s *Store) FinishCallback(ctx context.Context, task model.Callback, status int, ok bool, message string, delay time.Duration) error {
@@ -869,15 +906,19 @@ func (s *Store) ScanResult(ctx context.Context, provider string, end time.Time, 
 		if scanErr != nil {
 			return db.Model(&model.ScanCursor{}).Where("provider = ?", provider).Update("last_error", fmt.Sprint(scanErr)).Error
 		}
+		now := time.Now()
+		if end.IsZero() || end.After(now) {
+			return errors.New("扫描结束时间无效")
+		}
 		var c model.ScanCursor
 		if err := db.First(&c, "provider = ?", provider).Error; err != nil {
 			return err
 		}
 		updates := map[string]any{
-			"last_success": time.Now(),
+			"last_success": now,
 			"last_error":   "",
 		}
-		if end.After(c.ScannedUntil) {
+		if end.After(c.ScannedUntil) || c.ScannedUntil.After(now) {
 			updates["scanned_until"] = end
 		}
 		return db.Model(&model.ScanCursor{}).Where("provider = ?", provider).Updates(updates).Error

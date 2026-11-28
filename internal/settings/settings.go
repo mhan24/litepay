@@ -392,18 +392,17 @@ func (m *Manager) Load(ctx context.Context) error {
 	if err := m.ensureAPIToken(ctx); err != nil {
 		return err
 	}
-	if strings.TrimSpace(payload) == "" {
-		return nil
-	}
-	var p Patch
-	if err := json.Unmarshal([]byte(payload), &p); err != nil {
-		return fmt.Errorf("解析后台配置失败: %w", err)
-	}
 	next := clone(m.cur.Load())
-	p.Apply(next)
-	normalize(next)
+	if strings.TrimSpace(payload) != "" {
+		var p Patch
+		if err := json.Unmarshal([]byte(payload), &p); err != nil {
+			return fmt.Errorf("解析后台配置失败: %w", err)
+		}
+		p.Apply(next)
+		normalize(next)
+	}
 	if err := Validate(next); err != nil {
-		return fmt.Errorf("后台配置无效: %w", err)
+		return fmt.Errorf("收款配置无效: %w", err)
 	}
 	m.cur.Store(next)
 	return nil
@@ -640,7 +639,11 @@ func Validate(c *config.Config) error {
 	if c.Order.AmountPrecision < 2 || c.Order.AmountPrecision > 6 {
 		return fmt.Errorf("金额精度需在 2~6 位之间")
 	}
-	if step%amount.Quantum(c.Order.AmountPrecision) != 0 {
+	quantum := amount.Quantum(c.Order.AmountPrecision)
+	if minUnits > amount.MaxMall-quantum {
+		return fmt.Errorf("当前金额精度下，最小金额不能超过 %s", amount.String(amount.MaxMall-quantum))
+	}
+	if step%quantum != 0 {
 		return fmt.Errorf("金额步长必须符合显示精度")
 	}
 	if c.Binance.PollInterval < 2 || c.Binance.PollInterval > 60 {

@@ -138,12 +138,12 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 	seenCursors := map[string]bool{}
 	cursor := ""
 	for page := 0; page < 20; page++ {
-		rows, rawCount, nextCursor, err := c.page(ctx, useV3, startMs, endMs, cursor)
+		rows, nextCursor, err := c.page(ctx, useV3, startMs, endMs, cursor)
 		if err != nil && useV3 && page == 0 {
 			var apiErr *APIError
 			if errors.As(err, &apiErr) && (apiErr.HTTPStatus == http.StatusNotFound || apiErr.Code == "40085") {
 				useV3 = false
-				rows, rawCount, nextCursor, err = c.page(ctx, false, startMs, endMs, "")
+				rows, nextCursor, err = c.page(ctx, false, startMs, endMs, "")
 			}
 		}
 		if err != nil {
@@ -156,7 +156,7 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 			seen[t.EventID] = true
 			out = append(out, t)
 		}
-		if nextCursor == "" || (!useV3 && rawCount < c.limit) {
+		if nextCursor == "" {
 			return out, nil
 		}
 		if seenCursors[nextCursor] {
@@ -165,10 +165,10 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 		seenCursors[nextCursor] = true
 		cursor = nextCursor
 	}
-	return nil, fmt.Errorf("Bitget incomplete history: page limit")
+	return nil, fmt.Errorf("Bitget: %w", exchange.ErrHistoryLimit)
 }
 
-func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cursor string) ([]model.Transaction, int, string, error) {
+func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cursor string) ([]model.Transaction, string, error) {
 	endpoint := "/api/v3/account/deposit-records"
 	q := url.Values{
 		"startTime": {strconv.FormatInt(startMs, 10)},
@@ -187,7 +187,7 @@ func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cur
 	}
 	body, err := c.get(ctx, endpoint, q)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, "", err
 	}
 	type rawRow struct {
 		OrderID     flexString `json:"orderId"`
@@ -214,15 +214,15 @@ func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cur
 			Cursor flexString       `json:"cursor"`
 		}
 		if json.Unmarshal(body, &container) != nil || container.List == nil || strings.TrimSpace(string(*container.List)) == "null" {
-			return nil, 0, "", fmt.Errorf("Bitget invalid deposit records response")
+			return nil, "", fmt.Errorf("Bitget invalid deposit records response")
 		}
 		if json.Unmarshal(*container.List, &rows) != nil || rows == nil {
-			return nil, 0, "", fmt.Errorf("Bitget invalid deposit records list")
+			return nil, "", fmt.Errorf("Bitget invalid deposit records list")
 		}
 		nextCursor = strings.TrimSpace(string(container.Cursor))
 	} else {
 		if json.Unmarshal(body, &rows) != nil || rows == nil {
-			return nil, 0, "", fmt.Errorf("Bitget invalid deposit records response")
+			return nil, "", fmt.Errorf("Bitget invalid deposit records response")
 		}
 	}
 	c.clockMu.RLock()
@@ -246,7 +246,7 @@ func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cur
 		}
 		ms, e := tsField.Millis()
 		if e != nil || id == "" || coin == "" || seen[id] {
-			return nil, 0, "", fmt.Errorf("Bitget invalid deposit evidence")
+			return nil, "", fmt.Errorf("Bitget invalid deposit evidence")
 		}
 		seen[id] = true
 		lastID = id
@@ -303,7 +303,7 @@ func (c *Client) page(ctx context.Context, useV3 bool, startMs, endMs int64, cur
 	if !isObject && nextCursor == "" && len(rows) >= c.limit {
 		nextCursor = lastID
 	}
-	return out, len(rows), nextCursor, nil
+	return out, nextCursor, nil
 }
 
 func (c *Client) get(ctx context.Context, path string, q url.Values) (json.RawMessage, error) {

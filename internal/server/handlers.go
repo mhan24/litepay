@@ -117,7 +117,39 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		needsCurrency = true
 		provider = selectedProvider
 	}
-	if needsProvider && !h.anyProviderAccepting(c, cfg, o) || !needsProvider && (!h.providerAccepting(c, cfg, provider) || !needsCurrency && !h.orderProviderAccepting(c, cfg, o)) {
+	if !needsProvider && !needsCurrency && !amount.MallCompatible(o.PayUnits) {
+		h.renderError(c, http.StatusConflict, "应付金额无法自动核销", "请勿转账。请联系商户核对此订单并重新下单。")
+		return
+	}
+	var options []providerOption
+	var accepting bool
+	switch {
+	case needsProvider:
+		options = providerOptions(cfg, o)
+		stats, err := h.st.ProviderSuccessStats(c.Request.Context())
+		for i := range options {
+			option := &options[i]
+			option.Enabled = option.Enabled && h.providerAccepting(c, cfg, option.Key)
+			accepting = accepting || option.Enabled
+			if err != nil {
+				continue
+			}
+			stat := stats[option.Key]
+			total := stat.Paid + stat.Failed
+			if total > 0 {
+				pct := math.Round(float64(stat.Paid) * 100 / float64(total))
+				option.SuccessLabel = fmt.Sprintf("成功率 %.0f%%", pct)
+				option.HasSuccessRate = true
+			} else {
+				option.SuccessLabel = "等待第一笔测试"
+			}
+		}
+	case needsCurrency:
+		accepting = h.providerAccepting(c, cfg, provider)
+	default:
+		accepting = h.orderProviderAccepting(c, cfg, o)
+	}
+	if !accepting {
 		h.renderError(c, 503, "收款平台暂不可用", "当前平台账户、收款扫描或行情暂不可用。请稍后刷新重试，或返回商户页面选择其他付款方式，请勿继续转账。")
 		return
 	}
@@ -178,21 +210,6 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		(o.Status == model.Pending || o.Status == model.Ready) && provider != "" &&
 		!reselectRequested && cfg.ProviderEnabled(provider)
 
-	options := providerOptions(cfg, o)
-	stats, _ := h.st.ProviderSuccessStats(c.Request.Context())
-	for i := range options {
-		options[i].Enabled = options[i].Enabled && h.providerAccepting(c, cfg, options[i].Key)
-		stat := stats[options[i].Key]
-		total := stat.Paid + stat.Failed
-		if total > 0 {
-			pct := math.Round(float64(stat.Paid) * 100 / float64(total))
-			options[i].SuccessLabel = fmt.Sprintf("成功率 %.0f%%", pct)
-			options[i].HasSuccessRate = true
-		} else {
-			options[i].SuccessLabel = "等待第一笔测试"
-		}
-	}
-
 	data := CashierData{
 		RateUSD:          strings.TrimRight(strings.TrimRight(o.RateUSD, "0"), "."),
 		Title:            providerName,
@@ -213,7 +230,7 @@ func (h *Handlers) renderCashier(c *gin.Context, o *model.Order) {
 		Status:           o.Status,
 		CreatedAt:        o.CreatedAt.Format("2006-01-02 15:04:05"),
 		ExpiredAt:        o.ExpiresAt.Format("15:04:05"),
-		Providers:        providerOptionForQuery(options, selectedProvider),
+		Providers:        options,
 		CurrencyOptions:  currencyOptions,
 		CanReselect:      canReselect,
 		NeedsProvider:    needsProvider,
@@ -288,19 +305,6 @@ func providerOptions(cfg *config.Config, o *model.Order) []providerOption {
 		}
 	}
 	return out
-}
-
-// providerOptionForQuery 让收银台在选择收款平台的过渡页上先高亮目标平台，
-// 真正的订单仍保持未绑定状态，只有选币种时才原子锁定付款信息。
-func providerOptionForQuery(options []providerOption, selected string) []providerOption {
-	selected = strings.ToLower(strings.TrimSpace(selected))
-	if selected == "" {
-		return options
-	}
-	for i := range options {
-		options[i].Selected = strings.EqualFold(options[i].Key, selected)
-	}
-	return options
 }
 
 func currencyOptionsFor(cfg *config.Config, o *model.Order, provider string) []currencyOption {
@@ -513,7 +517,7 @@ func (h *Handlers) OrderStatus(c *gin.Context) {
 		phase = "settling"
 	}
 	payAmount := o.PayAmount()
-	if o.PayUnits <= 0 {
+	if o.PayUnits <= 0 || (o.Status == model.Ready && !amount.MallCompatible(o.PayUnits)) {
 		payAmount = ""
 	}
 	c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": o.Status, "cancellation_review_status": review.Status(), "refund_review_generation_current": review.Current(), "amount": payAmount, "currency": o.Currency, "provider": o.Provider, "remain_seconds": max(0, int(o.ExpiresAt.Sub(now).Seconds())), "return_url": externalURL(o.ReturnURL), "merchant_confirmed": ack, "payment_phase": phase, "accepting_payment": accepting, "merchant_review_required": cb.State == "merchant_review"}})

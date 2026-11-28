@@ -327,3 +327,53 @@ func TestValidateRegisterURLRejectsTabsAndBackslashHost(t *testing.T) {
 		t.Fatalf("valid register URL rejected: %v", err)
 	}
 }
+
+func TestMinimumAmountFitsCheckoutPrecision(t *testing.T) {
+	cfg := config.Default()
+	cfg.BEpusdt.APIToken = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		precision int
+		minimum   string
+		valid     bool
+	}{
+		{2, "999999.99", true},
+		{2, "999999.990001", false},
+		{6, "999999.999999", true},
+		{6, "1000000", false},
+	} {
+		cfg.Order.AmountPrecision = tc.precision
+		cfg.Order.MinAmount = tc.minimum
+		if err := Validate(cfg); (err == nil) != tc.valid {
+			t.Errorf("precision=%d min=%s: %v", tc.precision, tc.minimum, err)
+		}
+	}
+}
+
+func TestLoadValidatesEffectiveOrderSettings(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Server.Production = false
+	cfg.Order.ExpireMinutes = 1441
+	cfg.Order.AmountStep = "0.00001"
+	manager := New(cfg, st)
+	if err := manager.Load(ctx); err == nil {
+		t.Fatal("invalid order configuration accepted on fresh database")
+	}
+	if err := st.SaveSettingPayload(ctx, `{"order_expire_minutes":10}`, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Load(ctx); err == nil {
+		t.Fatal("step finer than the order precision was accepted")
+	}
+	if err := st.SaveSettingPayload(ctx, `{"order_expire_minutes":10,"order_amount_step":"0.01"}`, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Load(ctx); err != nil {
+		t.Fatalf("valid stored overrides rejected: %v", err)
+	}
+}

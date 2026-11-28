@@ -14,6 +14,7 @@ import (
 	"litepay/internal/bitget"
 	"litepay/internal/bybit"
 	"litepay/internal/config"
+	"litepay/internal/exchange"
 	"litepay/internal/model"
 	"litepay/internal/okx"
 	"litepay/internal/settings"
@@ -305,7 +306,8 @@ func (p *Poller) scanIncremental(ctx context.Context, cfg *config.Config, provid
 // scanOverflow 判断是否是“本次窗口数据太密、受请求预算限制”可重试的失败，而不是网络或账户错误。
 func scanOverflow(err error) bool {
 	var apiErr *binance.APIError
-	return errors.As(err, &apiErr) && (apiErr.Kind == binance.ErrorIncomplete || apiErr.Kind == binance.ErrorBudget)
+	return errors.Is(err, exchange.ErrHistoryLimit) ||
+		(errors.As(err, &apiErr) && (apiErr.Kind == binance.ErrorIncomplete || apiErr.Kind == binance.ErrorBudget))
 }
 
 // pendingRecheckLimit 限制单轮补查的未确认到账数量，避免历史堆积拖慢每一次扫描。
@@ -462,29 +464,29 @@ func (p *Poller) scanBounds(ctx context.Context, cfg *config.Config, provider st
 	if err != nil {
 		return end, end, time.Time{}, err
 	}
+	// A clock rollback invalidates the previous upper bound. Rebuild coverage as on the first scan.
+	if cursor.ScannedUntil.After(end) {
+		cursor.ScannedUntil = time.Time{}
+	}
 	lookback := time.Duration(cfg.ProviderLookback(provider)) * time.Minute
 	first := cursor.ScannedUntil.IsZero()
 	start := cursor.ScannedUntil.Add(-lookback)
 	if first {
 		start = end.Add(-cfg.InitialScanLookback())
-	}
-	// 仍在等待付款的订单必须被完整覆盖：首次扫描没有任何覆盖，起点可能比最早一张订单的
-	// 窗口更晚，必须回溯；已有游标时始终覆盖其后的全部对账历史。
-	var earliest model.PaymentAttempt
-	e := p.st.DB().WithContext(ctx).Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ?", model.Ready, provider).Order("a.selected_at").First(&earliest).Error
-	if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
-		return end, end, cursor.ScannedUntil, e
-	}
-	if e == nil {
-		floor := earliest.SelectedAt.Add(-lookback)
-		if first && floor.Before(start) {
+		// 首次扫描要覆盖最早一张待付订单，此后的扫描从已验证的游标继续。
+		var earliest model.PaymentAttempt
+		e := p.st.DB().WithContext(ctx).Table("payment_attempts a").Select("a.*").Joins("JOIN orders o ON o.id=a.order_id").Where("o.status = ? AND a.provider = ?", model.Ready, provider).Order("a.selected_at").First(&earliest).Error
+		if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
+			return end, end, cursor.ScannedUntil, e
+		}
+		if floor := earliest.SelectedAt.Add(-lookback); e == nil && floor.Before(start) {
 			start = floor
 		}
 	}
 	if start.After(end) {
 		start = end.Add(-lookback)
 	}
-	if first || cursor.ScannedUntil.After(end) {
+	if first {
 		if end.Sub(start) > time.Hour {
 			end = start.Add(time.Hour)
 		}

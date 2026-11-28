@@ -136,3 +136,25 @@ func BenchmarkExpireDueBacklog(b *testing.B) {
 		})
 	}
 }
+
+func TestExpiryBoundsPendingOrderUpdates(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	orders := make([]model.Order, ExpiryBatchSize+1)
+	for i := range orders {
+		no := fmt.Sprint("pending-", i)
+		orders[i] = model.Order{TradeNo: no, OutTradeNo: no, OriginUnits: 10_000, Status: model.Pending, ExpiresAt: now.Add(time.Duration(-len(orders)+i) * time.Minute)}
+	}
+	if err := s.DB().Create(&orders).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []int{ExpiryBatchSize, len(orders)} {
+		if err := s.Expire(context.Background(), 0); err != nil {
+			t.Fatal(err)
+		}
+		var count int64
+		if err := s.DB().Model(&model.Order{}).Where("status = ?", model.Expired).Count(&count).Error; err != nil || int(count) != want {
+			t.Fatalf("expired %d pending orders, want %d: %v", count, want, err)
+		}
+	}
+}

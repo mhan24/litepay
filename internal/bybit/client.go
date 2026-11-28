@@ -148,7 +148,7 @@ func (c *Client) History(ctx context.Context, start, end time.Time) ([]model.Tra
 		seenCursors[nextCursor] = true
 		cursor = nextCursor
 	}
-	return nil, fmt.Errorf("Bybit incomplete history: page limit")
+	return nil, fmt.Errorf("Bybit: %w", exchange.ErrHistoryLimit)
 }
 
 func (c *Client) page(ctx context.Context, startMs, endMs int64, cursor string) ([]model.Transaction, string, error) {
@@ -193,7 +193,13 @@ func (c *Client) page(ctx context.Context, startMs, endMs int64, cursor string) 
 		id := strings.TrimSpace(string(r.ID))
 		coin := strings.ToUpper(strings.TrimSpace(string(r.Coin)))
 		ms, e := r.CreatedTime.Millis()
-		if e != nil || ms < startMs || ms > endMs || id == "" || coin == "" || seen[id] {
+		earliest := startMs
+		if len(r.CreatedTime) == 10 {
+			// Bybit also returns whole seconds. Its example uses this form even though query bounds are milliseconds.
+			ms *= 1000
+			earliest = startMs / 1000 * 1000
+		}
+		if e != nil || ms < earliest || ms > endMs || id == "" || coin == "" || seen[id] {
 			return nil, "", fmt.Errorf("Bybit invalid internal deposit evidence")
 		}
 		seen[id] = true
@@ -224,6 +230,8 @@ func (c *Client) page(ctx context.Context, startMs, endMs int64, cursor string) 
 			t.State, t.Reason = model.Rejected, "not_internal_deposit"
 		case status == "3":
 			t.State, t.Reason = model.Rejected, "deposit_failed"
+		case depositType == "":
+			t.State, t.Reason = model.Unconfirmed, "internal_transfer_unverified"
 		case status != "2":
 			// 文档状态表：1 = Processing，2 = Success，3 = Deposit failed。
 			t.State, t.Reason = model.Unconfirmed, "deposit_not_completed"

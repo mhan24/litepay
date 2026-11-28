@@ -78,7 +78,7 @@ func (s *Store) SaveIntegrationHealth(ctx context.Context, h model.IntegrationHe
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		if err == nil && (h.ReportedAt < old.ReportedAt || (h.Generation == old.Generation && h.ReportedAt == old.ReportedAt)) {
+		if err == nil && h.Generation == old.Generation && h.ReportedAt <= old.ReportedAt {
 			return nil
 		}
 		if !h.Healthy {

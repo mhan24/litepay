@@ -13,6 +13,31 @@ import (
 	"litepay/internal/model"
 )
 
+func TestClockRollbackRescansAndReplacesFutureCursor(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Now()
+	future := now.Add(time.Hour)
+	if err := s.DB().Create(&model.ScanCursor{Provider: "binance", LastSuccess: future, ScannedUntil: future}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.ScanDue(ctx, "binance", ""); err != nil || !due {
+		t.Fatal("clock rollback suppressed idle scan", due, err)
+	}
+	if err := s.ScanResult(ctx, "binance", future, nil); err == nil {
+		t.Fatal("accepted scan coverage beyond current time")
+	}
+	for _, end := range []time.Time{now, now.Add(-time.Minute)} {
+		if err := s.ScanResult(ctx, "binance", end, nil); err != nil {
+			t.Fatal(err)
+		}
+		cursor, err := s.Cursor(ctx, "binance")
+		if err != nil || !cursor.ScannedUntil.Equal(now) {
+			t.Fatal("rescan lost its current coverage", cursor, err)
+		}
+	}
+}
+
 func TestDatabaseSingleInstanceLockAndReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "payments.db")
 	one, err := Open(path)
@@ -185,5 +210,49 @@ func TestFilePragmasSurviveConnectionReplacementAndEscapedPaths(t *testing.T) {
 				t.Fatal("replacement connection ignored foreign key constraint")
 			}
 		})
+	}
+}
+
+func TestOpenRestrictsDatabaseAndJournalPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "existing.db")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, file := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("%s permissions %o, want 600", filepath.Base(file), perm)
+		}
+	}
+}
+
+func TestExpiredCallbackLeaseCannotStartDelivery(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	o := readyOrder(t, s, "expired-lease")
+	if _, err := s.Process(ctx, evidence(o, "lease-payment"), ""); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := s.ReserveCallback(ctx, 5, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.LeaseUntil = time.Now().Add(-time.Second)
+	if err := s.DB().Model(task).Update("lease_until", task.LeaseUntil).Error; err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := s.CallbackCanSend(ctx, *task); err != nil || allowed {
+		t.Fatalf("send with expired lease allowed=%v err=%v", allowed, err)
 	}
 }

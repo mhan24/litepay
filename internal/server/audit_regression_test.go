@@ -298,6 +298,20 @@ func TestAdminErrorStatusCodesLogRedactionBodyLimitAndHTTPSCookie(t *testing.T) 
 		t.Fatalf("expected 413 on >1MB admin POST with X-CSRF-Token, got %d", w.Code)
 	}
 
+	// ParseForm can leave valid fields populated when another field is malformed.
+	// Neither login nor a settings mutation may consume a partially parsed form.
+	for _, route := range []string{"/admin/login", "/admin/settings"} {
+		body := url.Values{"username": {"admin"}, "password": {cfg.Admin.Password}, "csrf": {csrf}, "settings_scope": {"checkout"}, "checkout_note": {"partial write"}}.Encode() + "&broken=%"
+		req = httptest.NewRequest(http.MethodPost, route, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(adminCookie)
+		w = httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest || mgr.Get().Checkout.Note == "partial write" {
+			t.Fatalf("partially parsed form accepted on %s, code=%d", route, w.Code)
+		}
+	}
+
 	// 4. Oversized login body returns 413; huge username (<1MB) is truncated in logs.
 	req = httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader("username="+strings.Repeat("U", (1<<20)+1024)+"&password=x"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -437,6 +451,7 @@ func TestCashierAndStatusPollTemplateFixesAndCSP(t *testing.T) {
 		`closedby="none"`,
 		`overlay.addEventListener('cancel'`,
 		`clearInterval(timerId)`,
+		`if (event.persisted) window.location.reload()`,
 		`copyTimers`,
 		`btn.dataset.label`,
 		`enabledButtons`,

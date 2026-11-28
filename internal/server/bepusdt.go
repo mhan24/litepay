@@ -142,7 +142,7 @@ func (h *Handlers) BEpusdtCancelOrder(c *gin.Context) {
 		h.bepusdtFail(c, err.Error())
 		return
 	}
-	h.logger().Info("BEpusdt 订单已取消", "trade_id", o.TradeNo)
+	h.logger().Info("BEpusdt 订单已取消", "order_db_id", o.ID, "trade_ref", tradeLogRef(o.TradeNo))
 	c.JSON(http.StatusOK, bepusdtResponse{
 		StatusCode: 200, Message: "success",
 		Data: gin.H{"trade_id": o.TradeNo, "order_id": o.OutTradeNo},
@@ -265,7 +265,7 @@ func (h *Handlers) createBEpusdtOrder(c *gin.Context) {
 		h.bepusdtFail(c, "order create failed: "+err.Error())
 		return
 	}
-	h.logger().Info("BEpusdt 收银台订单已处理", "trade_id", order.TradeNo, "order_id", req.OrderID)
+	h.logger().Info("BEpusdt 收银台订单已处理", "order_db_id", order.ID, "trade_ref", tradeLogRef(order.TradeNo))
 	h.bepusdtCreated(c, cfg, order, reselect)
 }
 
@@ -292,12 +292,13 @@ func bepusdtReselect(cfg *config.Config, requested *bool) bool {
 }
 
 func (h *Handlers) bepusdtCreated(c *gin.Context, cfg *config.Config, order *model.Order, reselect bool) {
+	now := time.Now()
 	data := gin.H{
 		"fiat": "USD", "trade_id": order.TradeNo, "order_id": order.OutTradeNo,
 		"name": order.Name, "status": orderStatusNumber(order), "amount": order.Original(),
-		"expiration_time": max(0, int(time.Until(order.ExpiresAt).Seconds())),
+		"expiration_time": max(0, int(order.ExpiresAt.Sub(now).Seconds())),
 		"payment_url":     cfg.Server.BaseURL + "/pay/" + order.TradeNo,
-		"reselect":        reselect && order.Reselect && order.Status != model.Paid,
+		"reselect":        reselect && order.Reselect && order.PaymentPhase(now) == "accepting_payment",
 		"network":         bepusdtPaymentMethods(cfg, order),
 	}
 	c.JSON(http.StatusOK, bepusdtResponse{StatusCode: 200, Message: "success", Data: data, RequestID: ""})
@@ -327,12 +328,18 @@ func bepusdtPaymentMethods(cfg *config.Config, order *model.Order) []gin.H {
 				!currencyAllowedByLimit(order.CurrencyLimit, currency) {
 				continue
 			}
-			actual, rate := order.Original(), "1"
+			actual := order.Original()
+			if provider == order.Provider && currency == order.Currency {
+				if !money.MallCompatible(order.PayUnits) {
+					continue
+				}
+				actual = order.PayAmount()
+			}
 			out = append(out, gin.H{
 				"amount":            order.Original(),
 				"actual_amount":     actual,
 				"fiat":              "USD",
-				"exchange_rate":     rate,
+				"exchange_rate":     "1",
 				"currency":          currency,
 				"network":           network,
 				"token_net_name":    network,
@@ -432,6 +439,15 @@ func parseBEpusdtCreateRequest(generic map[string]interface{}) (bepusdtCreateReq
 
 func parseBEpusdtCancelRequest(generic map[string]interface{}) (bepusdtCancelRequest, error) {
 	var req bepusdtCancelRequest
+	// The legacy signature covers the fields but does not bind the endpoint.
+	// Only a cancellation-shaped message may change the order state.
+	for key := range generic {
+		switch key {
+		case "order_id", "trade_id", "signature":
+		default:
+			return req, fmt.Errorf("unexpected cancellation field")
+		}
+	}
 	var err error
 	if req.OrderID, err = jsonStringField(generic, "order_id"); err != nil {
 		return req, err

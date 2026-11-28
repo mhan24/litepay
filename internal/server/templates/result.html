@@ -66,6 +66,7 @@
     {{with externalURL .ReturnURL}}<a class="btn" href="{{.}}">返回商户查看订单</a>{{end}}
   </main>
 {{template "theme_script" .}}
+{{template "refresh_order_on_restore" .}}
 {{if .SettlementPending}}{{template "status_poll_script" .}}<script nonce="{{.Nonce}}">
 var phaseChanged=false;
 window.pollOrderStatus({{.TradeNo}},function(d){if(d.payment_phase!=='settling'){phaseChanged=true;location.reload()}},function(){return phaseChanged});

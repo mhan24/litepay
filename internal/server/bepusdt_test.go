@@ -191,3 +191,39 @@ func TestBEpusdtRejectsInvalidFieldTypesAndNilBodySafely(t *testing.T) {
 		}
 	}
 }
+
+func TestCancelRequestSchema(t *testing.T) {
+	for _, key := range []string{"amount", "timestamp", "status", "unused"} {
+		if _, err := parseBEpusdtCancelRequest(map[string]any{"order_id": "test", key: "1"}); err == nil {
+			t.Errorf("unexpected field %q accepted in cancellation message", key)
+		}
+	}
+}
+
+func TestBEpusdtReselectOnlyWhileOrderAcceptsPayment(t *testing.T) {
+	cfg := config.Default()
+	now := time.Now()
+	for _, tc := range []struct {
+		status string
+		expiry time.Time
+		want   bool
+	}{
+		{model.Ready, now.Add(time.Minute), true},
+		{model.Ready, now.Add(-time.Minute), false},
+		{model.Expired, now.Add(-time.Minute), false},
+		{model.Canceled, now.Add(time.Minute), false},
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		order := &model.Order{Status: tc.status, ExpiresAt: tc.expiry, Reselect: true}
+		(&Handlers{}).bepusdtCreated(c, cfg, order, true)
+		var resp struct {
+			Data struct {
+				Reselect bool `json:"reselect"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Data.Reselect != tc.want {
+			t.Fatalf("order %s expiring %v: %s", tc.status, tc.expiry, w.Body.String())
+		}
+	}
+}

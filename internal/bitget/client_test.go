@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -351,4 +352,27 @@ func TestContextCancellationAndTerminalFailureStatuses(t *testing.T) {
 			t.Fatalf("row[4] want Unconfirmed/deposit_not_completed, got %+v", rows[4])
 		}
 	})
+}
+
+func TestClassicShortPageWithCursorIsNotFinal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/account/deposit-records" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("idLessThan") == "" {
+			fmt.Fprint(w, `{"code":"00000","data":{"cursor":"42","list":[]}}`)
+			return
+		}
+		fmt.Fprint(w, `{"code":"00000","data":{"cursor":"","list":[{"id":"41","coin":"USDT","amount":"1","dest":"internal_transfer","status":"success","ts":1500}]}}`)
+	}))
+	defer srv.Close()
+	c := New("key", "secret", "pass", srv.URL, 100)
+	c.receiver = "receiver"
+	c.syncTime = false
+	c.UseTestTransport()
+	rows, err := c.History(context.Background(), time.UnixMilli(1000), time.UnixMilli(2000))
+	if err != nil || len(rows) != 1 || rows[0].EventID != "41" {
+		t.Fatal(rows, err)
+	}
 }

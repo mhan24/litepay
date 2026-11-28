@@ -28,7 +28,8 @@ func (s *Store) Expire(ctx context.Context, grace int) error {
 	}
 	now := time.Now()
 	return s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		if err := db.Model(&model.Order{}).Where("status = ? AND expires_at < ?", model.Pending, now.Add(-time.Duration(grace)*time.Second)).Update("status", model.Expired).Error; err != nil {
+		duePending := db.Model(&model.Order{}).Select("id").Where("status = ? AND expires_at < ?", model.Pending, now.Add(-time.Duration(grace)*time.Second)).Order("expires_at,id").Limit(ExpiryBatchSize)
+		if err := db.Model(&model.Order{}).Where("id IN (?)", duePending).Update("status", model.Expired).Error; err != nil {
 			return err
 		}
 		if err := db.Exec(`UPDATE confirmation_tasks SET state='manual_review',updated_at=? WHERE rowid IN

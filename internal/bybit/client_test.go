@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"litepay/internal/exchange"
 	"litepay/internal/model"
 	"litepay/internal/sign"
 )
@@ -83,7 +85,7 @@ func TestAccountUIDRejectsSubAccount(t *testing.T) {
 }
 
 func TestHistoryPaginationAndStates(t *testing.T) {
-	start := time.UnixMilli(1700000000000)
+	start := time.UnixMilli(1700000001123)
 	end := time.UnixMilli(1700003600000)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -99,7 +101,7 @@ func TestHistoryPaginationAndStates(t *testing.T) {
 					"result": map[string]any{
 						"nextPageCursor": "page-2",
 						"rows": []map[string]any{
-							{"id": "101", "type": 1, "coin": "USDT", "amount": "12.34", "status": 2, "createdTime": "1700000001000", "txID": "tx-101"},
+							{"id": "101", "type": 1, "coin": "USDT", "amount": "12.34", "status": 2, "createdTime": "1700000001", "txID": "tx-101"},
 							{"id": "102", "type": 1, "coin": "USDC", "amount": "5.00", "status": 1, "createdTime": "1700000002000", "txID": "tx-102"},
 							{"id": "103", "type": 1, "coin": "USDT", "amount": "9.00", "status": 3, "createdTime": "1700000003000", "txID": "tx-103"},
 						},
@@ -114,6 +116,7 @@ func TestHistoryPaginationAndStates(t *testing.T) {
 						"nextPageCursor": "",
 						"rows": []map[string]any{
 							{"id": "104", "type": 1, "coin": "USDT", "amount": "1.12345678", "status": 2, "createdTime": "1700000004000", "txID": "tx-104"},
+							{"id": "106", "coin": "USDT", "amount": "2", "status": 2, "createdTime": "1700000004000"},
 							{"id": "105", "type": 1, "coin": "USDT", "amount": "7.50", "status": 2, "createdTime": "1700000005000", "txID": "tx-105", "complianceStatus": 1},
 						},
 					},
@@ -131,10 +134,10 @@ func TestHistoryPaginationAndStates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("History failed: %v", err)
 	}
-	if len(rows) != 5 {
-		t.Fatalf("got %d rows, want 5", len(rows))
+	if len(rows) != 6 {
+		t.Fatalf("got %d rows, want 6", len(rows))
 	}
-	if rows[0].Provider != "bybit" || rows[0].Receiver != "123456" || rows[0].EventID != "101" || rows[0].Reference != "tx-101" || rows[0].State != model.Confirmed || rows[0].Units != 12340000 {
+	if rows[0].Provider != "bybit" || rows[0].Receiver != "123456" || rows[0].EventID != "101" || rows[0].Reference != "tx-101" || rows[0].State != model.Confirmed || rows[0].Units != 12340000 || rows[0].OccurredAt.Unix() != 1700000001 {
 		t.Fatalf("row[0] mismatch: %+v", rows[0])
 	}
 	if rows[1].State != model.Unconfirmed || rows[1].Reason != "deposit_not_completed" {
@@ -146,8 +149,11 @@ func TestHistoryPaginationAndStates(t *testing.T) {
 	if rows[3].State != model.Rejected || rows[3].Reason != "invalid_amount" || rows[3].RawAmount != "1.12345678" {
 		t.Fatalf("row[3] mismatch: %+v", rows[3])
 	}
-	if rows[4].State != model.Unconfirmed || rows[4].Reason != "compliance_pending" {
-		t.Fatalf("row[4] mismatch: %+v", rows[4])
+	if rows[4].State != model.Unconfirmed || rows[4].Reason != "internal_transfer_unverified" {
+		t.Fatalf("accepted deposit with missing type: %+v", rows[4])
+	}
+	if rows[5].State != model.Unconfirmed || rows[5].Reason != "compliance_pending" {
+		t.Fatalf("row[5] mismatch: %+v", rows[5])
 	}
 }
 
@@ -337,4 +343,20 @@ func TestContextCancellationAndComplianceFailClosed(t *testing.T) {
 			t.Fatalf("expected unknown compliance status to fail closed, got %+v", rows[2])
 		}
 	})
+}
+
+func TestHistoryPageLimitRequiresShorterWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next := r.URL.Query().Get("cursor") + "x"
+		fmt.Fprintf(w, `{"retCode":0,"result":{"rows":[],"nextPageCursor":%q}}`, next)
+	}))
+	defer srv.Close()
+	c := New("key", "secret", srv.URL, 5000, 2)
+	c.receiver = "receiver"
+	c.syncTime = false
+	c.UseTestTransport()
+	_, err := c.History(context.Background(), time.UnixMilli(1000), time.UnixMilli(2000))
+	if !errors.Is(err, exchange.ErrHistoryLimit) {
+		t.Fatalf("page limit did not request a smaller window: %v", err)
+	}
 }

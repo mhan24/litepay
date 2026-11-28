@@ -454,3 +454,26 @@ func TestCanceledOrderReleasesOwnershipButPreservesCooldown(t *testing.T) {
 		t.Fatal(result, err)
 	}
 }
+
+func TestIncompatibleLegacyPaymentKeptForReview(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	o := readyOrder(t, s, "legacy-large")
+	if err := s.DB().Model(o).Update("pay_units", amount.MaxMall).Error; err != nil {
+		t.Fatal(err)
+	}
+	syncAttemptFixture(t, s)
+	tx := evidence(o, "large-receipt")
+	tx.Units = amount.MaxMall
+	if result, err := s.Process(ctx, tx, ""); err != nil || result != "invalid_payment" {
+		t.Fatal(result, err)
+	}
+	var saved model.Transaction
+	if err := s.DB().First(&saved, "provider=? AND event_id=?", tx.Provider, tx.EventID).Error; err != nil || saved.State != model.Confirmed || saved.OrderID != nil {
+		t.Fatal(saved, err)
+	}
+	var n int64
+	if err := s.DB().Model(&model.Callback{}).Where("order_id=?", o.ID).Count(&n).Error; err != nil || n != 0 {
+		t.Fatal(n, err)
+	}
+}

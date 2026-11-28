@@ -538,11 +538,13 @@ func (h *Handlers) AdminAuth() gin.HandlerFunc {
 			if c.Request.Body != nil {
 				if err := parseRequestForm(c, 1<<20); err != nil {
 					var maxErr *http.MaxBytesError
+					c.Abort()
 					if errors.As(err, &maxErr) {
-						c.Abort()
 						c.String(http.StatusRequestEntityTooLarge, "请求内容过大，请精简后重试")
-						return
+					} else {
+						c.String(http.StatusBadRequest, "表单格式无效，请刷新后重试")
 					}
+					return
 				}
 			}
 			token := c.PostForm("csrf")
@@ -631,8 +633,10 @@ func (h *Handlers) AdminLoginSubmit(c *gin.Context) {
 			var maxErr *http.MaxBytesError
 			if errors.As(err, &maxErr) {
 				c.String(http.StatusRequestEntityTooLarge, "请求内容过大，请重试")
-				return
+			} else {
+				c.String(http.StatusBadRequest, "表单格式无效，请刷新后重试")
 			}
+			return
 		}
 	}
 	auth := h.currentAdmin()
@@ -1231,6 +1235,7 @@ func (h *Handlers) AdminOrders(c *gin.Context) {
 	}
 	renderHTML(c, 200, "admin_orders.html", gin.H{"Base": h.adminBase(c, "orders", "订单"), "Orders": orders, "Page": page, "Prev": max(1, page-1), "Next": page + 1, "Query": c.Query("q")})
 }
+
 // logger returns the configured logger or slog.Default when unset (e.g., direct handler tests).
 func (h *Handlers) logger() *slog.Logger {
 	if h.log != nil {
@@ -1246,7 +1251,7 @@ func (h *Handlers) AdminCloseOrder(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Info("管理员关闭订单", "trade_id", no, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
+	h.logger().Info("管理员关闭订单", "trade_ref", tradeLogRef(no), "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("订单已关闭"))
 }
 
@@ -1338,7 +1343,7 @@ func (h *Handlers) AdminRetryNotify(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Warn("管理员重新通知商城", "trade_id", no, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
+	h.logger().Warn("管理员重新通知商城", "trade_ref", tradeLogRef(no), "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("商户通知已重新入队，将按原订单号发送"))
 }
 
@@ -1370,7 +1375,7 @@ func (h *Handlers) AdminReconcilePayment(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Warn("管理员按已验证到账证据补单", "trade_id", no, "provider", provider, "event_id", eventID, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
+	h.logger().Warn("管理员按已验证到账证据补单", "trade_ref", tradeLogRef(no), "provider", provider, "event_id", eventID, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("补单核销已完成，并已创建商户通知任务"))
 }
 
@@ -1381,7 +1386,7 @@ func (h *Handlers) AdminHistoricalScan(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Info("管理员提交历史到账补扫", "trade_id", no, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
+	h.logger().Info("管理员提交历史到账补扫", "trade_ref", tradeLogRef(no), "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("历史到账补扫任务已加入队列。待补扫完成后请核对下方到账证据；已取消订单仅记录证据，不会自动补单"))
 }
 
@@ -1410,7 +1415,7 @@ func (h *Handlers) AdminRecordRefund(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, target+url.QueryEscape(err.Error())+"&t=err")
 		return
 	}
-	h.logger().Warn("管理员登记取消到账的外部退款凭证", "trade_id", no, "provider", provider, "event_id", eventID, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
+	h.logger().Warn("管理员登记取消到账的外部退款凭证", "trade_ref", tradeLogRef(no), "provider", provider, "event_id", eventID, "operator", c.GetString("admin_user"), "ip", c.ClientIP())
 	c.Redirect(http.StatusSeeOther, target+url.QueryEscape("退款凭证已保存，请确认原付款账户已收到退款"))
 }
 

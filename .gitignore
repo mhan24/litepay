@@ -1,5 +1,6 @@
 # 数据与密钥
 data/
+*.key
 *.db
 *.db-wal
 *.db-shm
